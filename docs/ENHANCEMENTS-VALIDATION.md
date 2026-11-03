@@ -25,13 +25,13 @@ Gameplay hook coverage, all three Autobots, every equipment item, deaths, and ev
 
 The hardware bridge passed real-GPU tests for native/4x rasterization, additional subpixel detail, FXAA switching, rendered VRAM readback, a full 4 MiB VRAM round trip, and 32/24/16/8/4-bit transfer layouts including odd packed-nibble boundaries.
 
-The first live hardware run applied 1920x1080 host output and produced actual scaled menu/hub targets, including 2048x1784 and 2560x1792. It matched the baseline guest counters through the warp gate, then stalled during level loading. Investigation found that the existing loading-vortex workaround was restricted to the literal `PGS` environment value. The enhancement normalizes the configured backend and permits both backends that implement the complete-frame hold tag. A successful representative-level retest is required before calling hardware graphics qualified.
+The first live hardware run applied 1920x1080 host output and produced actual scaled menu/hub targets, including 2048x1784 and 2560x1792. It matched the baseline guest counters through the warp gate, then stalled during level loading. Investigation found that the existing loading-vortex workaround was restricted to the literal `PGS` environment value. The enhancement normalizes the configured backend and permits both backends that implement the complete-frame hold tag. The subsequent accelerated representative-level retest passed, as recorded below; image-quality qualification remains incomplete.
 
 Normal hardware shutdown and parse-only shutdown were tested after correcting the DLL lifetime ordering. A forced watchdog exit is distinct from orderly shutdown.
 
 ## Remaining release gates
 
-Representative hardware gameplay, resolution/AA switching, and visual comparison with PCSX2 remain required. Optional static VU acceleration needs matching OFF/ON hash traces and guest counters before it can be recommended as a default. No full-campaign, sustained 30 fps, or true 60 Hz simulation claim is made by the results above.
+Representative hardware gameplay and resolution/AA switching have passed. Visual comparison with PCSX2 remains required. Optional static VU acceleration needs matching OFF/ON hash traces and guest counters before it can be recommended as a default. No full-campaign, sustained 30 fps, or true 60 Hz simulation claim is made by the results above.
 
 ## Subsequent accelerated checks
 
@@ -42,3 +42,23 @@ The accelerated hardware route passed through the Amazon level, switched interna
 A second Autobot exploration route passed with a 100-point health resource, energy hooks active and movement restored after disabling the multiplier. No enemy-hit event was observed; outgoing damage remains validated by the native fixture only, not live combat.
 
 Per the user's updated instructions, tests use visible windows and accelerated builds only. The unaccelerated hash comparison was stopped; no complete OFF/ON hash-gate claim is made. Earlier unaccelerated runs are historical evidence only. Full campaign reliability, all destinations/equipment, remaining character coverage and true 60 Hz simulation remain unqualified.
+
+## Player confirmation
+
+On 2026-11-04, the player confirmed taking no damage in live enemy encounters with infinite health enabled, and confirmed that the energy cheat works. This is player-observed evidence in addition to the automated checks. It establishes incoming-damage protection; it does not measure the outgoing damage multiplier.
+
+## Reloaded mission selection
+
+A visible accelerated hardware-renderer run reloaded the Trainer card and successfully selected all eight destinations: Amazon, Antarctica, Deep Amazon, Mid-Atlantic, Alaska, Starship, Pacific Island and Cybertron. Captures were inspected individually. Availability remained 255, completion remained 0, and the normal seed card was unchanged. This verifies destination selection after reload; it does not yet verify entering or completing every destination.
+
+## Third-character energy behavior
+
+The third Autobot route completed with a 142-point health resource, robot and vehicle states observed, and movement restored from 1.5 to 1. No player-damage or outgoing enemy-hit event was recorded in that route. While firing in robot mode, sampled energy dropped between refills; vehicle samples showed full energy. The player confirmed that weapons reload instantly and requested preserving this behavior. The energy implementation is unchanged; this evidence supports instant replenishment, not a claim that the displayed counter never decreases.
+
+## Combined hardware and trainer check
+
+The visible accelerated `trainer-hardware-1080-01` route passed (11,210 vsyncs, 5,004 pad reads, 3,479 CD operations, 218.6 seconds reported by the script). Hardware Vulkan rendered the captured Amazon gameplay image at 2048x1788 with 4x internal scale; the host output surface was configured and allocated at 1920x1080. The harness's ordinary 640x447 screenshot is a reduced comparison image; its `.internal.png` capture retains the scaled image.
+
+Aftershock energy fell from 1 to 0 with the cheat off, replenished to 1 while firing with it on, and fell to 0 again after disabling it. One health subtraction was blocked. Robot-to-vehicle-to-robot transitions completed; movement scale returned from 1.5 to 1. No outgoing damage event was observed. Field/combing artifacts remain visible, so higher resolution does not establish complete visual correctness.
+
+The player's existing local settings now select hardware Vulkan, 4x internal scale, and 1920x1080 output. Existing gameplay and input preferences were preserved. The energy implementation was not changed.

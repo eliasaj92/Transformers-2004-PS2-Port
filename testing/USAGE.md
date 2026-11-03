@@ -8,7 +8,7 @@ From PowerShell, use explicit private paths:
 ./testing/run_test.ps1 -Exe ../private-game/ps2EntryRunner.exe -Elf ../private-disc/SLUS_206.68 -Iso ../private-disc/game.iso -Script ./testing/mvp/level_mvp.tfs -Work ../private-runs/mvp-01 -Seconds 1200
 ```
 
-`-McSeed` accepts your own card folder and copies it to a fresh card. No seeds are included. `-Env` accepts semicolon-separated `KEY=value` overrides. Output/card/script paths, hidden window and silent audio remain enforced. Set `PS2X_SCRIPT_PARSE_ONLY=1` to print the parsed program and exit before guest execution. Optional `-BusyFlag` paths delay launch while another workload is active; `-SlotFile` holds an exclusive shared admission file throughout the run. Participants must use the same slot path. The portable wrapper does not integrate with private workstation admission helpers.
+`-McSeed` accepts your own card folder and copies it to a fresh card. No seeds are included. `-Env` accepts semicolon-separated `KEY=value` overrides. Output/card/script paths and silent audio remain enforced. Test windows are visible. For accelerated runs, pass `PS2X_VU1_AOT=1;PS2X_VU1_AOT_STATIC=1` with a build containing the private static VU package. Set `PS2X_SCRIPT_PARSE_ONLY=1` to print the parsed program and exit before guest execution. Optional `-BusyFlag` paths delay launch while another workload is active; `-SlotFile` holds an exclusive shared admission file throughout the run. Participants must use the same slot path. The portable wrapper does not integrate with private workstation admission helpers.
 
 | Exit | Meaning |
 |---|---|
