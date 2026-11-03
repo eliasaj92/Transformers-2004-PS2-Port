@@ -1,0 +1,8 @@
+{
+  "pcsx2_url": "https://github.com/PCSX2/pcsx2.git",
+  "pcsx2_revision": "646df006a4688063e56c0826e7ea4b8bb0c112c4",
+  "windows_dependencies_url": "https://github.com/PCSX2/pcsx2-windows-dependencies/releases/download/latest-windows-dependencies/pcsx2-windows-dependencies.7z",
+  "windows_dependencies_sha256": "a3133c7841e8fbdab6f4d1d5ad8efec31fb1ecda95ffed39f4d1f36bb7eb0007",
+  "kzgs_url": "https://github.com/drakolordx7/KillzoneRecomp",
+  "kzgs_revision": "aa5d3ae6ab5bf57c85794fe728a36b1d9882ba25"
+}

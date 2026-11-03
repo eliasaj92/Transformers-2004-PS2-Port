@@ -71,7 +71,7 @@ try {
     $vars['PS2X_SCRIPT_RESULT']=Join-Path $workPath 'script_result.json'
     $vars['PS2X_DUMP_DIR']=$workPath
     $vars['PS2X_AUDIO']='0'
-    $vars['PS2X_HIDDEN_WINDOW']='1'
+    $vars['PS2X_HIDDEN_WINDOW']='0'
     $vars['PS2X_STALL_VS']='600'
     foreach ($key in $vars.Keys) {
         $saved[$key]=[Environment]::GetEnvironmentVariable($key,'Process')
@@ -81,7 +81,7 @@ try {
     Copy-Item -LiteralPath $Script -Destination (Join-Path $workPath 'route.tfs')
     'elapsed_seconds,total_cpu_percent' | Set-Content (Join-Path $workPath 'cpu.csv')
     $timer=[Diagnostics.Stopwatch]::StartNew()
-    $child=Start-Process -FilePath $Exe -ArgumentList ('"'+$Elf+'"') -WorkingDirectory $workPath -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $workPath 'stdout.log') -RedirectStandardError (Join-Path $workPath 'stderr.log')
+    $child=Start-Process -FilePath $Exe -ArgumentList ('"'+$Elf+'"') -WorkingDirectory $workPath -WindowStyle Normal -PassThru -RedirectStandardOutput (Join-Path $workPath 'stdout.log') -RedirectStandardError (Join-Path $workPath 'stderr.log')
     # Retain the process handle so ExitCode remains available after a short run.
     [void]$child.Handle
     try { if (-not $child.HasExited) { $child.PriorityClass='BelowNormal' } }

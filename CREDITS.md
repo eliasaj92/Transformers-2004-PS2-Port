@@ -1,5 +1,10 @@
 # Credits
 
+- drakolordx7 / KillzoneRecomp: standalone PCSX2 GS integration (`deps/kzgs`,
+  revision `aa5d3ae6ab5bf57c85794fe728a36b1d9882ba25`). PCSX2 contributors:
+  hardware renderers and GS memory implementation used by the optional HWGS backend.
+  See `NOTICE/THIRD_PARTY.md` for licenses and pinned external inputs.
+
 ## Release-preparation research acknowledgements
 
 - **rac1-native-game**, project contributors, MIT: resumable setup, dependency fingerprints and generation freshness checks informed our independently authored setup workflow. The recorded upstream URL is in [DECISIONS.md](docs/DECISIONS.md). This acknowledgement does not claim that upstream game code or generated data was copied. Preserve the upstream MIT notice if substantial source is reused later; independently bundled dependencies can have other licenses.

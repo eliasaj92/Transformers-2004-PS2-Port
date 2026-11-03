@@ -13,6 +13,7 @@ int ps2PadActiveGamepad(); // TEMP(transformers): runtime render-thread selector
 #include "ps2_runtime.h"
 #include "runtime/ps2_pc_menu_state.h"
 #include "runtime/ps2_settings.h"
+#include "runtime/ps2_trainer.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -57,8 +58,8 @@ namespace st = ps2x::settings;
 
 namespace
 {
-    const char *const kPageNames[] = {"Display", "Aspect", "Presentation", "Frame rate", "Audio", "Controls", "Debug"};
-    constexpr int kPageCount = 7;
+    const char *const kPageNames[] = {"Display", "Aspect", "Presentation", "Frame rate", "Audio", "Controls", "Trainer", "Debug"};
+    constexpr int kPageCount = 8;
     static_assert(kPageCount == static_cast<int>(st::Page::Count), "page list");
 
     std::map<int,std::array<int,3>> g_desktopModes;
@@ -915,6 +916,15 @@ void PS2PcMenu::drawPage(int page, PS2Runtime &runtime)
 
     if (page == static_cast<int>(st::Page::Audio)) ImGui::TextWrapped("Music, effects, dialogue and sound mode are saved by the game. Use its Audio Options.");
     if (page == static_cast<int>(st::Page::Controls)) ImGui::TextWrapped("Select a keyboard or pad binding to replace it. Vibration and Invert Y belong to the game's Options.");
+    if (page == static_cast<int>(st::Page::Trainer)) {
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", ps2x::trainer::status().c_str());
+        ImGui::BeginDisabled(!ps2x::trainer::canUnlock());
+        if (ImGui::Button("Unlock all Mini-Cons")) ps2x::trainer::requestUnlock(ps2x::trainer::Unlock::MiniCons);
+        if (ImGui::Button("Unlock all levels")) ps2x::trainer::requestUnlock(ps2x::trainer::Unlock::Levels);
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("Unlocks require the Trainer profile and the hub. Resume after selecting an unlock, then save in the game.");
+    }
 
 }
 

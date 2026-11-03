@@ -13,6 +13,8 @@
 
 </div>
 
+**Local enhancement branch:** adds an experimental Vulkan hardware GS backend with internal-resolution scaling and FXAA, player trainer controls, and isolated Trainer saves with hub unlock actions. See [build and use the enhancements](docs/ENHANCEMENTS.md) and [actual validation results](docs/ENHANCEMENTS-VALIDATION.md). The v0.8.3 notes below describe the upstream starting point.
+
 > [!IMPORTANT]
 > **This repository contains no game files and no code generated from them.** There is no disc image, executable, IRX module, asset, generated C++, compiled VU1 package, save or memory card here. You need your own legally obtained copy of the NTSC-U disc (SLUS-20668). Setup reads it on your machine and keeps everything it extracts or generates in a private folder outside this repository.
 

@@ -6,6 +6,7 @@
 #include "Pad.h"
 #include "../../ps2_pad_map.h" // TEMP(transformers): qualification - DS2 pressure byte order
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_trainer.h"
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -902,6 +903,7 @@ namespace ps2_stubs
         ps2TraceGuestRangeWrite(rdram, dataAddr, 32u, "scePadRead", ctx);
         ps2dbg::padReads.fetch_add(1, std::memory_order_relaxed);
         ps2FrameTimeNote(); // TEMP(transformers) qualification
+        ps2x::trainer::service(rdram, ctx, runtime);
         if (!readPadPortData(port, slot, runtime, data, dataAddr))
         {
             setReturnS32(ctx, 0);

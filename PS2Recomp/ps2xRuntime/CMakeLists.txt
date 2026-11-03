@@ -394,6 +394,8 @@ add_library(ps2_runtime STATIC
     src/lib/gs/gs_frontend.cpp
     src/lib/gs/gs_cpu_backend.cpp
     src/lib/gs/gs_pgs_backend.cpp
+    src/lib/gs/gs_hw_backend.cpp
+    src/lib/ps2_trainer.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
@@ -714,6 +716,23 @@ if(PS2X_WITH_PGS)
     target_compile_definitions(ps2_runtime PRIVATE PS2X_WITH_PGS=1)
 endif()
 
+option(PS2X_WITH_HWGS "Build the experimental PCSX2 hardware GS backend (Windows x64)" OFF)
+if(PS2X_WITH_HWGS)
+    if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        message(FATAL_ERROR "PS2X_WITH_HWGS currently requires Windows x64")
+    endif()
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../deps/hwgs" "${CMAKE_BINARY_DIR}/hwgs")
+    target_link_libraries(ps2_runtime PRIVATE tf_hwgs)
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_WITH_HWGS=1)
+    if(TARGET ps2EntryRunner)
+        add_custom_command(TARGET ps2EntryRunner POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:tf_hwgs>" "$<TARGET_FILE_DIR:ps2EntryRunner>"
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory "$<TARGET_FILE_DIR:tf_hwgs>/resources" "$<TARGET_FILE_DIR:ps2EntryRunner>/resources"
+            VERBATIM)
+        kzgs_stage_resources(ps2EntryRunner)
+    endif()
+endif()
+
 # Locally generated VU1 AOT: the compile option and PS2X_VU1_AOT runtime knob default off.
 # Game-derived packages stay outside the source checkout and are supplied explicitly.
 option(PS2X_WITH_VU1_AOT "Compile private local VU1 AOT sources" OFF)
@@ -776,7 +795,11 @@ if(PS2X_WITH_VU1_STATIC)
         message(FATAL_ERROR "Set PS2X_VU1_STATIC_DIR to your locally generated package")
     endif()
     include("${PS2X_VU1_STATIC_DIR}/sources.cmake")
-    set_property(GLOBAL APPEND PROPERTY JOB_POOLS ps2x_vu1_static_pool=2)
+    set(PS2X_VU1_STATIC_JOBS 2 CACHE STRING "Parallel jobs for locally generated VU1 code")
+    if(NOT PS2X_VU1_STATIC_JOBS MATCHES "^[1-9][0-9]*$" OR PS2X_VU1_STATIC_JOBS GREATER 16)
+        message(FATAL_ERROR "PS2X_VU1_STATIC_JOBS must be between 1 and 16")
+    endif()
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS "ps2x_vu1_static_pool=${PS2X_VU1_STATIC_JOBS}")
     add_library(ps2_vu1_static OBJECT ${PS2X_VU1_STATIC_SOURCES})
     target_compile_features(ps2_vu1_static PRIVATE cxx_std_20)
     target_include_directories(ps2_vu1_static BEFORE PRIVATE

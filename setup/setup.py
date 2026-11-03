@@ -88,10 +88,12 @@ def main():
         run(executable(tools,'ps2_recomp'),mapped,cwd=attempt)
         write(manifest,{'schema':1,'dependencies':dependencies(),'iso_sha256':fingerprint['iso_sha256'],'generated_dir':output.relative_to(work).as_posix(),'outputs':inventory(work,[elf,work/'IOP',work/'isomap.tsv',work/'runtime-files.json',index,attempt])})
     run('cmake','-S',ROOT/'PS2Recomp','-B',game,'-G','Ninja','-DCMAKE_BUILD_TYPE=RelWithDebInfo','-DPS2X_BUILD_RECOMP=OFF','-DPS2X_BUILD_ANALYZER=OFF','-DPS2X_BUILD_TEST=OFF','-DPS2X_BUILD_STUDIO=OFF','-DPS2X_BUILD_RUNNER=ON',f'-DPS2X_GENERATED_DIR={output}',f'-DPS2X_GENERATION_MANIFEST={manifest}','-DPS2X_WITH_VU1_AOT=OFF','-DPS2X_WITH_PGS=ON',*compiler_args,*effective_cmake,'-DPS2X_PGO_PHASE=OFF')
-    run('cmake','--build',game,'--target','ps2EntryRunner','--parallel','4')
+    jobs=max(1,min(32,int(os.environ.get('PS2X_BUILD_JOBS','4'))))
+    run('cmake','--build',game,'--target','ps2EntryRunner','--parallel',str(jobs))
     folder=work/'game';folder.mkdir(exist_ok=True)
     exe=executable(game,'ps2EntryRunner');shutil.copy2(exe,folder/exe.name)
     for dll in exe.parent.glob('*.dll'):shutil.copy2(dll,folder/dll.name)
+    if (exe.parent/'resources').is_dir():shutil.copytree(exe.parent/'resources',folder/'resources',dirs_exist_ok=True)
     shutil.copy2(index/'vu1known.bin',folder/'vu1known.bin')
     cache=game/'CMakeCache.txt'
     static_vu1=cache.exists() and any(line in ('PS2X_WITH_VU1_STATIC:BOOL=ON','PS2X_WITH_VU1_STATIC:BOOL=TRUE','PS2X_WITH_VU1_STATIC:BOOL=1') for line in cache.read_text().splitlines())

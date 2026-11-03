@@ -87,7 +87,13 @@ namespace
     const char *const pc1enum4[] = {"pillarbox", "stretch", nullptr};
     const char *const pc1enum5[] = {"stretch", "centered", "anchored", nullptr};
     const char *const pc1enum6[] = {"fsr1", "cas", "bilinear", "nearest", nullptr};
+#ifdef PS2X_WITH_HWGS
+    const char *const pc1enum7[] = {"pgs", "cpu", "hwgs", nullptr};
+    const char *const backendLabels[] = {"parallel-gs (reference)","Software (reference)","Vulkan hardware (experimental)",nullptr};
+#else
     const char *const pc1enum7[] = {"pgs", "cpu", nullptr};
+    const char *const backendLabels[] = {"parallel-gs (reference)","Software (reference)",nullptr};
+#endif
     const char *const pc1enum8[] = {"emulated", "native", nullptr};
     const char *const pc1enum9[] = {"faithful", "pcplus", nullptr};
     const char *const pc1enum10[] = {"auto","match_display","1x","1.25x","1.5x","1.75x","2x","2.25x","2.5x","2.75x","3x","3.25x","3.5x","3.75x","4x",nullptr};
@@ -115,11 +121,19 @@ namespace
     const char *const pc1cullLabels[]={"Off","On",nullptr};
     const char *const pc1cullEnv[]={"0","1",nullptr};
     const char *const pc1output[]={"60","30",nullptr};
-    const char *const pc1res[]={"desktop","1280x800@60","1920x1200@60","2560x1080@60","3440x1440@60","3840x2160@60",nullptr};
+    const char *const pc1res[]={"desktop","1280x800@60","1920x1080@60","1920x1200@60","2560x1080@60","3440x1440@60","3840x2160@60",nullptr};
     const char *const resoptSSAA[]={"1","2","4","8","16",nullptr};
+    const char *const trainerDamage[]={"1","2","4","8",nullptr};
+    const char *const trainerSpeed[]={"1","1.25","1.5","2",nullptr};
+    const char *const trainerProfile[]={"normal","trainer",nullptr};
     const char *const resoptSSAAL[]={"1x1 (Off)","1x2 (2 samples)","2x2 (4 samples)","2x4 (8 samples)","4x4 (16 samples)",nullptr};
     const std::vector<Def> &registry() {
         static const std::vector<Def> s_defs = {
+            {"trainer.profile",T::Enum,"normal",0,0,0,trainerProfile,nullptr,nullptr,nullptr,A::Restart,P::Trainer,nullptr,"Save profile","Trainer starts with a copy of your last saved normal card. Profile changes take effect on restart.",Scope::Guest},
+            {"trainer.infinite_health",T::Bool,"off",0,0,0,nullptr,nullptr,nullptr,nullptr,A::NextFrame,P::Trainer,"trainer-health","Infinite health","Prevents damage to the player's health. Disable to restore ordinary damage.",Scope::Guest},
+            {"trainer.unlimited_energy",T::Bool,"off",0,0,0,nullptr,nullptr,nullptr,nullptr,A::NextFrame,P::Trainer,"trainer-energy","Unlimited weapon energy","Prevents the player's weapons from consuming energy.",Scope::Guest},
+            {"trainer.damage_multiplier",T::Enum,"1",0,0,0,trainerDamage,nullptr,nullptr,nullptr,A::NextFrame,P::Trainer,"trainer-damage","Outgoing damage multiplier","Applies only to damage caused by the player.",Scope::Guest},
+            {"trainer.movement_multiplier",T::Enum,"1",0,0,0,trainerSpeed,nullptr,nullptr,nullptr,A::NextFrame,P::Trainer,"trainer-movement","Movement speed multiplier","Changes the player's movement without changing the game clock.",Scope::Guest},
             {"game.disc_image", T::String, "", 0, 0, 0, nullptr, nullptr, "PS2X_CD_IMAGE", nullptr, A::Restart, P::Debug, nullptr, "disc image", "Host PC setting.", Scope::Guest},
             {"display.window_mode", T::Enum, "windowed", 0, 0, 0, pc1enum0, nullptr, nullptr, nullptr, A::Live, P::Display, nullptr, "window mode", "Host PC setting."},
             {"display.window_width", T::Int, "0", 0, 7680, 64, nullptr, nullptr, nullptr, nullptr, A::Live, P::Display, nullptr, "window width", "Host PC setting."},
@@ -141,7 +155,9 @@ namespace
             {"display.brightness", T::Float, "1.0", 0.5, 2, 0.05, nullptr, nullptr, nullptr, nullptr, A::Restart, P::Presentation, "post-chain", "brightness", "Host PC setting."},
             {"display.gamma", T::Float, "1.0", 0.5, 2, 0.05, nullptr, nullptr, nullptr, nullptr, A::Restart, P::Presentation, "post-chain", "gamma", "Host PC setting."},
             {"display.ui_scale", T::Float, "auto", 0.75, 3, 0.25, nullptr, nullptr, nullptr, nullptr, A::Live, P::Display, nullptr, "ui scale", "Host PC setting."},
-            {"renderer.backend", T::Enum, "cpu", 0, 0, 0, pc1enum7, nullptr, "PS2X_GS_BACKEND", nullptr, A::Restart, P::Presentation, nullptr, "backend", "Host PC setting."},
+            {"renderer.backend", T::Enum, "cpu", 0, 0, 0, pc1enum7, backendLabels, "PS2X_GS_BACKEND", nullptr, A::Restart, P::Presentation, nullptr, "Graphics renderer", "Restart to switch renderers. Hardware mode supports higher internal resolutions."},
+            {"renderer.hw_scale",T::Int,"4",1,8,1,nullptr,nullptr,"PS2X_HWGS_SCALE",nullptr,A::Live,P::Presentation,"hardware-gs","Hardware internal scale","Scales GS render targets in each dimension. 4x covers 1080p; output resolution is separate."},
+            {"renderer.hw_fxaa",T::Bool,"off",0,0,0,nullptr,nullptr,"PS2X_HWGS_FXAA",nullptr,A::Live,P::Presentation,"hardware-gs","Hardware FXAA","Optional post-process anti-aliasing. Resolution scaling also provides supersampling when downsampled."},
             {"renderer.renderer", T::Enum, "emulated", 0, 0, 0, pc1enum8, nullptr, nullptr, nullptr, A::Restart, P::Presentation, "native", "renderer", "Needs native renderer."},
             {"renderer.native_mode", T::Enum, "faithful", 0, 0, 0, pc1enum9, nullptr, nullptr, nullptr, A::Restart, P::Presentation, "native", "native mode", "Needs native renderer."},
             {"renderer.internal_resolution", T::Enum, "auto", 0, 0, 0, pc1enum10, nullptr, nullptr, nullptr, A::Restart, P::Presentation, "native", "internal resolution", "Needs native renderer."},

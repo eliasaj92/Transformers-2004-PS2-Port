@@ -11,6 +11,9 @@
 
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_settings.h"
+#include "runtime/ps2_trainer.h"
+#include "../ps2_trainer_diagnostics.h"
 #include "../debug_counters.h"
 
 #include <algorithm>
@@ -28,6 +31,15 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 extern void (*g_ps2xCdReadHook)(uint32_t lsn, uint32_t sectors); // TEMP(transformers): ps2xIOP iop_cdvd.cpp (sceCdRead)
 
@@ -41,6 +53,17 @@ namespace ps2_test
 
         constexpr const char *kResultNames[] = {"PASS", "RUNTIME_ERROR", "STALL", "FAIL",
                                                 "TIMEOUT", "CRASH", "SCRIPT_ERROR", "ABORTED"};
+
+        [[noreturn]] void exitBeforeGuest(PS2Runtime& runtime, int code)
+        {
+            // _Exit on Windows still unloads DLLs. Close the hardware GS while its
+            // worker/driver threads are alive, before DLL static objects are destroyed.
+            // This path runs during init, before any guest execution.
+            if (ps2x::settings::get("renderer.backend") == "hwgs")
+                runtime.gs().setRasterBackend(nullptr);
+            std::fflush(nullptr);
+            std::_Exit(code);
+        }
 
         struct ButtonName
         {
@@ -91,6 +114,9 @@ namespace ps2_test
             Stick, // TEMP(transformers) qualification: held analog stick values
             Mark,
             Dump,
+            Setting,
+            Unlock,
+            TrainerProbe,
             Pass,
             Fail,
         };
@@ -596,6 +622,26 @@ namespace ps2_test
                     requestDump(s.arg, true);
                     advance();
                     continue;
+                case Op::Setting: {
+                    const auto eq=s.arg.find('=');
+                    const auto key=s.arg.substr(0,eq),value=s.arg.substr(eq+1);
+                    const auto* definition=ps2x::settings::find(key.c_str());
+                    if(!definition || !ps2x::settings::available(*definition)) {
+                        finish(kExitFail,"setting unavailable in this build/backend: "+key);return;
+                    }
+                    if(ps2x::settings::get(key.c_str())!=value && !ps2x::settings::set(key.c_str(),value)) {
+                        finish(kExitFail,"setting rejected: "+s.arg);return;
+                    }
+                    slog("[script] setting %s",s.arg.c_str());advance();continue;
+                }
+                case Op::Unlock:
+                    if(!ps2x::trainer::requestUnlock(s.arg=="minicons"?ps2x::trainer::Unlock::MiniCons:ps2x::trainer::Unlock::Levels)) {
+                        finish(kExitFail,"unlock rejected: requires Trainer profile and active hub");return;
+                    }
+                    advance();continue;
+                case Op::TrainerProbe:
+                    slog("[trainer:probe] %s",ps2x::trainer::diagnostics(E.rt->memory().getRDRAM()).c_str());
+                    advance();continue;
                 case Op::Pass:
                     finish(kExitPass, s.arg);
                     return;
@@ -1248,6 +1294,26 @@ namespace ps2_test
                         }
                     }
                 }
+                else if (kw == "setting")
+                {
+                    s.op=Op::Setting;s.arg=p.next();
+                    const auto eq=s.arg.find('=');const auto key=s.arg.substr(0,eq);
+                    const auto* def=ps2x::settings::find(key.c_str());
+                    // Harness changes only these implemented live settings. Startup settings
+                    // (especially save profiles) must be selected before boot in a private INI.
+                    const bool allowed=key=="trainer.infinite_health" || key=="trainer.unlimited_energy" ||
+                        key=="trainer.damage_multiplier" || key=="trainer.movement_multiplier" ||
+                        key=="renderer.hw_scale" || key=="renderer.hw_fxaa";
+                    if(eq==std::string::npos || !def || !allowed || eq+1==s.arg.size()) {
+                        err="setting needs an implemented trainer or hardware-renderer key=value";return false;
+                    }
+                }
+                else if (kw == "unlock")
+                {
+                    s.op=Op::Unlock;s.arg=lower(p.next());
+                    if(s.arg!="minicons" && s.arg!="levels"){err="unlock needs minicons or levels";return false;}
+                }
+                else if (kw == "trainer_probe") {s.op=Op::TrainerProbe;}
                 else if (kw == "mark" || kw == "dump")
                 {
                     s.op = (kw == "mark") ? Op::Mark : Op::Dump;
@@ -1437,6 +1503,9 @@ namespace ps2_test
                 return "mark " + s.arg;
             case Op::Dump:
                 return "dump " + s.arg;
+            case Op::Setting: return "setting " + s.arg;
+            case Op::Unlock: return "unlock " + s.arg;
+            case Op::TrainerProbe: return "trainer_probe";
             case Op::Pass:
                 return "pass " + s.arg;
             case Op::Fail:
@@ -1489,6 +1558,13 @@ namespace ps2_test
                     logLine(strf("[script] exit watchdog: run() did not return within 20 s, forcing exit %d", v));
                     std::fflush(nullptr);
                     ps2_vu1new::shutdown(); // TEMP(transformers): this exit bypasses static destructors
+#ifdef _WIN32
+                      // A failed run can be wedged inside a renderer worker. ExitProcess
+                      // (also used by _Exit) unloads DLLs after killing other threads;
+                      // driver destructors may then crash or deadlock. The watchdog has
+                      // already flushed the failure verdict and exhausted orderly exit.
+                      TerminateProcess(GetCurrentProcess(), static_cast<UINT>(v));
+#endif
                     std::_Exit(v);
                 }
                 const uint64_t cur = E.vsPub.load(std::memory_order_relaxed);
@@ -1556,7 +1632,7 @@ namespace ps2_test
                         true);
                 writeResultJson(kExitScriptError, err);
                 std::fflush(nullptr);
-                std::_Exit(kExitScriptError);
+                exitBeforeGuest(rt, kExitScriptError);
             }
         }
         else
@@ -1566,14 +1642,14 @@ namespace ps2_test
             {
                 logLine("[script] SCRIPT_ERROR PS2X_SCRIPT_PARSE_ONLY needs PS2X_SCRIPT", true);
                 std::fflush(nullptr);
-                std::_Exit(kExitScriptError);
+                exitBeforeGuest(rt, kExitScriptError);
             }
         }
         if (parseOnly)
         {
             printProgram();
             std::fflush(nullptr);
-            std::_Exit(kExitPass);
+            exitBeforeGuest(rt, kExitPass);
         }
 
         g_ps2xCdReadHook = &onCdRead;

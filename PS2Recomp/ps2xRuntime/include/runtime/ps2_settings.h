@@ -49,6 +49,7 @@ namespace ps2x::settings
         FrameRate,
         Audio,
         Controls,
+        Trainer,
         Debug, // shown only on the Debug page (which lists every setting anyway)
         Count,
     };

@@ -6,6 +6,8 @@ from pathlib import Path
 import argparse, hashlib, json, re, sys
 
 ALLOWED = {'.c','.cc','.cpp','.h','.hh','.hpp','.inl','.cmake','.txt','.md','.py','.ps1','.sh','.bat','.cmd','.json','.toml','.glsl','.vert','.frag','.comp','.inc','.def','.natvis','.yml','.yaml','.tfs','.gitignore','.gitmodules','.rst','.css','.html','.xml','.map','.conf','.patch','.diff','.cfg','.template','.list','.jinja','.j2','.m','.mm','.s','.S','.geom','.tesc','.tese','.license','.idl','.rc','.manifest','.awk','.bzl','.bazel','.gn','.gni','.td','.adoc','.rules','.pc','.xslt','.xsl','.hpp.in','.h.in'}
+ALLOWED.add('.hlsl')  # Reviewed source shaders in deps/kzgs; not compiled shader blobs.
+
 def reviewed_hash(table,path,digest):
     value=table.get(path,[])
     return digest in (value if isinstance(value,list) else [value])
@@ -42,9 +44,12 @@ def scan(root, policy_root=None):
         # Only inventoried approved comparison images are accepted.
         screenshot = (len(rel.parts) == 3 and rel.parts[:2] == ('docs', 'images')
                       and p.suffix == '.png' and rel.as_posix() in approved_images)
-        special=name.startswith(('license','copying','notice','authors','changelog','readme','cmakelists','makefile')) or name in {'.gitignore','.gitmodules','.clang-format','.editorconfig'} or rel.as_posix() == 'tools/git-hooks/pre-commit'
+        source_manifest=rel.as_posix()=='MANIFEST.sha256'
+        special=name.startswith(('license','copying','notice','authors','changelog','readme','cmakelists','makefile')) or name in {'.gitignore','.gitmodules','.clang-format','.editorconfig'} or rel.as_posix() == 'tools/git-hooks/pre-commit' or source_manifest
         if p.suffix not in ALLOWED and not special and not screenshot: errors.append(f'{rel}: unreviewed file type {p.suffix}')
         data=p.read_bytes()
+        if source_manifest and not re.fullmatch(rb'(?:[0-9a-f]{64}  [^\r\n\x00]+\r?\n)+',data):
+            errors.append(f'{rel}: invalid source hash inventory')
         if n>8*1024*1024 and not reviewed_hash(reviewed,rel.as_posix(),hashlib.sha256(data).hexdigest()): errors.append(f'{rel}: oversized unreviewed source ({n} bytes)')
         if screenshot and not data.startswith(b'\x89PNG\r\n\x1a\n'):
             errors.append(f'{rel}: screenshot exception requires PNG signature')

@@ -1,6 +1,6 @@
 # Choose settings for play
 
-v0.8.3 includes a PC settings menu (F1) and typed `settings.ini`, environment aliases and `--set key=value`. Precedence is built-in default < settings.ini < environment < --set; environment overrides are locked in the menu. Scripted tests ignore settings.ini unless PS2X_SETTINGS explicitly names a file. Ordinary play prefers settings beside the ELF and may use a per-user fallback; set PS2X_SETTINGS to an explicit private file, or `none` for defaults. The profiles below describe presentation choices; only wired features are available.
+v0.8.3 includes a PC settings menu (F10) and typed `settings.ini`, environment aliases and `--set key=value`. Precedence is built-in default < settings.ini < environment < --set; environment overrides are locked in the menu. Scripted tests ignore settings.ini unless PS2X_SETTINGS explicitly names a file. The launcher stores settings beside the persistent normal card's parent, outside generation folders; set PS2X_SETTINGS to an explicit private file, or `none` for defaults. The profiles below describe presentation choices; only wired features are available. See [experimental hardware graphics and trainer](ENHANCEMENTS.md) for this branch's additions.
 
 | Profile | Current-tree choices | Settings keys |
 |---|---|---|

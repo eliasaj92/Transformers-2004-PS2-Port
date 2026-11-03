@@ -78,6 +78,10 @@ class IndexTests(unittest.TestCase):
         p=base/'source.py';p.write_text('print(1)');git('add','.');git('commit','-m','fixture')
         def guard(): return subprocess.run([sys.executable,'-B',str(base/'tools/check_staged.py')],cwd=base,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode
         self.assertEqual(0,guard())
+        manifest=base/'MANIFEST.sha256'
+        manifest.write_text('0'*64+'  source.py\n');git('add','MANIFEST.sha256');self.assertEqual(0,guard())
+        manifest.write_text('unreviewed payload');git('add','MANIFEST.sha256');self.assertNotEqual(0,guard())
+        manifest.write_text('0'*64+'  source.py\n');git('add','MANIFEST.sha256')
         p.write_bytes(b'MZ\x00private');git('add','source.py');p.write_text('safe worktree')
         self.assertNotEqual(0,guard())
         git('add','source.py');p.write_bytes(b'MZ\x00unstaged');self.assertEqual(0,guard())

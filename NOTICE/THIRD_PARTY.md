@@ -1,5 +1,19 @@
 # Third-party notices
 
+The optional hardware GS adapter vendors `ext/kzgs` from drakolordx7/KillzoneRecomp,
+commit `aa5d3ae6ab5bf57c85794fe728a36b1d9882ba25`, under `deps/kzgs`.
+Its GPL-3.0 license is preserved at `NOTICE/licenses/killzone-recomp/LICENSE`.
+SMAA's separate notices remain in `deps/kzgs/third_party/smaa/LICENSE.txt` and
+`deps/kzgs/shaders/SMAA-LICENSE.txt`. The new `deps/hwgs` bridge and runtime
+adapter use GPL-3.0-or-later. PCSX2 source commit
+`646df006a4688063e56c0826e7ea4b8bb0c112c4` and its Windows dependency bundle
+are external build inputs; retain their notices if distributing a build.
+No Transformers assets, executable bytes, or generated game functions are bundled.
+The vendored `shim/EmuShims.cpp` identifies Transformers/SLUS-20668 instead of Killzone;
+`include/kzgs.h` and `src/kzgs.cpp` expose PCSX2's texture-inside-render-target fix.
+The additional transfer/readback and presentation adapter lives in `deps/hwgs`,
+which selects the pinned PCSX2 GameIndex's SLUS-20668 graphics fixes.
+
 Release-preparation research credits include rac1-native-game (MIT) and ps2-port-engine (MIT); see CREDITS.md. This task independently authored documentation and orchestration, rather than copying their source. If future changes import MIT source, retain the exact upstream copyright and permission notice for the imported revision. A research acknowledgement is not a substitute for a copied-source license notice.
 
 Their unmodified license texts are preserved as reference snapshots in `NOTICE/licenses/rac1_native/LICENSE` (Copyright 2026 Daino Selvatico) and `NOTICE/licenses/ps2_port_engine/LICENSE` (Copyright 2026 Daniel Gomes Vieira), copied from the existing offline research checkouts. These snapshots do not imply their implementations are bundled. License applicability for imported files still requires file-level review.

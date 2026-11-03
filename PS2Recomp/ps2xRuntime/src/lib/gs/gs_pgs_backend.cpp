@@ -65,6 +65,7 @@
 //                             horizontal edges shimmer by half a line at 60 Hz. 0 = always split (prototype behaviour).
 //   PS2X_FIELD60_NODROP=1     diagnostic: never drop a built frame (queue up to 128), so PS2X_FIELD60_DUMP sequences
 //                             are complete even when PNG export makes the render thread slow (pacing is then wrong)
+#include "runtime/gs/gs_hw_backend.h"
 bool ps2Field60Enabled();
 void ps2Field60LastPresented(uint64_t &seq, uint64_t &tick, int &kind);
 // gs_frontend.cpp GS::rawGuestVsync stores the guest vsync tick of the VBlankStart here (a reserved, never-read
@@ -489,6 +490,8 @@ namespace pipecache
 
 bool ps2Field60Enabled()
 {
+    const char* backend = std::getenv("PS2X_GS_BACKEND");
+    if (backend && (std::strcmp(backend,"hwgs")==0 || std::strcmp(backend,"HWGS")==0)) return false;
     return field60Cfg().mode != 0;
 }
 
@@ -515,11 +518,13 @@ bool ps2PgsSharpTake(std::vector<uint8_t>& pixels,uint32_t& w,uint32_t& h) {
     return !pixels.empty();
 }
 float ps2PgsNativeFrameWidth(float fallback) {
+    if (const auto w = ps2HwgsNativeWidth()) return float(w);
     const auto w=g_nativePresentedWidth.load(std::memory_order_acquire);
     return w ? float(w) : fallback;
 }
 int ps2PgsPresentedScene()
 {
+    if (const auto scene = ps2HwgsPresentedScene(); scene >= 0) return scene;
     return g_wsPresentedScene.load(std::memory_order_acquire);
 }
 
@@ -1998,7 +2003,8 @@ void ps2Field60LastPresented(uint64_t &seq, uint64_t &tick, int &kind) { seq = t
 bool ps2PgsSetSkipNative(bool) {return false;}
 bool ps2PgsLazyNativeCopy(std::vector<uint8_t>&,uint32_t,uint32_t) {return false;}
 bool ps2PgsSharpTake(std::vector<uint8_t>&,uint32_t&,uint32_t&){return false;}
-float ps2PgsNativeFrameWidth(float w){return w;}
+float ps2PgsNativeFrameWidth(float w){const auto hw=ps2HwgsNativeWidth();return hw?float(hw):w;}
+int ps2PgsPresentedScene(){return ps2HwgsPresentedScene();}
 #endif
 
 // TEMP(transformers) qualification: PS2X_FRAMETIME_LOG=<file> - one line per scePadRead (= one game frame, the unit of
@@ -2038,6 +2044,12 @@ void ps2ResolutionWakeGS() {
 std::unique_ptr<GSRasterBackend> CreateSelectedGSBackend()
 {
     const char *backend = std::getenv("PS2X_GS_BACKEND");
+    if (backend && (std::strcmp(backend,"hwgs")==0 || std::strcmp(backend,"HWGS")==0)) {
+        if (std::getenv("PS2X_GS_RAWREC") || std::getenv("PS2X_GS_RECORD"))
+            throw std::runtime_error("HWGS: GS recorders require the CPU backend");
+        std::cout << "[gs] backend HWGS (PCSX2 hardware, Vulkan)" << std::endl;
+        return CreateHardwareGSBackend();
+    }
     if (backend && (std::strcmp(backend, "PGS") == 0 || std::strcmp(backend, "pgs") == 0))
     {
 #ifdef PS2X_WITH_PGS

@@ -9,6 +9,7 @@ extern "C" void iopIdleStatsAdvance(unsigned long long) noexcept;
 #include "runtime/ps2_eeopt.h"
 // checkpoint fast path adapted from brad-richardson/PS2Recomp (GPL-3.0); budget design after snuri00/ps2-web-recomp (MIT)
 #include "runtime/ps2_settings.h"
+#include "runtime/ps2_trainer.h"
 #include "runtime/ps2_pc_live.h"
 #include "ps2_eeqos.h" // TEMP(transformers)
 #include "ps2_runtime.h"
@@ -24,6 +25,7 @@ extern "C" void iopIdleStatsAdvance(unsigned long long) noexcept;
 #include "ps2_remap_getter.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_hw_backend.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
@@ -471,6 +473,7 @@ void ps2ResolutionPresentShutdown();
 float ps2PresentDisplayAspect(); // PS2X_PRESENT_ASPECT: 4:3 by default, 0 = square pixels
 float ps2PresentFrameAspect(float frameWidth); // this frame's display aspect: PS2X_WIDESCREEN (FMV frames 4:3) else ps2PresentDisplayAspect
 
+static std::string s_internalDumpPath;
 static void ServiceTestScriptDump(const std::vector<uint8_t> &buffer, uint32_t height)
 {
     char path[512];
@@ -485,6 +488,8 @@ static void ServiceTestScriptDump(const std::vector<uint8_t> &buffer, uint32_t h
     img.mipmaps = 1;
     img.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
     ExportImage(img, path);
+    if(const auto* enabled=std::getenv("PS2X_CAPTURE_INTERNAL");enabled && std::strcmp(enabled,"1")==0)
+        s_internalDumpPath=std::filesystem::path(path).replace_extension(".internal.png").string();
     ps2PresentUpscaleNoteDump(path); // TEMP(transformers): PS2X_UPSCALE_CAPTURE
 }
 
@@ -780,7 +785,12 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static std::vector<uint8_t> pooledSharp; // TEMP(transformers): second sharp buffer, render-thread owned
     std::vector<uint8_t> localSharp;
     auto &sharpPixels=pdiet::rn()?pooledSharp:localSharp;uint32_t sharpW=0,sharpH=0;
-    const bool sharp=ps2PgsSharpTake(sharpPixels,sharpW,sharpH);
+    const bool sharp=ps2PgsSharpTake(sharpPixels,sharpW,sharpH) || ps2HwgsSharpTake(sharpPixels,sharpW,sharpH);
+    if(sharp && !s_internalDumpPath.empty()) {
+        Image capture{};capture.data=sharpPixels.data();capture.width=int(sharpW);capture.height=int(sharpH);
+        capture.mipmaps=1;capture.format=PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+        ExportImage(capture,s_internalDumpPath.c_str());s_internalDumpPath.clear();
+    }
     const uint32_t textureW=sharp?sharpW:FB_WIDTH,textureH=sharp?sharpH:FB_HEIGHT;
     ps2PresentTrace::Scope traceTexture(ps2PresentTrace::TextureUpload); // TEMP(transformers)
     ps2_perfscope::Scope dietUpload(ps2_perfscope::RnTexUpload); // TEMP(transformers)
@@ -1564,8 +1574,7 @@ bool PS2Runtime::initialize(const char *title)
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
-        // PS2X_HIDDEN_WINDOW=1: create the window without taking focus (unattended test runs must not steal maintainer's
-        // keyboard). Do NOT minimise: a minimised GL window throttles buffer swaps and stalls presentation pacing.
+        // Test windows remain visible; optionally avoid taking keyboard focus.
         const char *unfocusedEnv = std::getenv("PS2X_HIDDEN_WINDOW");
         const bool unfocused = unfocusedEnv && *unfocusedEnv && *unfocusedEnv != '0';
         SetConfigFlags(FLAG_WINDOW_RESIZABLE | (unfocused ? FLAG_WINDOW_UNFOCUSED : 0u));
@@ -3317,6 +3326,14 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (module.name == "SLUS_206.68" && m_cpuContext.pc == 0x00100008u)
         ps2_remap::installGetter(*this);
     if (module.name == "SLUS_206.68") { ps2_carstick::install(*this); ps2_menustick::enable(); }
+    if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2x::trainer::install(*this, elfCrc32);
+    {
+        // Profile selection follows executable validation and precedes guest execution.
+        // configureIoPathsFromElf runs before the CRC and initially resolves the normal card.
+        auto paths=getIoPaths();
+        paths.mcRoot=ps2x::trainer::selectSaveRoot(paths.mcRoot);
+        setIoPaths(paths);
+    }
 
     // TEMP(transformers): workaround for Ps2IsPhysicalSpecialAddress (include/runtime/ps2_address.h) only treating
     // [0x11004000, 0x1100C000) as VU memory. VU0 code (0x11000000) and VU1 data (0x1100C000) fall through to the
@@ -3350,12 +3367,17 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         }
     }
 
-    if (ps2Field60Enabled() && elfPath.find("SLUS_206.68") != std::string::npos)
+    const auto selectedRenderer=ps2x::settings::get("renderer.backend");
+    const bool hardwareOriginalSpeed=selectedRenderer=="hwgs" || selectedRenderer=="HWGS";
+    if ((ps2Field60Enabled() || hardwareOriginalSpeed) && elfPath.find("SLUS_206.68") != std::string::npos)
     {
         // GAME(transformers) TEMP(transformers) qualification I1a: PS2X_FIELD60 needs the game's 30 Hz mode (gp-0x576C = 1:
         // field 2 = t - 0.5; in 60 Hz mode gp-0x5A00 = 1.0 and both fields are the same pose). The load-balancing
         // governor sub_0025B670 drops to 60 Hz after gp-0x5764 (= 2, .sdata word, read only at 0x25bcdc, never written)
         // consecutive fast frames: raise the threshold so it never does (high_fps.md 2.3/5.1). PS2X_FIELD60_PIN30=0 skips.
+        // Hardware output uses complete frames, but retains the same original-speed
+        // governor setting as the reference launcher. Rendering resolution must not
+        // implicitly opt into the game's unqualified 60 Hz mode.
         const char *pin = std::getenv("PS2X_FIELD60_PIN30");
         if (!(pin && pin[0] == '0'))
         {
@@ -4972,7 +4994,7 @@ static uint32_t ps2Vu1CycleBudget()
 // callback itself still runs unchanged (frame counter, display flip, VU1 parameter write) and the guest timeline (EE cycles,
 // vsyncs, CD reads, MSCAL counters) is the same as with the knob off. A skipped vsync would show a cleared frame and the
 // first field of a pair an incomplete one, so those scanouts are not published (GS::rawGuestVsync tags the vsync,
-// GSPgsBackend::RawVsync skips the copy) and the window keeps the last complete vortex frame; needs PS2X_GS_BACKEND=PGS.
+// RawVsync skips the copy) and the window keeps the last complete vortex frame. Both PGS and HWGS preserve this tag.
 // The vortex always runs on 2 consecutive callbacks (both interlace fields) so a shown frame is never half old/half new.
 //   <N> (2..64): run 2 of every 2N callbacks (deterministic picture).
 //   auto[:<share>]: host-paced - after each pair, skip until the host time since that pair ended is at least
@@ -5006,10 +5028,11 @@ LoadSkipConfig ps2LoadSkipConfig()
         const char *e = std::getenv("PS2X_LOAD_SKIP");
         if (!e || !*e)
             return c;
-        const char *backendAuto = std::getenv("PS2X_GS_BACKEND");
-        if (std::strncmp(e, "auto", 4) == 0 && (!backendAuto || std::strcmp(backendAuto, "PGS") != 0))
+        const auto backendName = ps2x::settings::get("renderer.backend");
+        const bool canHoldScanout = backendName == "pgs" || backendName == "hwgs";
+        if (std::strncmp(e, "auto", 4) == 0 && !canHoldScanout)
         {
-            std::cerr << "[loadskip] PS2X_LOAD_SKIP ignored: needs PS2X_GS_BACKEND=PGS" << std::endl;
+            std::cerr << "[loadskip] PS2X_LOAD_SKIP ignored: backend cannot hold a complete loading frame" << std::endl;
             return c;
         }
         if (std::strncmp(e, "worker", 6) == 0) // TEMP(transformers) qualification
@@ -5046,12 +5069,11 @@ LoadSkipConfig ps2LoadSkipConfig()
                       << " of host time (pairs of fields)" << std::endl;
             return c;
         }
-        const char *backend = std::getenv("PS2X_GS_BACKEND");
-        if (!backend || std::strcmp(backend, "PGS") != 0)
+        if (!canHoldScanout)
         {
-            // The loading callback clears the frame every vsync; only the parallel-gs path can hold the last frame
-            // (GS::rawGuestVsync), so on the CPU GS the skipped vsyncs would flash black.
-            std::cerr << "[loadskip] PS2X_LOAD_SKIP ignored: needs PS2X_GS_BACKEND=PGS" << std::endl;
+            // The loading callback clears the frame every vsync. A backend without
+            // the GS::rawGuestVsync hold tag would flash black on skipped fields.
+            std::cerr << "[loadskip] PS2X_LOAD_SKIP ignored: backend cannot hold a complete loading frame" << std::endl;
             return c;
         }
         const unsigned long v = std::strtoul(e, nullptr, 10);
@@ -5935,6 +5957,18 @@ void PS2Runtime::run()
     if (gameThread.joinable())
     {
         gameThread.join();
+    }
+    if (ps2x::settings::get("renderer.backend") == "hwgs")
+    {
+        // main uses _Exit: stop VU producers and drain/close the hardware backend
+        // explicitly, before Windows unloads its DLL with driver threads gone.
+        if (m_memory.m_vif1Instant) m_memory.m_vif1Instant->abandon();
+        if (m_memory.m_vif1Stream && !m_memory.m_vif1Stream->ownsCurrentThread())
+            m_memory.m_vif1Stream->abandon();
+        m_gs.setVu1Fence({});
+        m_gs.setVu1Poll({});
+        m_gs.setVu1Ordered({});
+        m_gs.setRasterBackend(nullptr);
     }
     PS2IopTransport::finishAudioCapture(this); // TEMP(transformers): joined producer; flush before _Exit
     ps2_perfscope::stop();                                // TEMP(transformers) qualification: final TOTAL line
