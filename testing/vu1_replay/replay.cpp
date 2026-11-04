@@ -30,6 +30,7 @@ void grassReplayResolve(bool, bool);
 #ifdef TF_REPLAY_REFLECTION_CAPTURE
 void reflectionReplayInitialize();
 void reflectionReplayFinish();
+bool reflectionTailCapture(uint32_t, const uint8_t*, uint32_t, bool, bool);
 #endif
 namespace fs = std::filesystem;
 namespace {
@@ -117,6 +118,9 @@ void GS::processGIFPacket(const uint8_t*, uint32_t) {
 void PS2Memory::submitGifPacket(GifPathId path, const uint8_t* bytes, uint32_t count, bool drain, bool direct) {
 #ifdef TF_REPLAY_GRASS_TAIL
     if (grassTailCapture(uint32_t(path), bytes, count, drain, direct)) return;
+#endif
+#ifdef TF_REPLAY_REFLECTION_CAPTURE
+    if (reflectionTailCapture(uint32_t(path), bytes, count, drain, direct)) return;
 #endif
     if (packets.size()+count+16 > 64*1024*1024) throw std::runtime_error("Captured replay exceeds 64 MiB");
     const uint32_t metadata[] = {uint32_t(path), count, uint32_t(drain), uint32_t(direct)};

@@ -100,3 +100,12 @@ capture, compares final chain state/memory/cycles, and carries the candidate's
 pending pipeline state through the rest of each call. It declines active GIF
 transfers and batches of four or fewer vertices. This diagnostic does not enable
 a live readback path or establish a gameplay speedup.
+
+Add `--projection` to `test_gpu_reflection.py capture` to record the paired
+fast dual-texture stage as well. The same CMake option wraps both authenticated
+chains. `test_gpu_reflection_projection.py` provides `gpu`, `tail` and `draw`
+commands; see [their contract and examples](../../deps/hwgs/GPU_GEOMETRY.md#reflection-projection-and-resident-drawing).
+The paired tail mode poisons omitted lighting geometry until projection ends,
+checks complete accelerated state/output, and retains counts 17/18 without
+bypass. The resident draw diagnostic reads back final images only and remains
+separate from live game integration.

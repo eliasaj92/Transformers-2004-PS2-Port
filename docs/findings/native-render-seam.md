@@ -557,3 +557,25 @@ dispatching this kernel and reading its result back would add a new stall.
 Source-derived bounds, deferred guest-memory ownership and fallback therefore
 remain gates for live use. The kernel and tail are currently diagnostics, with
 no new gameplay FPS claim. See [the qualification and commands](../../deps/hwgs/GPU_GEOMETRY.md#reflection-lighting-kernel-and-retained-cpu-tail).
+
+## Paired reflection projection and resident output
+
+The subsequent fast dual-texture program produces four sections, ordered as
+reflection texture in both fields followed by original texture in both fields.
+The combined GPU shader now matches all 1,121,360 raw/native geometry words for
+14,017 vertices. A paired accelerated experiment keeps only the lighting and
+projection tails, poisoning omitted lighting results between those stages.
+All 5,000 captured calls still preserve complete state, memory, cycles and GIF;
+695 batches skip 11,070 lighting and 11,142 projection vertices.
+
+The resident renderer pool also consumes this shader's native output directly,
+without geometry readback. Four draw modes, including textures and blended
+two-pass rendering, match all 26,542,080 compared pixels across 11,312 GPU draws.
+The output-pool reuse check changes the projection and verifies final draw
+fences before reuse.
+
+This is a resident drawing diagnostic and an offline VU-tail proof. The live
+adapter still needs an owned four-section companion, source-derived GS bounds,
+deferred-memory resolution and CPU fallback before performance can be measured
+in the enhanced level. The diagnostic viewport uses captured bounds and must
+not become the live metadata path. See [the paired contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-projection-and-resident-drawing).

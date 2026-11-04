@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Offline first-pass lighting/reflection qualification. Each source record is
-// eleven constant vectors followed by STQ, normal and object-space position.
+// Lighting/reflection arithmetic. Each source record starts with eleven
+// constant vectors followed by STQ, normal and object-space position.
+// TF_GPU_REFLECTION_PROJECT appends two matrices, draw opacity and restart
+// flags, then emits four native vertex views plus diagnostic packed GIF words.
 ByteAddressBuffer inputs : register(t0);
 RWByteAddressBuffer geometry : register(u0);
 cbuffer Dispatch : register(b0) { uint count; };
@@ -36,7 +38,11 @@ precise float sqrt_rtz(float value)
 void main(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= count) return;
+#ifdef TF_GPU_REFLECTION_PROJECT
+    const uint base = id.x * 368;
+#else
     const uint base = id.x * 224, output = id.x * 48;
+#endif
     const precise float4 stq = loadVector(base, 11), sourceNormal = loadVector(base, 12);
     const precise float4 position = loadVector(base, 13);
     const precise float3 n = sourceNormal.xyz;
@@ -65,7 +71,46 @@ void main(uint3 id : SV_DispatchThreadID)
                             add_rtz(mul_rtz(direction.y, q), 0.5f));
     const precise float4 alpha = loadVector(base, 8);
     const precise float opacity = mul_rtz(mul_rtz(255.0f, alpha.x), mul_rtz(add_rtz(1.0f, -facing), alpha.y));
+    const uint4 lit = uint4(rgb, opacity);
+#ifdef TF_GPU_REFLECTION_PROJECT
+    const uint drawAlpha = (uint)mul_rtz(asfloat(inputs.Load(base + 352)), 128.0f);
+    const uint flags = inputs.Load(base + 356);
+    const uint reflectedColor = (lit.w & 0x80000000u) != 0 ? 0 : lit.w;
+    [unroll] for (uint field = 0; field < 2; ++field)
+    {
+        const uint matrix = base + 224 + field * 64;
+        precise float4 projected = asfloat(inputs.Load4(matrix + 48));
+        projected = add_rtz(projected, mul_rtz(asfloat(inputs.Load4(matrix + 32)), position.z));
+        projected = add_rtz(projected, mul_rtz(asfloat(inputs.Load4(matrix + 16)), position.y));
+        projected = add_rtz(projected, mul_rtz(asfloat(inputs.Load4(matrix)), position.x));
+        const precise float inverseW = reciprocal_rtz(projected.w);
+        const precise float3 screen = mul_rtz(projected, inverseW).xyz;
+        const int3 xyz = int3(screen * 16.0f);
+        [unroll] for (uint pass = 0; pass < 2; ++pass)
+        {
+            const uint section = pass * 2 + field;
+            const precise float3 tex = pass == 0 ? float3(uv, denominator) : float3(stq.xy, 1.0f);
+            const precise float3 uvq = scale(tex, inverseW);
+            const uint4 color = uint4(pass == 0 ? reflectedColor.xxx : lit.xyz, drawAlpha);
+            const uint rgba = (color.x & 255) | ((color.y & 255) << 8) | ((color.z & 255) << 16) |
+                              ((color.w & 255) << 24);
+            const uint address = (id.x * 4 + section) * 32;
+            geometry.Store4(address, uint4(asuint(uvq.xy), rgba, asuint(uvq.z) == 0 ? 0x00800000u : asuint(uvq.z)));
+            geometry.Store4(address + 16, uint4((uint(xyz.x) & 65535) | (uint(xyz.y) << 16),
+                (uint(xyz.z) >> 4) & 0x00ffffffu, 0, (flags >> 4) & 255));
+#ifdef TF_GPU_REFLECTION_CAPTURE
+            // Offline diagnostic readback only. Resident draws compile this
+            // out; unused packed STQ.w has no GS vertex semantics.
+            const uint rawAddress = count * 128 + (id.x * 4 + section) * 48;
+            geometry.Store4(rawAddress, uint4(asuint(uvq), 0));
+            geometry.Store4(rawAddress + 16, color);
+            geometry.Store4(rawAddress + 32, uint4(uint3(xyz), (flags & 32768) != 0 ? flags | 0xffff0000u : flags));
+#endif
+        }
+    }
+#else
     geometry.Store4(output, asuint(float4(uv, denominator, stq.y)));
-    geometry.Store4(output + 16, uint4(rgb, opacity));
+    geometry.Store4(output + 16, lit);
     geometry.Store4(output + 32, asuint(float4(position.xyz, stq.x)));
+#endif
 }

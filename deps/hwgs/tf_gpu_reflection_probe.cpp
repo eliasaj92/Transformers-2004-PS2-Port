@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 namespace
 {
@@ -55,9 +56,9 @@ void upload(ID3D12Resource *buffer, const void *source, uint32_t bytes)
 } // namespace
 
 static int reflectionProbe(const void *inputs, uint32_t count, void *output, uint32_t outputCapacity, char *error,
-                           uint32_t errorCapacity)
+                           uint32_t errorCapacity, bool projection)
 {
-    const uint32_t inputStride = 224, outputStride = 48;
+    const uint32_t inputStride = projection ? 368 : 224, outputStride = projection ? 320 : 48;
     bool passed = false;
     if (!inputs || !output || !count || count > 65536 || outputCapacity < uint64_t(count) * outputStride)
     {
@@ -84,8 +85,11 @@ static int reflectionProbe(const void *inputs, uint32_t count, void *output, uin
                 throw std::runtime_error("Reflection qualification requires shader model 6.5");
             // FXC's optimized output loses vector components in this kernel.
             // Use the renderer's existing optimized DXC path, qualified below.
-            auto code = D3D::CompileShaderDXIL(D3D::ShaderType::Compute, D3D::ShaderModel::SM65, false,
-                                               tf_gpu_reflection_shader);
+            const std::string shader =
+                std::string(projection ? "#define TF_GPU_REFLECTION_PROJECT 1\n#define TF_GPU_REFLECTION_CAPTURE 1\n"
+                                       : "") +
+                tf_gpu_reflection_shader;
+            auto code = D3D::CompileShaderDXIL(D3D::ShaderType::Compute, D3D::ShaderModel::SM65, false, shader);
             if (!code)
                 throw std::runtime_error("Reflection DXIL compilation failed");
             wil::com_ptr_nothrow<ID3DBlob> diagnostics, serialized;
@@ -164,5 +168,12 @@ static int reflectionProbe(const void *inputs, uint32_t count, void *output, uin
 extern "C" TF_HWGS_API int tf_gs_gpu_reflection_probe(const void *inputs, uint32_t count, void *output,
                                                       uint32_t outputCapacity, char *error, uint32_t errorCapacity)
 {
-    return reflectionProbe(inputs, count, output, outputCapacity, error, errorCapacity);
+    return reflectionProbe(inputs, count, output, outputCapacity, error, errorCapacity, false);
+}
+
+extern "C" TF_HWGS_API int tf_gs_gpu_reflection_projection_probe(const void *inputs, uint32_t count, void *output,
+                                                                 uint32_t outputCapacity, char *error,
+                                                                 uint32_t errorCapacity)
+{
+    return reflectionProbe(inputs, count, output, outputCapacity, error, errorCapacity, true);
 }

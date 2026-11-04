@@ -58,6 +58,7 @@ class DualGeometry
         uint64_t meshUploads = 0, meshBytes = 0, sourceUploadBytes = 0, constantUploadBytes = 0;
         uint64_t groupedDispatches = 0, groupedMeshes = 0;
         uint64_t grassDispatches = 0, grassBatches = 0;
+        uint64_t reflectionDispatches = 0, reflectionVertices = 0;
     };
 
     explicit DualGeometry(GSDevice12 &device, uint64_t budget = 128ull * 1024 * 1024,
@@ -94,6 +95,12 @@ class DualGeometry
     // reordering those fields preserves GS rendering and texture dependencies.
     Batch prepareGrass(const void *inputs, uint32_t count, const GrassRasterState *raster = nullptr,
                        bool fieldMajor = false);
+    // Qualified reflection records (368 bytes each) emit four interleaved
+    // native vertices per source, with no diagnostic raw output or readback.
+    // For draw(), each source is two logical pairs: firstSource=first*2,
+    // sourceCount=count*2; config indices use 4*vertex+section (0..3).
+    // Live ownership and source-derived frontend bounds belong to the caller.
+    Batch prepareReflection(const void *inputs, uint32_t count);
     // Whole-mesh metadata from cached source bounds and the two transforms.
     // Chunks in this range must share matrices/bias. Does not map GPU output
     // or transform the mesh's vertices on the CPU.
@@ -114,6 +121,7 @@ class DualGeometry
     std::unique_ptr<Pipeline> m_pipeline;
     std::unique_ptr<Pipeline> m_groupedPipeline;
     std::unique_ptr<Pipeline> m_grassPipeline;
+    std::unique_ptr<Pipeline> m_reflectionPipeline;
     std::vector<std::shared_ptr<Page>> m_pages;
     std::size_t m_pageCursor = 0;
     std::vector<std::shared_ptr<Source>> m_sources;
@@ -122,6 +130,6 @@ class DualGeometry
     std::shared_ptr<Page> acquirePage(uint32_t uploadBytes, uint32_t outputBytes);
     Batch dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices, uint32_t constantsOffset,
                    const uint64_t *groupSources = nullptr, uint32_t groups = 0, bool grass = false,
-                   bool fieldMajor = false);
+                   bool fieldMajor = false, bool reflection = false);
 };
 } // namespace tf_gpu

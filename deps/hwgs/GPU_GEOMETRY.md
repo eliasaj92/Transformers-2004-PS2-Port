@@ -1012,6 +1012,78 @@ memory-write footprint and complete replay results. It fails on empty captures;
 the grass-only moving sample does not exercise reflection and provides no
 additional coverage for this kernel.
 
+## Reflection projection and resident drawing
+
+The reflected meshes use a three-stage manager list: reflection lighting,
+fast dual-texture projection, then a clipping program. The qualified unclipped
+projection path skips that final clipping program and emits **four ordered GIF
+sections**: reflection texture in both fields, then the original texture in
+both fields. It cannot use the existing two-section mesh packet contract.
+
+The combined GPU kernel now calculates lighting, reflection coordinates and
+both projections from original object-space inputs. It matches all 1,121,360
+compared words for 706 batches / 14,017 vertices, covering raw GIF geometry and
+the native GS vertex layout. The projection capture is authenticated against
+all 1,728 program bytes and its output matches the actual ordered PATH1 packets.
+Unused packed STQ.w is excluded from the arithmetic comparison; the complete
+memory replay still checks that lane, including its preserved original T value.
+
+The paired accelerated-tail experiment skips the first sixteen projection
+vertices when there is a second block, then retains the final three or four
+vertices. Four-vertex batches and counts 17/18 keep the ordinary accelerated
+path; the latter do not leave a qualified final projection tail. Active
+transfers and clipped batches also decline. Across the same 5,000 calls, 695
+batches replace both stages, skipping 11,070 lighting and 11,142 projection
+vertices. Poisoning all deferred lighting geometry between the stages still
+preserves complete memory, semantic registers, cycles and ordered GIF output.
+The shader manager and retained projection tail therefore do not depend on
+those omitted values in this captured domain. This experiment uses qualified
+GPU captures to restore the final packet offline.
+
+`DualGeometry::prepareReflection` provides a separate resident path: the DXC
+kernel emits four interleaved native vertices per source directly into the
+existing fenced output pool. Its shader compiles out diagnostic raw output;
+no transformed geometry is mapped or downloaded. Counts and allocations are
+bounded, retained/in-flight output cannot be overwritten, and completed pages
+can be reused with changed transforms. The current 368-byte upload record is
+an expanded qualification layout, not a final immutable-mesh cache format.
+
+The resident draw diagnostic compares color-only, nearest texture, linear
+texture and ordered blended two-pass images against captured vertices drawn
+through the same enhanced renderer. It performs 11,312 native GPU draws and
+compares 26,542,080 pixels with zero differences. It downloads final images
+only. Captured coordinates set the diagnostic viewport; this does **not**
+qualify source-derived live GS bounds, texture-cache admission or CPU fallback.
+
+Live reflection bypass remains unfinished. The next work is an owned
+four-section packet with original sources/constants, deferred guest-memory
+resolution, source-derived frontend metadata and fallback, followed by an
+enhanced level run. Neither offline tail counts nor resident diagnostic draws
+establish a gameplay FPS improvement.
+
+```powershell
+python -B testing/test_gpu_reflection.py capture --projection `
+  --fixtures $private/all-fixtures.txt --runner $private/reflection/tf_reflection_capture.exe `
+  --output $private/reflection-paired
+python -B testing/test_gpu_reflection.py gpu `
+  --prepared $private/reflection-paired --dll $private/gpu-build/tf_hwgs.dll `
+  --adapter 'NVIDIA GeForce RTX 3080 Laptop GPU' `
+  --report $private/lighting-paired.json --capture $private/lighting-paired.bin
+python -B testing/test_gpu_reflection_projection.py gpu `
+  --prepared $private/reflection-paired --fixtures $private/all-fixtures.txt `
+  --dll $private/gpu-build/tf_hwgs.dll --adapter 'NVIDIA GeForce RTX 3080 Laptop GPU' `
+  --report $private/projection-gpu.json --capture $private/projection-gpu.bin
+python -B testing/test_gpu_reflection_projection.py tail `
+  --prepared $private/reflection-paired --fixtures $private/all-fixtures.txt `
+  --lighting-report $private/lighting-paired.json --lighting-capture $private/lighting-paired.bin `
+  --projection-report $private/projection-gpu.json --projection-capture $private/projection-gpu.bin `
+  --runner $private/reflection/tf_reflection_capture.exe --report $private/projection-tail.json
+python -B testing/test_gpu_reflection_projection.py draw `
+  --prepared $private/reflection-paired --fixtures $private/all-fixtures.txt `
+  --dll $private/gpu-build/tf_hwgs.dll --adapter 'NVIDIA GeForce RTX 3080 Laptop GPU' `
+  --report $private/projection-draw.json
+```
+
 ## Bounded output-image cadence capture
 
 `PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;

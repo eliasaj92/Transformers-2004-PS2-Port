@@ -21,6 +21,10 @@ import subprocess
 from test_gpu_dual_transform import digest, private
 
 
+def replay_environment():
+    return {key: value for key, value in os.environ.items() if not key.startswith('TF_REFLECTION_')}
+
+
 def prepare(raw):
     stride = 32 + 2 * (664 + 16384)
     if not raw or len(raw) % stride or len(raw) // stride > 10000:
@@ -59,14 +63,14 @@ def prepare(raw):
     return bytes(inputs), bytes(expected), len(raw) // stride
 
 
-def capture(fixtures, runner, output):
+def capture(fixtures, runner, output, projection=False):
     fixtures, runner, output = (private(p) for p in (fixtures, runner, output))
     if output.exists():
         raise FileExistsError('Use a fresh private reflection directory')
     output.mkdir(parents=True)
-    env = dict(os.environ, TF_REFLECTION_CAPTURE=str(output / 'raw.bin'))
-    env.pop('TF_REFLECTION_GPU_CAPTURE', None)
-    env.pop('TF_REFLECTION_GPU_RAW', None)
+    env = dict(replay_environment(), TF_REFLECTION_CAPTURE=str(output / 'raw.bin'))
+    if projection:
+        env['TF_REFLECTION_PROJECT_CAPTURE'] = str(output / 'projection.bin')
     with (output / 'replay.log').open('w') as log:
         subprocess.run([str(runner), str(fixtures), str(output / 'replay.csv')], env=env,
                        stdout=log, stderr=subprocess.STDOUT, check=True)
@@ -82,6 +86,8 @@ def capture(fixtures, runner, output):
     for name, data in (('inputs.bin', inputs), ('expected.bin', expected)):
         (output / name).write_bytes(data)
     names = ('raw.bin', 'inputs.bin', 'expected.bin', 'replay.csv', 'replay.log')
+    if projection:
+        names += ('projection.bin',)
     manifest = dict(version=1, captures=count, vertices=len(inputs) // 224, replay_fixtures=len(rows),
         runner_sha256=digest(runner.read_bytes()), fixtures_list_sha256=digest(fixtures.read_bytes()),
         sha256={name: digest((output / name).read_bytes()) for name in names},
@@ -174,8 +180,7 @@ def tail(prepared, gpu_report, gpu_capture, fixtures, runner, report_path):
             digest(captured) != result['gpu_capture_sha256'] or len(captured) != 48 + vertices * 48 or
             struct.unpack_from('<4I32s', captured) != (0x52464750, 1, vertices, 48, hashlib.sha256(inputs).digest())):
         raise ValueError('Reflection tail input/GPU provenance mismatch')
-    env = dict(os.environ, TF_REFLECTION_GPU_CAPTURE=str(gpu_capture), TF_REFLECTION_GPU_RAW=str(prepared / 'raw.bin'))
-    env.pop('TF_REFLECTION_CAPTURE', None)
+    env = dict(replay_environment(), TF_REFLECTION_GPU_CAPTURE=str(gpu_capture), TF_REFLECTION_GPU_RAW=str(prepared / 'raw.bin'))
     with log_path.open('w') as stream:
         process = subprocess.run([str(runner), str(fixtures), str(csv_path)], env=env,
                                  stdout=stream, stderr=subprocess.STDOUT)
@@ -203,6 +208,7 @@ def main():
     command = commands.add_parser('capture')
     for name in ('fixtures', 'runner', 'output'):
         command.add_argument('--' + name, type=Path, required=True)
+    command.add_argument('--projection', action='store_true', help='Also capture the paired four-pass projection stage')
     command = commands.add_parser('gpu')
     for name in ('prepared', 'dll', 'report'):
         command.add_argument('--' + name, type=Path, required=True)
@@ -213,7 +219,7 @@ def main():
         command.add_argument('--' + name, type=Path, required=True)
     args = parser.parse_args()
     if args.command == 'capture':
-        capture(args.fixtures, args.runner, args.output)
+        capture(args.fixtures, args.runner, args.output, args.projection)
         return 0
     if args.command == 'tail':
         return tail(args.prepared, args.gpu_report, args.gpu_capture, args.fixtures, args.runner, args.report)

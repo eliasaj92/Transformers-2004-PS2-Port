@@ -2,10 +2,12 @@
 #include "tf_gpu_dual_geometry.h"
 #include "tf_gpu_shaders.h"
 #include "GS/Renderers/DX12/GSDevice12.h"
+#include "GS/Renderers/DX11/D3D.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 namespace tf_gpu
 {
@@ -48,7 +50,8 @@ struct DualGeometry::Pipeline
     GSDevice12 &gs;
     wil::com_ptr_nothrow<ID3D12RootSignature> signature;
     wil::com_ptr_nothrow<ID3D12PipelineState> pipeline;
-    explicit Pipeline(GSDevice12 &device, bool grouped = false, bool grass = false) : gs(device)
+    explicit Pipeline(GSDevice12 &device, bool grouped = false, bool grass = false, bool reflection = false)
+        : gs(device)
     {
         D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
         check(gs.GetDevice()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)),
@@ -59,17 +62,32 @@ struct DualGeometry::Pipeline
         const D3D_SHADER_MACRO macros[] = {{"TF_GPU_DUAL_GROUPED", "1"}, {nullptr, nullptr}};
         const D3D_SHADER_MACRO grassMacros[] = {
             {"TF_GPU_GRASS_NATIVE", "1"}, {"TF_GPU_GRASS_CULL", "1"}, {nullptr, nullptr}};
-        const char *shader = grass ? tf_gpu_grass_emit_shader : tf_gpu_dual_transform_shader;
-        const HRESULT compiled =
-            D3DCompile(shader, std::strlen(shader), grass ? "grass-emitter" : "dual-transform",
-                       grass ? grassMacros : (grouped ? macros : nullptr), nullptr, "main", "cs_5_0",
-                       D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_IEEE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-                       code.put(), error.put());
-        if (FAILED(compiled))
-            throw std::runtime_error(error ? static_cast<const char *>(error->GetBufferPointer())
-                                           : "Dual shader compilation failed");
+        if (reflection)
+        {
+            D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_5};
+            check(gs.GetDevice()->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model)),
+                  "Cannot query reflection shader support");
+            if (model.HighestShaderModel < D3D_SHADER_MODEL_6_5)
+                throw std::runtime_error("Native reflection geometry requires shader model 6.5");
+            const std::string shader = std::string("#define TF_GPU_REFLECTION_PROJECT 1\n") + tf_gpu_reflection_shader;
+            code = D3D::CompileShaderDXIL(D3D::ShaderType::Compute, D3D::ShaderModel::SM65, false, shader);
+            if (!code)
+                throw std::runtime_error("Native reflection DXIL compilation failed");
+        }
+        else
+        {
+            const char *shader = grass ? tf_gpu_grass_emit_shader : tf_gpu_dual_transform_shader;
+            const HRESULT compiled =
+                D3DCompile(shader, std::strlen(shader), grass ? "grass-emitter" : "dual-transform",
+                           grass ? grassMacros : (grouped ? macros : nullptr), nullptr, "main", "cs_5_0",
+                           D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_IEEE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+                           0, code.put(), error.put());
+            if (FAILED(compiled))
+                throw std::runtime_error(error ? static_cast<const char *>(error->GetBufferPointer())
+                                               : "Dual shader compilation failed");
+        }
         D3D12_ROOT_PARAMETER parameters[11]{};
-        const unsigned srvs = grass ? 1 : (grouped ? 9 : 2);
+        const unsigned srvs = (grass || reflection) ? 1 : (grouped ? 9 : 2);
         for (unsigned i = 0; i < srvs; ++i)
         {
             parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
@@ -386,6 +404,22 @@ DualGeometry::Batch DualGeometry::prepareGrass(const void *inputs, uint32_t coun
     return dispatch(std::move(page), address, count * 16, 0, nullptr, 0, true, fieldMajor);
 }
 
+DualGeometry::Batch DualGeometry::prepareReflection(const void *inputs, uint32_t count)
+{
+    if (!inputs || !count || count > 65536)
+        return {};
+    if (!m_reflectionPipeline)
+        m_reflectionPipeline = std::make_unique<Pipeline>(m_device, false, false, true);
+    auto page = acquirePage((count * 368 + 65535) & ~65535u, (count * 128 + 65535) & ~65535u);
+    if (!page)
+        return {};
+    std::memcpy(page->mappedUpload, inputs, size_t(count) * 368);
+    m_stats.sourceUploadBytes += uint64_t(count) * 48;
+    m_stats.constantUploadBytes += uint64_t(count) * 320;
+    const auto address = page->upload->GetGPUVirtualAddress();
+    return dispatch(std::move(page), address, count * 2, 0, nullptr, 0, false, false, true);
+}
+
 bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batches, uint32_t firstChunk,
                           uint32_t chunks, std::array<DualDrawBounds, 2> &result) const
 {
@@ -414,7 +448,7 @@ bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batc
 
 DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices,
                                            uint32_t constantsOffset, const uint64_t *groupSources, uint32_t groups,
-                                           bool grass, bool fieldMajor)
+                                           bool grass, bool fieldMajor, bool reflection)
 {
     m_device.EndRenderPass();
     auto *command = m_device.GetCommandList().list4.get();
@@ -429,21 +463,22 @@ DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t 
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         command->ResourceBarrier(1, &barrier);
     }
-    const auto &pipeline = grass ? m_grassPipeline : (groups ? m_groupedPipeline : m_pipeline);
+    const auto &pipeline =
+        reflection ? m_reflectionPipeline : (grass ? m_grassPipeline : (groups ? m_groupedPipeline : m_pipeline));
     const unsigned sources = groups ? 8 : 1;
     command->SetComputeRootSignature(pipeline->signature.get());
     command->SetPipelineState(pipeline->pipeline.get());
     for (unsigned i = 0; i < sources; ++i)
         command->SetComputeRootShaderResourceView(i, groups && i < groups ? groupSources[i] : sourceAddress);
-    if (!grass)
+    if (!grass && !reflection)
         command->SetComputeRootShaderResourceView(sources, page->upload->GetGPUVirtualAddress() + constantsOffset);
-    const unsigned outputSlot = grass ? 1 : sources + 1;
-    const uint32_t count = grass ? vertices / 16 : (groups ? groups : vertices);
+    const unsigned outputSlot = (grass || reflection) ? 1 : sources + 1;
+    const uint32_t count = reflection ? vertices / 2 : (grass ? vertices / 16 : (groups ? groups : vertices));
     command->SetComputeRootUnorderedAccessView(outputSlot, page->output->GetGPUVirtualAddress());
     command->SetComputeRoot32BitConstant(outputSlot + 1, count, 0);
     if (grass)
         command->SetComputeRoot32BitConstant(outputSlot + 1, fieldMajor, 1);
-    command->Dispatch(((grass ? count * 8 : (groups ? groups * 32 : vertices)) + 63) / 64, 1, 1);
+    command->Dispatch(((reflection ? count : (grass ? count * 8 : (groups ? groups * 32 : vertices))) + 63) / 64, 1, 1);
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     barrier.Transition.StateAfter =
         (D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -456,6 +491,8 @@ DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t 
     m_stats.groupedMeshes += groups;
     m_stats.grassDispatches += grass;
     m_stats.grassBatches += grass ? count : 0;
+    m_stats.reflectionDispatches += reflection;
+    m_stats.reflectionVertices += reflection ? count : 0;
     Batch result;
     result.page = std::move(page);
     result.vertices = vertices;

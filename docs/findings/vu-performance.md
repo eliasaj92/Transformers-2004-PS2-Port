@@ -269,3 +269,19 @@ tail then replaces 704 batches, omits 11,193 CPU vertices and preserves all
 No live reflection bypass or additional FPS gain follows from this offline
 test. The next required seam is GPU-resident reflection-to-projection transport
 with deferred guest memory, bounds and fallback. See the [contract and commands](../../deps/hwgs/GPU_GEOMETRY.md#reflection-lighting-kernel-and-retained-cpu-tail).
+
+The next qualification joins that kernel to fast dual-texture projection:
+four ordered output sections now match 1,121,360 raw/native words. The paired
+CPU-tail experiment skips 11,070 lighting and 11,142 projection vertices in
+695 batches while preserving every one of the 5,000 accelerated calls.
+Poisoning deferred lighting results between stages detects unintended reads.
+Counts 17/18 remain accelerated because their final projection block is too
+short for this qualified tail.
+
+A resident output-pool path feeds the combined shader directly into native
+GPU draws. Four image modes match 26,542,080 pixels with no geometry readback;
+this validates the compute-to-draw transport, not gameplay speed. Live packet
+ownership, source-derived GS metadata and fallback still need integration.
+The latest relevant live measurement remains 57.4907 physics updates/s and
+56.4953 direct handoffs/s; true 60 fps remains unfinished. See the
+[paired contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-projection-and-resident-drawing).
