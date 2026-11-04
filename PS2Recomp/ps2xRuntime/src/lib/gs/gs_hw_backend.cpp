@@ -96,7 +96,8 @@ public:
     void RawNativeDual(uint32_t path, const uint8_t* data, uint32_t bytes, const gsnative::DualPacket& geometry) override {
         if (!initialized || !data || !bytes) return;
         if (path == 1) lastSceneTick = ticks + 1;
-        if (!tf_gs_native_dual_gif(path, data, bytes, &geometry)) RawGIF(path, data, bytes);
+        if (!tf_gs_native_dual_gif(path, data, bytes, &geometry))
+            GSRasterBackend::RawNativeDual(path, data, bytes, geometry);
     }
     void RawVsync(const std::array<uint8_t,8192>& regs) override {
         if (!initialized) return;

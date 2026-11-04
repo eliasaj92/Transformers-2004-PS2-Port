@@ -376,8 +376,12 @@ public:
     const uint8_t *peekVU1CodeForExecution() const { return m_vu1Code; }
     uint8_t *getVU1Code() { {Vu1FenceReason r_(kVu1FenceMem);fenceVu1();} return m_vu1Code; } // fence reason
     const uint8_t *getVU1Code() const { {Vu1FenceReason r_(kVu1FenceMem);fenceVu1();} return m_vu1Code; } // fence reason
-    uint8_t *getVU1Data() { {Vu1FenceReason r_(kVu1FenceMem);fenceVu1();} return m_vu1Data; } // fence reason
-    const uint8_t *getVU1Data() const { {Vu1FenceReason r_(kVu1FenceMem);fenceVu1();} return m_vu1Data; } // fence reason
+    void materializeVU1Data() const;
+    uint8_t *getVU1Data() { {Vu1FenceReason r_(kVu1FenceMem);fenceVu1();} materializeVU1Data(); return m_vu1Data; }
+    const uint8_t *getVU1Data() const { {Vu1FenceReason r_(kVu1FenceMem);fenceVu1();} materializeVU1Data(); return m_vu1Data; }
+    // Exclusive execution owner only. tryAot resolves actual readers and all
+    // declined programs before they can observe deferred geometry.
+    uint8_t *getVU1DataForExecution() { {Vu1FenceReason r_(kVu1FenceMem);fenceVu1();} return m_vu1Data; }
     uint8_t *getVU0Code() { return m_vu0Code; }
     const uint8_t *getVU0Code() const { return m_vu0Code; }
     uint8_t *getVU0Data() { return m_vu0Data; }

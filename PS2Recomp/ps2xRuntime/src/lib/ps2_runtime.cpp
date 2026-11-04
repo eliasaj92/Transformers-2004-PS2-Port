@@ -1104,7 +1104,8 @@ namespace
         }();
         if (!s_on)
             return;
-        uint8_t *data = memory.getVU1Data();
+        uint8_t *data = memory.getVU1DataForExecution();
+        if (tf_gpu_live::bypassEnabled) tf_gpu_live::readMemory(&memory, data, 0x38, 8);
         uint32_t m2[16];
         std::memcpy(m2, data + 0x3Cu * 16u, sizeof(m2));
         for (uint32_t w : m2)
@@ -1417,7 +1418,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                          m_vu1.state().dBitEnabled=(q.controls&0x400u)!=0;
                                          m_vu1.state().tBitEnabled=(q.controls&0x800u)!=0;
                                          ps2Field2MatrixStopgap(m_memory);
-                                         m_vu1.execute(m_memory.getVU1Code(),PS2_VU1_CODE_SIZE,m_memory.getVU1Data(),PS2_VU1_DATA_SIZE,m_gs,&m_memory,startPC,top,itop,ps2Vu1CycleBudget());
+                                         m_vu1.execute(m_memory.getVU1Code(),PS2_VU1_CODE_SIZE,m_memory.getVU1DataForExecution(),PS2_VU1_DATA_SIZE,m_gs,&m_memory,startPC,top,itop,ps2Vu1CycleBudget());
                                          q.stopBits=(m_vu1.state().stoppedByD?0x200u:0u)|(m_vu1.state().stoppedByT?0x400u:0u);
                                          return;
                                      }
@@ -1479,7 +1480,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                          m_vu1.state().dBitEnabled=(q.controls&0x400u)!=0;
                                          m_vu1.state().tBitEnabled=(q.controls&0x800u)!=0;
                                          ps2Field2MatrixStopgap(m_memory);
-                                         m_vu1.resume(m_memory.getVU1Code(),PS2_VU1_CODE_SIZE,m_memory.getVU1Data(),PS2_VU1_DATA_SIZE,m_gs,&m_memory,top,itop,ps2Vu1CycleBudget());
+                                         m_vu1.resume(m_memory.getVU1Code(),PS2_VU1_CODE_SIZE,m_memory.getVU1DataForExecution(),PS2_VU1_DATA_SIZE,m_gs,&m_memory,top,itop,ps2Vu1CycleBudget());
                                          q.stopBits=(m_vu1.state().stoppedByD?0x200u:0u)|(m_vu1.state().stoppedByT?0x400u:0u);
                                          return;
                                      }

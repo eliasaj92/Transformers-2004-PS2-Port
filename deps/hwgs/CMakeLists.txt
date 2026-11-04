@@ -30,6 +30,9 @@ if(TF_HWGS_GPU_GEOMETRY)
     # this object separate from kzgs_flags, whose /fp:contract conflicts with
     # /fp:strict under MSVC.
     add_library(tf_gpu_dual_bounds OBJECT tf_gpu_dual_bounds.cpp)
+    target_sources(tf_gpu_dual_bounds PRIVATE
+        ../../PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_dual_math.cpp)
+    target_include_directories(tf_gpu_dual_bounds PRIVATE ../../PS2Recomp/ps2xRuntime/include)
     target_compile_features(tf_gpu_dual_bounds PRIVATE cxx_std_20)
     if(MSVC)
         target_compile_options(tf_gpu_dual_bounds PRIVATE /fp:strict)

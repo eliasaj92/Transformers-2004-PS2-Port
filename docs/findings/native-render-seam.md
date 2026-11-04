@@ -1,6 +1,6 @@
 # Transformers native render seam investigation
 
-Status: whole-list capture, exact mesh-input import, complete native grass packet generation, accelerated state replay and an experimental GPU compute-to-draw interface, November 2026. The grass model can be compared with accelerated VU output offline or during gameplay. The opt-in GPU component has a synthetic ordered-draw check; live game batches still use accelerated VU execution. Direct GPU presentation and hardware resolution scaling are separate, already implemented features.
+Status: live GPU dual-transform drawing and an experimental guarded CPU-tail bypass, November 2026. The bypass has captured-state, geometry and deferred-memory checks; whole-game reliability and distinct rendered 60 fps remain unverified. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Earlier sections retain the evidence and limitations of each preceding stage.
 
 ## Why this boundary
 
@@ -370,3 +370,25 @@ resolution and 1920x1080 direct presentation, with cinematics skipped. The
 final frame was inspected, not qualified for exact pixel equality. Actual VU
 bypass, CPU-independent fallback/state preservation and distinct rendered
 60 fps remain unfinished. See [the handoff contract and results](../../deps/hwgs/GPU_GEOMETRY.md#ordered-live-geometry-handoff).
+
+## Guarded bulk-transform bypass
+
+Mode 2 now shortens eligible static VU calls to a three/four-vertex CPU tail,
+while the existing GPU path transforms their full source geometry. Native
+bookkeeping preserves complete final registers and guest cycles. Deferred
+STQ/XYZ ownership distinguishes overwritten memory from CPU readers; explicit
+VIF/EE write hooks cover equal-value writes as well as masked/partial writes.
+Fallback rendering reconstructs geometry from immutable sources without GPU
+readback. The final resolved tail supplies ordinary GS latches and the depth
+witness needed by the native draw path.
+
+The accelerated capture check passes all 776 selected calls, comparing every
+semantic VU-state field, all memory after materialization and both fields'
+geometry. It also checks FP restoration and deferred-memory overwrite behavior.
+Its 18,568 source vertices require 3,088 static-tail vertices, plus native
+register bookkeeping. This is a reduction in the static transform pass; its
+frame-time effect must be measured in the enhanced level route. Other VU
+programs, small batches, special 17/18-vertex tails and unproved arithmetic
+remain on the complete accelerated path.
+
+See [mode 2's admission rules and test command](../../deps/hwgs/GPU_GEOMETRY.md#guarded-cpu-tail-and-deferred-vu-memory).

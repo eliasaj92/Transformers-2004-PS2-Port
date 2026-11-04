@@ -3,6 +3,7 @@
 #include "tf_gpu_live_draw.h"
 #include "tf_gpu_dual_geometry.h"
 #include "tf_gpu_dual_frontend.h"
+#include "runtime/gs/gs_native_dual_math.h"
 #include "kzgs_internal.h"
 #include "GS/Renderers/HW/GSRendererHW.h"
 #include "GS/Renderers/DX12/GSDevice12.h"
@@ -152,7 +153,21 @@ struct Draw
     tf_gpu::DualGeometry::Batch batch;
     const uint8_t *packet;
     unsigned vertices;
+    const gsnative::DualPacket &geometry;
+    std::vector<uint8_t> restored;
 };
+const uint8_t *fullPacket(Draw &draw)
+{
+    if (draw.geometry.version != 2)
+        return draw.packet;
+    if (draw.restored.empty())
+    {
+        const unsigned bytes = (8 + 6 * draw.vertices) * 16;
+        draw.restored.assign(draw.packet, draw.packet + bytes);
+        gsnative::materializeDualPacket(draw.geometry, draw.restored.data(), bytes);
+    }
+    return draw.restored.data();
+}
 bool submit(void *context, GSHWDrawConfig &config)
 {
     auto &d = *static_cast<Draw *>(context);
@@ -178,12 +193,13 @@ void materialize(void *context, GSVertex *vertices, uint32_t)
 {
     auto &d = *static_cast<Draw *>(context);
     ++d.owner.cpuFallbacks;
-    decodeField(d.packet, d.vertices, 0, vertices);
-    decodeField(d.packet, d.vertices, 1, vertices);
+    const auto *packet = fullPacket(d);
+    decodeField(packet, d.vertices, 0, vertices);
+    decodeField(packet, d.vertices, 1, vertices);
 }
 bool framing(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes)
 {
-    if (p.version != 1 || p.vertices < 3 || p.vertices > 28 || bytes != (8 + p.vertices * 6) * 16 ||
+    if ((p.version != 1 && p.version != 2) || p.vertices < 3 || p.vertices > 28 || bytes != (8 + p.vertices * 6) * 16 ||
         word(p.constants.data() + 140))
         return false;
     for (unsigned i = 0; i < p.vertices; ++i)
@@ -211,7 +227,16 @@ void execute(const uint8_t *bytes, uint32_t size)
     const auto *packet = bytes + sizeof(Payload);
     if (payload.bytes != size - sizeof(Payload))
         return;
-    const auto ordinary = [&] { kzgs::ExecuteGIFOnGSThread(payload.path, packet, payload.bytes); };
+    const auto ordinary = [&] {
+        if (p.version != 2)
+        {
+            kzgs::ExecuteGIFOnGSThread(payload.path, packet, payload.bytes);
+            return;
+        }
+        std::vector<uint8_t> restored(packet, packet + payload.bytes);
+        gsnative::materializeDualPacket(p, restored.data(), payload.bytes);
+        kzgs::ExecuteGIFOnGSThread(payload.path, restored.data(), payload.bytes);
+    };
     if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || payload.path != 1 ||
         !framing(p, packet, payload.bytes) || g_gs_renderer->m_path[0].nloop)
     {
@@ -237,7 +262,7 @@ void execute(const uint8_t *bytes, uint32_t size)
     }
     auto *renderer = GSRendererHW::GetInstance();
     const unsigned fieldBytes = (4 + 3 * p.vertices) * 16;
-    Draw draw{*live, mesh, p.constants.data(), {}, packet, p.vertices};
+    Draw draw{*live, mesh, p.constants.data(), {}, packet, p.vertices, p, {}};
     for (unsigned field = 0; field < 2; ++field)
     {
         const auto *f = packet + field * fieldBytes;
@@ -269,7 +294,7 @@ void execute(const uint8_t *bytes, uint32_t size)
         if (!consumed)
         {
             ++live->declinedFields;
-            kzgs::ExecuteGIFOnGSThread(1, f, fieldBytes);
+            kzgs::ExecuteGIFOnGSThread(1, fullPacket(draw) + field * fieldBytes, fieldBytes);
             continue;
         }
         // Reproduce the actual final STQ/RGBA/XYZ/FOG latches and the last two

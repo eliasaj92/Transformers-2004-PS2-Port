@@ -396,6 +396,7 @@ add_library(ps2_runtime STATIC
     src/lib/gs/gs_pgs_backend.cpp
     src/lib/gs/gs_hw_backend.cpp
     src/lib/gs/gs_hw_present.cpp
+    src/lib/gs/gs_native_dual_math.cpp
     src/lib/ps2_trainer.cpp
     src/lib/ps2_objectives.cpp
     src/lib/ps2_native_seam_probe.cpp
@@ -403,6 +404,8 @@ add_library(ps2_runtime STATIC
     src/lib/native/tf_grass_packets.cpp
     src/lib/native/tf_grass_oracle.cpp
     src/lib/native/tf_gpu_live.cpp
+    src/lib/native/tf_dual_state.cpp
+    src/lib/native/tf_dual_memory.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
@@ -494,6 +497,13 @@ file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS
 target_sources(ps2_runtime PRIVATE
     ${KERNEL_SRC_FILES}
 )
+if(MSVC)
+    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/native/tf_dual_state.cpp
+        PROPERTIES COMPILE_OPTIONS "/fp:strict")
+else()
+    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/native/tf_dual_state.cpp
+        PROPERTIES COMPILE_OPTIONS "-frounding-math;-ffp-contract=off")
+endif()
 
 option(PS2X_BUILD_RUNNER "Build a runner using locally generated game code" OFF)
 set(PS2X_GENERATED_DIR "" CACHE PATH "Private recompiler output (outside this source tree)")
@@ -890,7 +900,8 @@ endif()
 # TEMP(transformers): exact dependency presentation hooks.
 include("${CMAKE_CURRENT_SOURCE_DIR}/present_trace.cmake")
 
-if(PS2X_WITH_VU1_AOT AND NOT PS2X_WITH_VU1_STATIC)
+# The guarded GPU-tail module also references the optional static entrypoints.
+if(NOT PS2X_WITH_VU1_STATIC)
     target_sources(ps2_runtime PRIVATE src/lib/vu/ps2_vu1_static_stubs.cpp)
 endif()
 

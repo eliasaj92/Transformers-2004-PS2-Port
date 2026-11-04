@@ -7,8 +7,10 @@
 
 namespace gsnative
 {
-// Owned companion to one ordinary PATH1 packet. Raw GIF bytes remain available
-// for fallback and EE-visible register tracking. No guest pointers cross queues.
+// Owned companion to one PATH1 packet. Version 1 contains complete raw GIF;
+// version 2 resolves only the CPU tail and requires source materialization for
+// ordinary fallback. Final EE/GS latches are resolved in both versions.
+// No guest pointers cross queues.
 struct alignas(16) DualPacket
 {
     uint32_t version = 1, vertices = 0, varyingDepth = 0, reserved = 0;

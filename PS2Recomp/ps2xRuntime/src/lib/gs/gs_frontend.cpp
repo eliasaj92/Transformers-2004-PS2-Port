@@ -1043,6 +1043,15 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!data || sizeBytes < 16 || !m_backend)
         return;
 
+    std::vector<uint8_t> restoredGeometry;
+    if (nativeGeometry && nativeGeometry->version == 2 && !rawOnly(m_backend, m_rawTap))
+    {
+        restoredGeometry.assign(data, data + sizeBytes);
+        gsnative::materializeDualPacket(*nativeGeometry, restoredGeometry.data(), sizeBytes);
+        data = restoredGeometry.data();
+        nativeGeometry.reset();
+    }
+
     auto &glyph = glyphState(this);
     if (!glyph.injecting && ps2_glyphs::UploadState::enabled())
     {

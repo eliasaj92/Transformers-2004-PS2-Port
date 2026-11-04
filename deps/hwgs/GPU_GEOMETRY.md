@@ -1,8 +1,9 @@
 # Experimental GPU geometry
 
-This opt-in component builds the D3D12 interface needed to draw GPU-produced
-vertices through the existing hardware renderer. It does not yet replace live
-Transformers VIF/VU batches or establish a gameplay performance improvement.
+This opt-in component draws GPU-produced vertices through the existing hardware
+renderer. Mode 1 retains full accelerated VU execution. Mode 2 replaces the bulk
+of admitted dual-transform calls with a short CPU tail and deferred VU memory;
+see [its qualification and limits](#guarded-cpu-tail-and-deferred-vu-memory).
 
 Use a separate private checkout of the PCSX2 revision in `dependencies.json`
 and an output directory outside this repository:
@@ -417,3 +418,58 @@ Only enhanced accelerated builds ran, with opening and arrival cinematics
 skipped. The final frame was inspected; it does not establish pixel equality
 throughout the level. CPU VU geometry still runs, and this is neither a net
 offload speedup nor proof of distinct rendered 60 fps.
+
+## Guarded CPU tail and deferred VU memory
+
+`PS2X_TF_GPU_DUAL=2` selects the experimental bypass on enhanced static-VU builds
+with D3D12 HWGS. It uses the exclusive VIF worker and the same program identities
+and packet checks as mode 1. Other programs still use accelerated execution.
+Small batches and the special 17/18-vertex tails retain their complete call.
+
+For an admitted batch, the static package executes only its final three or four
+vertices in scratch memory, with that scratch XGKICK suppressed. Native code
+restores the original count/address bookkeeping, manager scratch registers,
+retained registers and guest-cycle count. The original final vertices remain
+available for GS latches and a conservative nonconstant-depth witness. This
+shortcut requires saturated arithmetic sticky flags, disabled D/T stops, a
+conservatively positive W bound for both fields, and nonoverlapping constants.
+An unproved case takes the ordinary accelerated path.
+
+Unresolved STQ/XYZ lanes retain immutable source geometry through a bounded
+VU-memory ownership map. Full VIF/EE writes explicitly discard ownership, even
+when they write an equal value. Partial/masked writes resolve the affected
+quadwords first. Subsequent admitted calls resolve their input/constant/padding
+reads; other VU programs and public EE reads resolve deferred memory before
+access. New packet headers/colors also discard old geometry ownership where
+the layouts overlap. Scratch work never replaces unrelated deferred owners.
+
+Version 2 GIF companions distinguish incomplete geometry from ordinary packets.
+The hardware renderer and generic/decoded fallbacks reconstruct needed vertices
+from the retained sources using strict round-toward-zero CPU arithmetic. They
+do not download GPU geometry. The normal GPU draw consumes the existing resident
+source cache and compute output; only the resolved tail is submitted for final
+GS latch updates.
+
+The accelerated offline check covers all 776 selected captured calls: complete
+semantic VU state, complete memory after materialization, both fields' geometry,
+caller FP-state restoration, equal-value overwrites and partial writes. It
+passes with 18,568 source vertices and 3,088 static-tail vertices. The native
+retained-register calculation is additional CPU work, so those counts describe
+the shortened static pass rather than a measured speedup.
+
+Build the check outside the checkout with the authenticated private static
+package; no interpreter oracle is compiled:
+
+```powershell
+cmake -S testing/vu1_replay -B $private/tail-check -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release -DPACKAGE_DIR=$private/vu1-static-package `
+  -DTF_REPLAY_DUAL_TAIL=ON
+cmake --build $private/tail-check --parallel 4
+& $private/tail-check/tf_dual_tail.exe $private/qualified-captures.txt
+```
+
+Runtime output distinguishes `VU bypass`, `tail_vertices`, `skipped_vertices`,
+and deferred-memory materializations from actual GS `gpu_draws`. Capture or
+hash diagnostics can force deferred reads and are unsuitable for performance
+measurements. These offline checks alone do not establish a live frame-rate
+improvement or distinct rendered 60 fps.

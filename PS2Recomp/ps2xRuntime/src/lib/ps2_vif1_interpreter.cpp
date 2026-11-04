@@ -19,6 +19,8 @@ extern bool g_path3ReleaseOnePacket; // ps2_memory.cpp (GENERIC, SSX-0042 port)
 #include <chrono> // TEMP(transformers): vif1fast1 profiler wall-time calibration
 #include <sstream> // TEMP(transformers): emit a profiler snapshot in one write
 
+#include "native/tf_gpu_live.h"
+
 // release fix (qualification): hardware UNPACK V2/V3 lanes.
 // The VIF writes all four lanes of every UNPACK destination quadword; it never keeps the old VU memory value of a lane
 // the format carries no data for. Reference = PCSX2: pcsx2/Vif_Unpack.cpp (UNPACK_V2 writes v0 v1 v0 v1, "The PS2
@@ -1325,6 +1327,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             // TEMP(transformers): same body boundary will enclose the optional fast kernel.
             auto unpackBody = [&]() {
+                if (!scan && tf_gpu_live::bypassEnabled && m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+                {
+                    const bool complete = !maskEnable &&
+                        ((vl < 3 && (vn == 0 || vn == 3 || hwUnpack)) || (vn == 3 && vl == 3));
+                    tf_gpu_live::unpackMemory(this, m_vu1Data, vuAddr, writeVectorCount, cl, wl, complete);
+                }
                 if (ps2x_vifunpack::vif1UnpackFast(m_vu1Data,data,sizeBytes,pos,totalBytes,vif1_regs,
                     vn,vl,writeVectorCount,vuAddr,cl,wl,zeroExtend,maskEnable,scan,hwPhase)) return;
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)

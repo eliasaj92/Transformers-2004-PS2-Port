@@ -432,6 +432,7 @@ PS2Memory::~PS2Memory()
 {
     if (m_vif1Instant) m_vif1Instant->abandon();
     if (m_vif1Stream) m_vif1Stream->abandon();
+    tf_gpu_live::resetMemory(this);
     if (m_rdram)
     {
         delete[] m_rdram;
@@ -483,6 +484,7 @@ PS2Memory::~PS2Memory()
 bool PS2Memory::initialize(size_t ramSize)
 {
     fenceVu1();
+    tf_gpu_live::resetMemory(this);
     auto cleanup = [this]()
     {
         delete[] m_rdram;
@@ -736,6 +738,7 @@ uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offs
 const uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const
 {
     if (physAddr >= PS2_VU1_CODE_BASE && physAddr < PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE) {Vu1FenceReason r_(kVu1FenceMem);fenceVu1();} // qualification: reason
+    if (physAddr >= PS2_VU1_DATA_BASE && physAddr < PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE) materializeVU1Data();
     auto mapRange = [&](uint32_t base, uint32_t rangeSize, const uint8_t *ptr) -> const uint8_t *
     {
         if (!ptr || physAddr < base)
@@ -765,6 +768,11 @@ const uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t
         return ptr;
     }
     return mapRange(PS2_VU1_DATA_BASE, PS2_VU1_DATA_SIZE, m_vu1Data);
+}
+
+void PS2Memory::materializeVU1Data() const
+{
+    if (tf_gpu_live::bypassEnabled) tf_gpu_live::readMemory(this, m_vu1Data);
 }
 
 uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
@@ -2980,6 +2988,7 @@ done:
 
 void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
 {
+    if (tf_gpu_live::enabled && tf_gpu_live::suppressPacket()) return;
     submitGifPacketWithGeometry(pathId, data, sizeBytes, drainImmediately, path2DirectHl,
         tf_gpu_live::enabled ? tf_gpu_live::packet(static_cast<uint32_t>(pathId), data, sizeBytes) : nullptr);
 }
@@ -3704,6 +3713,14 @@ bool PS2Memory::queueVu1Write(uint32_t address,const void *data,uint32_t n)
     m_vif1Instant->enqueue([this,phys,bytes=std::move(bytes)] {
         const bool code=phys<PS2_VU1_DATA_BASE;
         auto *dst=code ? m_vu1Code : m_vu1Data;
+        if (!code && tf_gpu_live::bypassEnabled)
+        {
+            const unsigned offset = phys - PS2_VU1_DATA_BASE;
+            if (!(offset & 15) && !(bytes.size() & 15))
+                tf_gpu_live::unpackMemory(this, dst, offset / 16, unsigned(bytes.size() / 16), 1, 1, true);
+            else
+                tf_gpu_live::readMemory(this, dst, offset / 16, unsigned((offset + bytes.size() + 15) / 16 - offset / 16));
+        }
         std::memcpy(dst+phys-(code?PS2_VU1_CODE_BASE:PS2_VU1_DATA_BASE),bytes.data(),bytes.size());
         if(code) { markVU1CodeModified(); ps2_vu1new::directStore(phys, uint32_t(bytes.size())); } // TEMP(transformers)
     });return true;
