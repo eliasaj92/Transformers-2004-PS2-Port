@@ -24,6 +24,14 @@ if(TF_HWGS_GPU_GEOMETRY)
     target_include_directories(tf_hwgs PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_sources(tf_hwgs PRIVATE tf_gpu_geometry_probe.cpp tf_gpu_dual_probe.cpp
         tf_gpu_dual_geometry.cpp tf_gpu_dual_draw_probe.cpp tf_gpu_draw_trace.cpp)
-    target_link_libraries(tf_hwgs PRIVATE d3dcompiler)
+    # Bounds must honor/restore the caller's floating-point environment. Keep
+    # this object separate from kzgs_flags, whose /fp:contract conflicts with
+    # /fp:strict under MSVC.
+    add_library(tf_gpu_dual_bounds OBJECT tf_gpu_dual_bounds.cpp)
+    target_compile_features(tf_gpu_dual_bounds PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(tf_gpu_dual_bounds PRIVATE /fp:strict)
+    endif()
+    target_link_libraries(tf_hwgs PRIVATE d3dcompiler tf_gpu_dual_bounds)
 endif()
 kzgs_stage_resources(tf_hwgs)

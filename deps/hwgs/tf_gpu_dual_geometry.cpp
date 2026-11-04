@@ -126,6 +126,7 @@ struct DualGeometry::Source
     const DualGeometry *owner;
     wil::com_ptr_nothrow<ID3D12Resource> buffer;
     std::vector<uint32_t> firsts;
+    std::vector<DualAttributes> attributes;
     uint32_t vertices = 0, capacity = 0;
     uint64_t fence = 0;
     Source(GSDevice12 &device, const DualGeometry *pool) : gs(device), owner(pool)
@@ -233,6 +234,13 @@ DualGeometry::Mesh DualGeometry::uploadMesh(const void *inputs, uint32_t vertice
     }
     if (source->firsts.size() != batches)
         return {};
+    source->attributes.resize(batches);
+    for (uint32_t i = 0; i < batches; ++i)
+    {
+        const uint32_t first = source->firsts[i], end = i + 1 == batches ? vertices : source->firsts[i + 1];
+        if (!summarizeDualInputs(data + first * 32, end - first, source->attributes[i]))
+            return {};
+    }
     const uint32_t capacity = (vertices * 32 + 65535) & ~65535u;
     if (capacity > m_meshBudget)
         return {};
@@ -302,6 +310,32 @@ DualGeometry::Batch DualGeometry::prepare(const Mesh &mesh, const void *constant
     auto result = dispatch(std::move(page), mesh.source->buffer->GetGPUVirtualAddress(), vertices, 0);
     mesh.source->fence = m_device.GetCurrentFenceValue();
     return result;
+}
+
+bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batches, uint32_t firstChunk,
+                          uint32_t chunks, std::array<DualDrawBounds, 2> &result) const
+{
+    result = {};
+    if (!mesh.source || mesh.source->owner != this || !constants || batches != mesh.source->firsts.size() ||
+        firstChunk >= batches || !chunks || chunks > batches - firstChunk)
+        return false;
+    const auto *transforms = static_cast<const uint8_t *>(constants);
+    const auto *first = transforms + firstChunk * 144;
+    DualAttributes attributes;
+    for (uint32_t i = firstChunk; i < firstChunk + chunks; ++i)
+    {
+        if (std::memcmp(first, transforms + i * 144, 132) || word(transforms + i * 144 + 140) != mesh.source->firsts[i])
+            return false;
+        mergeDualAttributes(attributes, mesh.source->attributes[i]);
+    }
+    if (!projectDualBounds(attributes, first, word(first + 128), result[0]))
+        return false;
+    if (std::memcmp(first, first + 64, 64) == 0)
+    {
+        result[1] = result[0];
+        return true;
+    }
+    return projectDualBounds(attributes, first + 64, word(first + 128), result[1]);
 }
 
 DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices,

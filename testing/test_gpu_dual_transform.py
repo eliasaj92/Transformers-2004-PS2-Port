@@ -286,11 +286,11 @@ def draw(directory, dll, report_path):
         gs.tf_gs_open.restype = c.c_int
         gs.tf_gs_close.argtypes = []
         gs.tf_gs_close.restype = None
-        probe = gs.tf_gs_gpu_dual_draw_probe_v2
+        probe = gs.tf_gs_gpu_dual_draw_probe_v3
         probe.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32, c.POINTER(c.c_uint32), c.c_uint32, c.c_void_p,
                           c.POINTER(c.c_uint64), c.c_void_p, c.c_uint32]
         probe.restype = c.c_int
-        error, stats = c.create_string_buffer(4096), (c.c_uint64 * 12)()
+        error, stats = c.create_string_buffer(4096), (c.c_uint64 * 17)()
         source, constants, reference = (c.create_string_buffer(value) for value in (inputs, batches, expected))
         if not gs.tf_gs_open(1, 0, str(dll.parent / "resources").encode(), error, len(error)):
             raise RuntimeError(error.value.decode(errors="replace"))
@@ -305,6 +305,8 @@ def draw(directory, dll, report_path):
               "handler_replacements": stats[6], "ordinary_draws": stats[7],
               "mesh_uploads": stats[8], "resident_mesh_bytes": stats[9],
               "source_upload_bytes": stats[10], "constant_upload_bytes": stats[11],
+              "bounded_groups": stats[12], "declined_bounds": stats[13], "bounded_vertices": stats[14],
+              "wrapped_bounds": stats[15], "max_bounds_area_ratio": stats[16] / 1000000,
               "dll_sha256": digest(dll.read_bytes()), "fixture_sha256": meta["sha256"],
               "prepared_manifest_sha256": digest((directory / "manifest.json").read_bytes()),
               "scope": "GPU-resident captured-mesh draws with diagnostic GS state; not live game integration or FPS"}

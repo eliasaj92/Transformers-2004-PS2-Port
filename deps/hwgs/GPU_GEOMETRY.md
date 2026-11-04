@@ -203,7 +203,8 @@ packed-register decode and captured raw geometry. Grouped drawing preserves
 each chunk's restart boundaries and primitive order. Both field outputs are
 checked against separately submitted CPU-reference chunks in the same fitted
 viewport: **898 grouped GPU draws versus 2,966 individual comparison draws**,
-**840,626 painted pixels and zero differing pixels**, including two outstanding
+**489,730 painted pixels and zero differing pixels** with the conservative
+metadata viewports described below, including two outstanding
 color variants and completed-output reuse. This is an untextured diagnostic,
 not permission to reorder live textured draws between fields.
 
@@ -220,13 +221,76 @@ The grouped diagnostic performs two source uploads and three dispatches:
 1,126,144 source bytes total, 319,680 transform bytes total, and **no source
 upload on reuse**. It also checks retained/in-flight source protection, budget
 exhaustion, completed-source eviction, foreign handles and changed chunk-offset
-rejection. Diagnostic export `_v2` prevents accidental calls through the older
+rejection. Diagnostic export `_v3` prevents accidental calls through the older
 argument layout. Reports bind both payloads and the grouping manifest by hash.
-Reuse also swaps the two view matrices, compared against swapped captured
-output records, to check transform updates on an unchanged resident mesh.
+Reuse now swaps the second field's projected X/Y matrix rows, compared against swapped
+captured X/Y coordinates, to check transform updates on an unchanged resident
+mesh. The previous field-matrix swap did not establish this: those matrices
+were equal in the captured inputs. The diagnostic now requires changed output
+coordinates before accepting its transform-update check.
 
 The runtime still needs ordered engine-to-GS metadata and draw-state preparation
 without bulk CPU geometry. The current GS front end derives texture bounds,
 LOD, depth and blend decisions from its CPU vertex trace and also reads vertices
 in special-case paths. Passing only the GPU buffer does not remove that work.
 These changes neither enable live VU bypass nor establish an FPS improvement.
+
+## Bounds preparation without transformed CPU vertices
+
+`tf_gpu_dual_bounds.cpp` computes source position/STQ extents and color ranges
+once, during mesh upload. `DualGeometry::bounds` merges those cached extents for
+a complete mesh, requires shared matrices/bias and matching chunk offsets, and
+produces both fields' draw metadata. It does not retain source vertices on the
+CPU, read GPU output, or evaluate every vertex again.
+
+Each projection evaluates eight object-box corners. Bounds on separate VU
+multiply/add, reciprocal and final multiply rounding expand the projected box.
+They include RTZ and flush-to-zero error. Linear-fractional corner extrema are
+used only with a strictly positive homogeneous denominator. Texture coverage
+accounts for STQ bias and division rounding while cancelling the shared
+perspective factor. Packed X/Y/Z wrap conservatively covers the full affected
+axis. Nonfinite/overflowing data, a box reaching W=0, or nonpositive output Q
+decline preparation; callers must retain the ordinary path for these cases.
+
+The helper builds as a separate strict-floating-point object, since the GS
+library's `/fp:contract` is incompatible with MSVC `/fp:strict`. It saves and
+restores the caller's environment, including VU-style RTZ/FTZ/DAZ controls.
+
+All **224 whole-mesh instances** qualify in the private enhanced capture.
+Every one of their **35,192 output vertices** lies within the computed packed
+XYZ, STQ, normalized texture and color bounds; no coordinate wrap occurs in this
+set. Zero-W and NaN inputs are rejected. The largest box has **10.15244 times**
+the exact projected vertex-box area, so conservative preparation can enlarge
+texture-cache work; this has not been measured in a live scene.
+
+The grouped GPU diagnostic now constructs its viewport from these cached
+metadata bounds, without consulting transformed CPU vertices. Only the
+independent comparison draws use the captured vertices. The image comparison
+still passes with zero differing pixels, including the corrected X/Y transform
+update test. The fitted viewports and fixed untextured draw state remain
+diagnostic; they do not implement the game's texture/depth/blending decisions.
+
+The next renderer integration must feed these bounds into GS vertex-trace/LOD
+preparation and handle or decline per-vertex special cases before calling the
+GPU draw interface. `GSRendererHW::Draw` and `SetupIA` still contain CPU vertex
+reads, mutations and heuristic paths. Supplying bounds alone does not make
+those functions safe with a missing CPU vertex array. Ordered engine/VIF/GIF
+metadata and uncovered VU-state readers also remain required for live bypass.
+
+## Reusing identical field transforms
+
+All 740 chunks in the grouped set have bit-identical first/second field
+matrices. The compute shader now compares their words and reuses the first
+field's transformed record when equal, avoiding a second set of RTZ transform,
+reciprocal and perspective calculations. Both output records are still written,
+and their GS SCISSOR/XYOFFSET state remains separate. Different matrices execute
+both transforms.
+The CPU metadata helper also reuses its first bounds result for identical
+matrices, avoiding a duplicate corner projection.
+
+The updated shader matches all **37,136 native and raw output vertices** in the
+larger 776-chunk arithmetic set. The resident-draw check changes X/Y only in the
+second field on reuse, so it exercises both equal-matrix reuse and distinct
+matrix computation in one run. It still has zero pixel differences. This is
+validated elimination of redundant arithmetic in the GPU component, not a
+measured frame-rate gain or live geometry offload.

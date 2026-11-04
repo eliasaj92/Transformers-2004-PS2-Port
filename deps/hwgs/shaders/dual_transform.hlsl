@@ -109,25 +109,49 @@ void main(uint3 id : SV_DispatchThreadID)
     const uint flags = (mask << (vertex % 16)) & 65535;
     const float3 raw = asfloat(attributes.xyz);
     const float3 stq = float3(add_rtz(raw.x, -bias), add_rtz(raw.y, -bias), add_rtz(raw.z, -bias));
+    bool sameTransform = true;
+    [unroll] for (uint column = 0; column < 4; ++column)
+        sameTransform = sameTransform && all(batches.Load4(batch + column * 16) ==
+                                             batches.Load4(batch + 64 + column * 16));
+    uint4 previousLow = 0, previousHigh = 0;
+#ifdef TF_GPU_DUAL_CAPTURE
+    uint4 previousRawLow = 0, previousRawHigh = 0;
+#endif
     [unroll] for (uint field = 0; field < 2; ++field)
     {
+        const uint address = (id.x * 2 + field) * 32;
+        // Exact constant equality permits reusing the first field's result.
+        // GS SCISSOR/XYOFFSET remain separate per-field draw state.
+        [branch] if (field != 0 && sameTransform)
+        {
+            vertices.Store4(address, previousLow);
+            vertices.Store4(address + 16, previousHigh);
+#ifdef TF_GPU_DUAL_CAPTURE
+            vertices.Store4(count * 64 + address, previousRawLow);
+            vertices.Store4(count * 64 + address + 16, previousRawHigh);
+#endif
+            continue;
+        }
         const float4 projected = transform(batch + field * 64, asfloat(positionWords.xyz));
         const float q = reciprocal_rtz(projected.w);
         const float3 screen = mul_rtz(projected, q).xyz;
         const float3 uvq = float3(mul_rtz(stq.x, q), mul_rtz(stq.y, q), mul_rtz(stq.z, q));
         const int3 xyz = int3(screen * 16.0f);
-        const uint address = (id.x * 2 + field) * 32;
         const uint qword = asuint(uvq.z) == 0 ? 0x00800000u : asuint(uvq.z);
-        vertices.Store4(address, uint4(asuint(uvq.xy), attributes.w, qword));
-        vertices.Store4(address + 16, uint4((uint(xyz.x) & 65535) | (uint(xyz.y) << 16),
-            (uint(xyz.z) >> 4) & 0x00ffffffu, 0, (flags >> 4) & 255));
+        previousLow = uint4(asuint(uvq.xy), attributes.w, qword);
+        previousHigh = uint4((uint(xyz.x) & 65535) | (uint(xyz.y) << 16),
+            (uint(xyz.z) >> 4) & 0x00ffffffu, 0, (flags >> 4) & 255);
+        vertices.Store4(address, previousLow);
+        vertices.Store4(address + 16, previousHigh);
 #ifdef TF_GPU_DUAL_CAPTURE
         // Offline replay also needs the original packed GIF values. The native
         // vertex view uses only the first region; production omits this block.
         const uint rawAddress = count * 64 + address;
         const uint signedFlags = (flags & 32768) != 0 ? flags | 0xffff0000u : flags;
-        vertices.Store4(rawAddress, uint4(asuint(uvq), 0));
-        vertices.Store4(rawAddress + 16, uint4(uint3(xyz), signedFlags));
+        previousRawLow = uint4(asuint(uvq), 0);
+        previousRawHigh = uint4(uint3(xyz), signedFlags);
+        vertices.Store4(rawAddress, previousRawLow);
+        vertices.Store4(rawAddress + 16, previousRawHigh);
 #endif
     }
 }

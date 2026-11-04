@@ -8,6 +8,9 @@
 #include "GS/Renderers/Common/GSVertex.h"
 #include <array>
 #include <algorithm>
+#include <bit>
+#include <cfenv>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <stdexcept>
@@ -28,7 +31,7 @@ void require(bool condition, const char *text)
 }
 } // namespace
 
-extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe_v2(const void *inputs, uint32_t count, const void *constants,
+extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe_v3(const void *inputs, uint32_t count, const void *constants,
                                                         uint32_t batches, const uint32_t *groupEnds, uint32_t groups,
                                                         const void *expected, uint64_t *stats, char *error,
                                                         uint32_t capacity)
@@ -78,6 +81,108 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe_v2(const void *inputs, uint
             tf_gpu::DualGeometry pool(*gs, 2ull * (uploadBytes + outputBytes), 2ull * sourceBytes);
             auto firstMesh = pool.uploadMesh(inputs, count, batches);
             require(bool(firstMesh), "Cannot upload first resident mesh");
+            uint64_t boundedGroups = 0, declinedBounds = 0, boundedVertices = 0, wrappedBounds = 0;
+            double maxAreaRatio = 0;
+            std::vector<std::array<tf_gpu::DualDrawBounds, 2>> groupBounds(groups);
+            for (unsigned group = 0; group < groups; ++group)
+            {
+                const unsigned firstChunk = group ? groupEnds[group - 1] : 0, lastChunk = groupEnds[group];
+                const unsigned start = word(transforms + firstChunk * 144 + 140);
+                const unsigned end = lastChunk == batches ? count : word(transforms + lastChunk * 144 + 140);
+                auto &bounds = groupBounds[group];
+                const auto csr = _mm_getcsr();
+                const bool accepted =
+                    pool.bounds(firstMesh, constants, batches, firstChunk, lastChunk - firstChunk, bounds);
+                require(csr == _mm_getcsr(), "Bounds preparation changed the caller's floating-point state");
+                if (!accepted)
+                {
+                    ++declinedBounds;
+                    continue;
+                }
+                ++boundedGroups;
+                for (unsigned field = 0; field < 2; ++field)
+                {
+                    const auto &b = bounds[field];
+                    wrappedBounds += b.wrappedAxes != 0;
+                    unsigned minXY[2] = {65535, 65535}, maxXY[2] = {};
+                    for (unsigned i = start; i < end; ++i)
+                    {
+                        const auto *v = reference + (i * 2 + field) * 32;
+                        const uint32_t xy = word(v + 16), xyz[] = {xy & 65535, xy >> 16, word(v + 20)};
+                        const double stq[] = {std::bit_cast<float>(word(v)), std::bit_cast<float>(word(v + 4)),
+                                              std::bit_cast<float>(word(v + 12))};
+                        for (unsigned axis = 0; axis < 3; ++axis)
+                        {
+                            require(xyz[axis] >= b.xyzMin[axis] && xyz[axis] <= b.xyzMax[axis],
+                                    "Captured GS coordinate escaped conservative mesh bounds");
+                            require(stq[axis] >= b.stq[axis].low && stq[axis] <= b.stq[axis].high,
+                                    "Captured STQ escaped conservative mesh bounds");
+                        }
+                        for (unsigned axis = 0; axis < 2; ++axis)
+                        {
+                            const double texture = stq[axis] / stq[2];
+                            require(texture >= b.texture[axis].low && texture <= b.texture[axis].high,
+                                    "Captured texture coordinate escaped conservative mesh bounds");
+                            minXY[axis] = std::min(minXY[axis], xyz[axis]);
+                            maxXY[axis] = std::max(maxXY[axis], xyz[axis]);
+                        }
+                        for (unsigned channel = 0; channel < 4; ++channel)
+                        {
+                            const unsigned color = (word(v + 8) >> (channel * 8)) & 255;
+                            require(color >= b.colorMin[channel] && color <= b.colorMax[channel],
+                                    "Captured color escaped cached mesh bounds");
+                        }
+                        ++boundedVertices;
+                    }
+                    const double area = double(b.xyzMax[0] - b.xyzMin[0] + 1) * (b.xyzMax[1] - b.xyzMin[1] + 1);
+                    const double actual = double(maxXY[0] - minXY[0] + 1) * (maxXY[1] - minXY[1] + 1);
+                    maxAreaRatio = std::max(maxAreaRatio, area / actual);
+                }
+            }
+            require(boundedGroups == groups, "Diagnostic meshes require unambiguous conservative bounds");
+            {
+                struct EnvironmentRestore
+                {
+                    fenv_t environment;
+                    uint32_t csr = _mm_getcsr();
+                    EnvironmentRestore()
+                    {
+                        require(std::fegetenv(&environment) == 0, "Cannot save FP environment");
+                    }
+                    ~EnvironmentRestore()
+                    {
+                        std::fesetenv(&environment);
+                        _mm_setcsr(csr);
+                    }
+                } restore;
+                require(std::fesetround(FE_TOWARDZERO) == 0, "Cannot set VU-style rounding for metadata check");
+                _mm_setcsr(_mm_getcsr() | 0x8040u);
+                const uint32_t expectedCsr = _mm_getcsr();
+                std::array<tf_gpu::DualDrawBounds, 2> checked;
+                const bool accepted = pool.bounds(firstMesh, constants, batches, 0, groupEnds[0], checked);
+                require(_mm_getcsr() == expectedCsr && std::fegetround() == FE_TOWARDZERO,
+                        "Metadata preparation did not preserve VU-style floating-point controls");
+                require(accepted && checked[0].xyzMin == groupBounds[0][0].xyzMin &&
+                            checked[0].xyzMax == groupBounds[0][0].xyzMax,
+                        "Metadata depends on the caller's rounding controls");
+            }
+            {
+                std::vector<uint8_t> crossingW(transforms, transforms + batches * 144);
+                for (unsigned chunk = 0; chunk < groupEnds[0]; ++chunk)
+                    for (unsigned field = 0; field < 2; ++field)
+                        for (unsigned column = 0; column < 4; ++column)
+                            std::memset(crossingW.data() + chunk * 144 + field * 64 + column * 16 + 12, 0, 4);
+                std::array<tf_gpu::DualDrawBounds, 2> rejected;
+                require(!pool.bounds(firstMesh, crossingW.data(), batches, 0, groupEnds[0], rejected),
+                        "Mesh metadata accepted a zero perspective denominator");
+                std::vector<uint8_t> malformed(static_cast<const uint8_t *>(inputs),
+                                               static_cast<const uint8_t *>(inputs) + 3 * 32);
+                const uint32_t nan = 0x7fc00000;
+                std::memcpy(malformed.data(), &nan, 4);
+                tf_gpu::DualAttributes attributes;
+                require(!tf_gpu::summarizeDualInputs(malformed.data(), 3, attributes) && !attributes.valid,
+                        "Nonfinite source geometry produced usable metadata");
+            }
             std::vector<uint8_t> badConstants(transforms, transforms + batches * 144);
             badConstants[140] ^= 1;
             require(!pool.prepare(firstMesh, badConstants.data(), batches) && !pool.stats().dispatches,
@@ -162,16 +267,11 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe_v2(const void *inputs, uint
                     appendChunk(chunk, start, indices);
                 if (indices.empty())
                     return;
-                unsigned minX = 65535, minY = 65535, maxX = 0, maxY = 0;
-                for (unsigned i = 0; i < n; ++i)
-                {
-                    const uint32_t xy = word(cpu + (start * 2 + i * 2 + field) * 32 + 16);
-                    const unsigned x = xy & 65535, y = xy >> 16;
-                    minX = std::min(minX, x);
-                    maxX = std::max(maxX, x);
-                    minY = std::min(minY, y);
-                    maxY = std::max(maxY, y);
-                }
+                // Prepare the diagnostic viewport from cached object metadata,
+                // independently of transformed CPU-reference vertices.
+                const auto &bounds = groupBounds[index][field];
+                const unsigned minX = bounds.xyzMin[0], minY = bounds.xyzMin[1];
+                const unsigned maxX = bounds.xyzMax[0], maxY = bounds.xyzMax[1];
                 const unsigned tileX = (cell % columns) * tile, tileY = (cell / columns) * tile;
                 GSHWDrawConfig config{};
                 config.indices = indices.data();
@@ -230,17 +330,26 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe_v2(const void *inputs, uint
             require(!pool.prepare(firstMesh, constants, batches) && pool.stats().dispatches == 2,
                     "Geometry pool reused a released batch before its final fence completed");
             gs->ExecuteCommandList(true);
-            // Reuse immutable geometry with changed transforms. Swapping the
-            // two matrices has an independent reference: swap the two captured
-            // output records. The first page must get both the second mesh's
-            // colors and the new transforms without uploading source data.
+            // Swap projected X/Y only in the second field. This exercises both
+            // equal-field reuse and different-field computation in the shader.
             std::vector<uint8_t> swappedTransforms(transforms, transforms + batches * 144);
             for (unsigned chunk = 0; chunk < batches; ++chunk)
-                std::swap_ranges(swappedTransforms.begin() + chunk * 144, swappedTransforms.begin() + chunk * 144 + 64,
-                                 swappedTransforms.begin() + chunk * 144 + 64);
+                for (unsigned column = 0; column < 4; ++column)
+                {
+                    auto begin = swappedTransforms.begin() + chunk * 144 + 64 + column * 16;
+                    std::swap_ranges(begin, begin + 4, begin + 4);
+                }
             auto reusedVertices = secondVertices;
-            for (unsigned i = 0; i < count; ++i)
-                std::swap(reusedVertices[2 * i], reusedVertices[2 * i + 1]);
+            uint64_t changedCoordinates = 0;
+            const unsigned changedRange =
+                2 * (groupEnds[0] == batches ? count : word(transforms + groupEnds[0] * 144 + 140));
+            for (unsigned i = 1; i < reusedVertices.size(); i += 2)
+            {
+                auto &vertex = reusedVertices[i];
+                changedCoordinates += i < changedRange && vertex.XYZ.X != vertex.XYZ.Y;
+                std::swap(vertex.XYZ.X, vertex.XYZ.Y);
+            }
+            require(changedCoordinates > 0, "Transform update diagnostic did not change geometry");
             const auto *reusedExpected = reinterpret_cast<const uint8_t *>(reusedVertices.data());
             auto reused = pool.prepare(secondMesh, swappedTransforms.data(), batches);
             require(bool(reused) && pool.stats().allocations == 2 && pool.stats().reuses == 1,
@@ -249,6 +358,8 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe_v2(const void *inputs, uint
                         pool.stats().constantUploadBytes == uint64_t(batches) * 144 * 3,
                     "Resident mesh preparation uploaded source vertices again");
             require(!pool.uploadMesh(inputs, count, batches), "Completed retained mesh was evicted");
+            require(pool.bounds(secondMesh, swappedTransforms.data(), batches, 0, groupEnds[0], groupBounds[0]),
+                    "Changed transform did not produce conservative draw metadata");
             draw(reused, reusedExpected, 0, 0, 0);
             draw(reused, reusedExpected, 0, 1, 1);
             std::array<std::vector<uint8_t>, 2> images;
@@ -280,6 +391,11 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe_v2(const void *inputs, uint
             stats[9] = pool.stats().meshBytes;
             stats[10] = pool.stats().sourceUploadBytes;
             stats[11] = pool.stats().constantUploadBytes;
+            stats[12] = boundedGroups;
+            stats[13] = declinedBounds;
+            stats[14] = boundedVertices;
+            stats[15] = wrappedBounds;
+            stats[16] = static_cast<uint64_t>(std::ceil(maxAreaRatio * 1000000));
             require(hook.replaced == pool.stats().draws && hook.ordinary == expectedOrdinary,
                     "Native draw handler recursion or ordinary submission mismatch");
             require(nonzero > groups * 16ull && !differing, "GPU-resident dual draw image mismatch or empty rendering");

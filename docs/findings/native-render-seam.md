@@ -296,3 +296,31 @@ texture feedback or interleaved commands permit reordering. The remaining
 integration work is still draw-state preparation, ordered native submission,
 and unresolved VU-state handling. No additional game run or FPS claim follows
 from these offline checks.
+
+## CPU-independent mesh bounds
+
+Resident meshes now cache source extents and color ranges. The native component
+can project eight corners per whole mesh, with conservative bounds on VU
+rounding, to obtain packed XYZ, STQ and normalized texture coverage without
+transforming all source vertices on the CPU. All 224 qualified mesh instances
+pass containment checks for all 35,192 captured output vertices. Nonfinite,
+overflowing, nonpositive-Q and W=0-crossing cases are declined.
+
+The grouped draw diagnostic uses these bounds for viewport preparation and
+still matches its separate reference draws exactly. The maximum conservative
+box area is 10.15244 times the exact projected vertex box in this window; its
+effect on texture-cache work remains unmeasured. This bounds provider does not
+yet replace the GS renderer's vertex trace or its per-vertex heuristic paths.
+
+The earlier transform-update diagnostic swapped the two view matrices, which
+were equal in these captures. It therefore did not establish that updated
+matrices were consumed. The replacement swaps only the second field's X/Y rows and compares
+against independently swapped captured packed coordinates, requiring nonzero
+coordinate changes. That corrected diagnostic also passes. See
+[the implementation and limitations](../../deps/hwgs/GPU_GEOMETRY.md).
+
+All 740 grouped chunks have identical field matrices. The GPU shader now reuses
+the first transformed record in that case while retaining separate field draws.
+All 37,136 outputs in the larger 776-chunk arithmetic set still match, and the
+resident-draw test explicitly exercises distinct matrices after its update.
+No live gameplay measurement is implied by this shader optimization.

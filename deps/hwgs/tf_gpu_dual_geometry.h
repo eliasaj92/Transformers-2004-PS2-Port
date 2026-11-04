@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include "tf_gpu_dual_bounds.h"
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -69,6 +70,11 @@ class DualGeometry
     // Reusing Mesh uploads only transform records, never source vertices.
     // First-source offsets must match the immutable chunk layout exactly.
     Batch prepare(const Mesh &mesh, const void *constants, uint32_t batches);
+    // Whole-mesh metadata from cached source bounds and the two transforms.
+    // Chunks in this range must share matrices/bias. Does not map GPU output
+    // or transform the mesh's vertices on the CPU.
+    bool bounds(const Mesh &mesh, const void *constants, uint32_t batches, uint32_t firstChunk, uint32_t chunks,
+                std::array<DualDrawBounds, 2> &result) const;
 
     // Config indices are local to [firstSource, firstSource + sourceCount).
     // Each source has two interleaved output vertices (indices 2*i + field).
