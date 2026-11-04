@@ -70,3 +70,18 @@ All offsets below are specific to the verified USA executable. No generated func
 | Hub gate | Active `taScreenPrGRing` vtable `0x6bd8f0`, owner/manager backlinks and active state |
 
 Static identification establishes where to test; game qualification establishes actual behavior across the campaign.
+
+
+## Objective guidance preview
+
+`game.objective_guidance` appears on the Display page as **Objective guidance (Amazon preview)**. It draws a compass arrow relative to the Autobot's heading and the distance in game world units to the next mapped Amazon guidance trigger. Camera-only rotation does not rotate this compass.
+
+The preview follows the live training, combat, dropship, ruins, waterfall, mountain-road and mountain-ruins trigger chain. It reads trigger positions, remaining activations and prerequisite links; it does not change mission progress. It hides when no mapped target is available, in other episodes, and for stale or invalid player state. This is route guidance, not yet a campaign-wide mission-objective system. Branches, later saved checkpoints, and all other missions require mapping and live qualification. The setting defaults off.
+
+## Timing investigation
+
+The 16:9 Hor+ camera mode already exists as `display.aspect=16:9`, with `display.aspect_method=horplus`. It is separate from hardware rendering scale and host output resolution.
+
+True 60 fps is not implemented by this change. A private experiment using the existing frame-wait switches achieved one pad update per guest vsync and a 16.683 ms timing slot, but left the native governor in its 30 Hz render/interpolation mode. At 4x hardware rendering, it also ran below real-time speed. Do not interpret 60 guest updates per guest second as 60 rendered frames per wall second. The original gameplay mode remains the normal launch configuration.
+
+For private reverse engineering, `PS2X_RESEARCH_RAM_DIR` optionally writes a 32 MiB RAM snapshot whenever a scripted `trainer_probe` runs. Create this directory outside the repository; snapshots contain private game data and must not be published. The option is unset in ordinary launches. Probe JSON also reports the governor's 30 Hz byte and the two-field frame-wait byte. `PS2X_HIRES_CAPTURE_KEEP_SIZE=1` preserves explicit window dimensions when using the existing host screenshot diagnostic.

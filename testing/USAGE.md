@@ -38,3 +38,6 @@ Additional scouting and development scripts are exploratory; do not assume they 
 ## Language essentials
 
 One statement per line; `#` introduces a comment. Labels end in `:`. `budget` bounds wall time; `stall` and `hard` bound guest inactivity. `wait`, `press ... until`, `stick` and `mark` express event-driven routes. `assert`, `pass`, `fail` and watchdogs determine verdicts. Runtime `Kernel/TestScript.cpp` is the authoritative parser; parse-check a changed route before measuring it. Disc file paths within scripts refer to the user's ISO; they do not imply distributed assets.
+
+
+The `enhancements/objective_guidance.tfs` route uses a private Amazon hub seed with Aftershock unlocked and `game.objective_guidance=on` in the test INI. It walks through the first guidance trigger, then disables the setting. Verify the logged Training area -> Combat training -> hidden transitions and inspect host captures. Ordinary comparison screenshots contain only guest output, so use `PS2X_HIRES_CAPTURE_DIR`, `PS2X_HIRES_CAPTURE_VS`, and `PS2X_HIRES_CAPTURE_KEEP_SIZE=1` to capture the host marker while preserving the requested window size. All captures and seed cards belong outside the source checkout.

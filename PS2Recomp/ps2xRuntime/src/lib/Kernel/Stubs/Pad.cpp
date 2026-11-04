@@ -7,6 +7,7 @@
 #include "../../ps2_pad_map.h" // TEMP(transformers): qualification - DS2 pressure byte order
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_trainer.h"
+#include "../../ps2_objectives.h"
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -904,6 +905,7 @@ namespace ps2_stubs
         ps2dbg::padReads.fetch_add(1, std::memory_order_relaxed);
         ps2FrameTimeNote(); // TEMP(transformers) qualification
         ps2x::trainer::service(rdram, ctx, runtime);
+        if(port==0 && slot==0) ps2_objectives::sample(rdram);
         if (!readPadPortData(port, slot, runtime, data, dataAddr))
         {
             setReturnS32(ctx, 0);

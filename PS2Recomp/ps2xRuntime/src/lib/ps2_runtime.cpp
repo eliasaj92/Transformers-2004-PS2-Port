@@ -60,6 +60,7 @@ void ps2PadSampleHostInput();       // ps2_pad.cpp, TEMP(transformers): latch ho
 void ps2PadStopHostRumble();        // ps2_pad.cpp, TEMP(transformers): playtest rumble off at exit
 #include "rlgl.h" // TEMP(transformers): own-framebuffer capture flush
 #include "ps2_playtest.h"           // TEMP(transformers): F12 problem marks, F11 fps overlay
+#include "ps2_objectives.h"
 #include "ps2_crash_reporter.h"     // crash report + minidump (generic, ported from SSX3)
 #include "ps2_sprint_probe.h"       // TEMP(transformers): qualification - PS2X_SPRINT_LOG=1 robot walk/run telemetry
 #include <sstream>
@@ -3327,6 +3328,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         ps2_remap::installGetter(*this);
     if (module.name == "SLUS_206.68") { ps2_carstick::install(*this); ps2_menustick::enable(); }
     if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2x::trainer::install(*this, elfCrc32);
+    if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2_objectives::install(*this, elfCrc32);
     {
         // Profile selection follows executable validation and precedes guest execution.
         // configureIoPathsFromElf runs before the CRC and initially resolves the normal card.
@@ -5880,6 +5882,7 @@ void PS2Runtime::run()
         { // TEMP(transformers) lane perfscope: UI block
             ps2PresentTrace::Scope traceStage(ps2PresentTrace::Ui,traceTick,traceSeq); // TEMP(transformers)
         ps2_perfscope::Scope perfUi(ps2_perfscope::RnUi); // TEMP(transformers) lane perfscope: debug UI + playtest overlays
+        ps2_objectives::draw(dstRect.x,dstRect.y,dstRect.width,dstRect.height);
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {
             m_debugUiDrawCallback(*this, m_debugUiUserData);
@@ -5906,7 +5909,7 @@ void PS2Runtime::run()
         // TEMP(transformers): deterministic final-framebuffer evidence for hires1 (never desktop capture).
         {
             ps2PresentTrace::Scope traceCapture(ps2PresentTrace::HiresCapture,traceTick,traceSeq); // TEMP(transformers)
-            static const bool captureWindow=[](){if(std::getenv("PS2X_HIRES_CAPTURE_DIR"))SetWindowSize(1600,1200);return true;}();
+            static const bool captureWindow=[](){if(std::getenv("PS2X_HIRES_CAPTURE_DIR") && !std::getenv("PS2X_HIRES_CAPTURE_KEEP_SIZE"))SetWindowSize(1600,1200);return true;}();
             (void)captureWindow;
             static std::vector<uint64_t> captureVs=[](){std::vector<uint64_t> v;
                 if(const char* e=std::getenv("PS2X_HIRES_CAPTURE_VS")){std::istringstream in(e);std::string x;

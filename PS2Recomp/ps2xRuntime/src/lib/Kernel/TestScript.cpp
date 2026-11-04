@@ -1303,9 +1303,9 @@ namespace ps2_test
                     // (especially save profiles) must be selected before boot in a private INI.
                     const bool allowed=key=="trainer.infinite_health" || key=="trainer.unlimited_energy" ||
                         key=="trainer.damage_multiplier" || key=="trainer.movement_multiplier" ||
-                        key=="renderer.hw_scale" || key=="renderer.hw_fxaa";
+                        key=="renderer.hw_scale" || key=="renderer.hw_fxaa" || key=="game.objective_guidance";
                     if(eq==std::string::npos || !def || !allowed || eq+1==s.arg.size()) {
-                        err="setting needs an implemented trainer or hardware-renderer key=value";return false;
+                        err="setting needs an implemented trainer, guidance or hardware-renderer key=value";return false;
                     }
                 }
                 else if (kw == "unlock")

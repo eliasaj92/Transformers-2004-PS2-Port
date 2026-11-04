@@ -129,6 +129,7 @@ namespace
     const char *const resoptSSAAL[]={"1x1 (Off)","1x2 (2 samples)","2x2 (4 samples)","2x4 (8 samples)","4x4 (16 samples)",nullptr};
     const std::vector<Def> &registry() {
         static const std::vector<Def> s_defs = {
+            {"game.objective_guidance",T::Bool,"off",0,0,0,nullptr,nullptr,nullptr,nullptr,A::NextFrame,P::Display,"objective-guidance","Objective guidance (Amazon preview)","Compass to the next verified Amazon mission-guidance trigger, relative to Autobot heading. Other missions are not mapped yet.",Scope::Guest},
             {"trainer.profile",T::Enum,"normal",0,0,0,trainerProfile,nullptr,nullptr,nullptr,A::Restart,P::Trainer,nullptr,"Save profile","Trainer starts with a copy of your last saved normal card. Profile changes take effect on restart.",Scope::Guest},
             {"trainer.infinite_health",T::Bool,"off",0,0,0,nullptr,nullptr,nullptr,nullptr,A::NextFrame,P::Trainer,"trainer-health","Infinite health","Prevents damage to the player's health. Disable to restore ordinary damage.",Scope::Guest},
             {"trainer.unlimited_energy",T::Bool,"off",0,0,0,nullptr,nullptr,nullptr,nullptr,A::NextFrame,P::Trainer,"trainer-energy","Unlimited weapon energy","Prevents the player's weapons from consuming energy.",Scope::Guest},

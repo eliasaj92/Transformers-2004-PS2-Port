@@ -382,8 +382,13 @@ void PS2PcMenu::revertResolutionSettings() {
 void PS2PcMenu::keepResolutionSettings(){previousDisplay.clear();m_resolutionDeadline=0;displayAwaitingValidation=false;}
 void PS2PcMenu::applyResolutionSettings(bool force) {
     namespace res=ps2x::resolution;
+    // A saved windowed size can always be recovered by resizing the window.
+    // Validate it normally, then retain it without a confirmation on every boot.
+    // Interactive changes and exclusive/borderless mode changes retain the guard.
+    static bool startupWindowed=false;
+    if(m_resolutionDeadline<=0)startupWindowed=false;
     ps2ResolutionWakeGS();
-    if(m_resolutionDeadline>0 && (GetTime()>=m_resolutionDeadline || (!st::harnessMode() && !IsWindowFocused()))) {revertResolutionSettings();return;}
+    if(m_resolutionDeadline>0 && (GetTime()>=m_resolutionDeadline || (!startupWindowed && !st::harnessMode() && !IsWindowFocused()))) {revertResolutionSettings();return;}
     if(st::getInt("display.monitor")>=GetMonitorCount() && GetMonitorCount()>0) {
         if(!previousDisplay.empty()){revertResolutionSettings();return;}
         auto safe=displayEntries();safe[0].value="windowed";safe[1].value=std::to_string(std::max(0,GetCurrentMonitor()));safe[2].value="desktop";safe[3].value="desktop";
@@ -401,6 +406,7 @@ void PS2PcMenu::applyResolutionSettings(bool force) {
         appliedDisplay[6].value="1";
         if(st::source("display.window_width")==st::Source::Default)appliedDisplay[4]=requested[4];
         if(st::source("display.window_height")==st::Source::Default)appliedDisplay[5]=requested[5];
+        startupWindowed=requested[0].value=="windowed" && !displayEqual(requested,appliedDisplay);
     }
     const auto gs=res::mailbox().status();
     if(m_resolutionDeadline>0 && st::getInt("display.monitor")>=GetMonitorCount()){revertResolutionSettings();return;}
@@ -420,7 +426,11 @@ void PS2PcMenu::applyResolutionSettings(bool force) {
         }
 #endif
         if(windowMode!=1 && text!="desktop" && res::parseMode(text,mode) && (GetRenderWidth()!=mode.width || GetRenderHeight()!=mode.height)) {revertResolutionSettings();return;}
-        if((!gs.ready && st::getInt("renderer.pgs_ssaa")==1) || (gs.ready && gs.acknowledged>=renderRequest))displayAwaitingValidation=false;
+        if((!gs.ready && st::getInt("renderer.pgs_ssaa")==1) || (gs.ready && gs.acknowledged>=renderRequest)) {
+            displayAwaitingValidation=false;
+            if(startupWindowed && windowMode==0){keepResolutionSettings();startupWindowed=false;
+                std::fprintf(stderr,"[display] saved windowed resolution validated and retained\n");}
+        }
     }
     if(displayEqual(requested,appliedDisplay))return;
     const int monitor=st::getInt("display.monitor");
@@ -432,7 +442,7 @@ void PS2PcMenu::applyResolutionSettings(bool force) {
     if(modes.empty() || !valid(output) || (windowMode==2 && !valid(requested[2].value)) || (gs.ready && samples>gs.maxSamples)) {
         st::restoreHostEntries(appliedDisplay);m_status="Requested mode/rate unavailable; previous settings retained";m_statusUntil=GetTime()+8;return;
     }
-    if(!m_open && !st::harnessMode())setOpen(true); // TEMP(transformers): startup/external changes expose keep/revert immediately
+    if(!m_open && !st::harnessMode() && !startupWindowed)setOpen(true); // Interactive changes expose keep/revert immediately.
     if(previousDisplay.empty()) {
         previousDisplay=appliedDisplay;priorMonitor=GetCurrentMonitor();priorW=GetScreenWidth();priorH=GetScreenHeight();
         priorMode=IsWindowFullscreen()?2:IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE)?1:0;

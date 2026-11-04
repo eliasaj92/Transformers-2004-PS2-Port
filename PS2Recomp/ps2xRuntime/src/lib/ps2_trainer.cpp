@@ -16,6 +16,8 @@
 #include <unordered_set>
 #include <vector>
 #include <sstream>
+#include <fstream>
+#include <cstdlib>
 
 namespace ps2x::trainer {
 namespace {
@@ -271,6 +273,15 @@ bool requestUnlock(Unlock action) {
     pending.fetch_or(static_cast<unsigned>(action)); return true;
 }
 std::string diagnostics(const uint8_t* ram) {
+    // Explicit, private reverse-engineering capture at a scripted EE-thread checkpoint.
+    // Never enabled by the launcher or by ordinary trainer settings.
+    if(supported.load())if(const char* directory=std::getenv("PS2X_RESEARCH_RAM_DIR");directory && *directory) {
+        static unsigned sequence=0;
+        const auto path=std::filesystem::path(directory)/("checkpoint-"+std::to_string(++sequence)+".rdram");
+        std::ofstream dump(path,std::ios::binary);
+        dump.write(reinterpret_cast<const char*>(ram),0x2000000);
+        std::fprintf(stderr,"[research] RAM checkpoint %u: %s (%s)\n",sequence,path.string().c_str(),dump?"written":"failed");
+    }
     const auto actor=player(ram),context=actor?read<uint32_t>(ram,actor+0x7c):0;
     unsigned available=0,completed=0;
     for(unsigned i=0;i<8;++i){const auto flags=read<uint32_t>(ram,0x717114+i*0x4c);available|=(flags&1)<<i;completed|=((flags>>1)&1)<<i;}
@@ -281,6 +292,8 @@ std::string diagnostics(const uint8_t* ram) {
        <<",\"mode\":\""<<ps2_carstick::name(ps2_carstick::snapshot().mode)<<'"'
        <<",\"health\":"<<read<float>(ram,healthResource+4)<<",\"health_max\":"<<read<float>(ram,healthResource+12)
        <<",\"movement_scale\":"<<(context?read<float>(ram,context+0x1fc):0)
+       <<",\"governor_30hz\":"<<unsigned(read<uint8_t>(ram,0x6cd984))
+       <<",\"frame_wait_two_fields\":"<<unsigned(read<uint8_t>(ram,0x6cf010))
        <<",\"health_blocked\":"<<blockedHealth<<",\"energy_refills\":"<<refilledEnergy<<",\"damage_scaled\":"<<scaledDamage
        <<",\"minicons\":"<<read<uint64_t>(ram,0x7173c0)<<",\"levels_available\":"<<available<<",\"levels_completed\":"<<completed
        <<",\"weapons\":[";

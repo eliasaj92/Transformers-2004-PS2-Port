@@ -1,0 +1,64 @@
+# Visible accelerated Amazon guidance check.
+# Requires a private Amazon hub save with Aftershock unlocked and the first gate selected.
+# Set game.objective_guidance=on in the test INI; game data and saves are not distributed.
+# Inspect host captures and [objective] transitions; script PASS alone is insufficient.
+# Expected: Training area -> Combat training during the walk, then hidden after toggling off.
+# Capture host vsyncs 9300,10300,10830 with PS2X_HIRES_CAPTURE_KEEP_SIZE=1.
+# Use PS2X_RESOPT2_HOST_SEQUENCE=0:1920x1080@60:1 to apply host resolution in the harness.
+
+budget 2300s
+stall 600 hard 3600
+watchdog warn 30 600
+defaults hold=3 gap=6 timeout=3000vs
+dumpsteps on
+
+boot:     wait seen /FMV/NATTRACT.PSS timeout 4000vs           # notices + 2 logos, untouched
+          wait pads 4
+title:    press start until pads 200 every 40 max 5            # START#1 skips the CG, a later one: title -> main menu
+          mark main_menu                                       # NEW GAME highlighted
+menu:     press down                                           # -> CONTINUE GAME
+          wait pads 20
+          mark main_continue_game
+          press cross                                          # -> "Saved Games" list, slot 1 = private Amazon hub seed
+          wait pads 60 timeout 9000vs
+          mark saved_games
+loadsave: press cross until cd /SOUND/MUSIC/UI_MAIN.MS every 120 max 2 timeout 3000vs   # load slot 1 -> hub loads
+hubload:  wait pads 40 timeout 9000vs                          # hub camera settles; "View Mission Sites" preselected
+          mark hub_view_mission_sites
+          press left
+          wait pads 30
+          press cross
+          wait pads 60
+          press cross
+          wait pads 60
+          mark aftershock_selected
+          press cross
+          wait pads 60
+          mark aftershock_equipped
+          press triangle
+          wait pads 40
+          mark back_to_hub
+          press right
+          wait pads 30
+missions: press cross until cd /FMV/LEVELS/N01AMA.M2V every 60 max 2 timeout 1500vs
+          wait pads 4
+          mark globe
+          press cross hold=2 gap=4
+          wait pads 30 timeout 9000vs
+          mark warp_gate
+          press cross until cd /TFA.ZIP@1940-44053 or cd /SOUND/MUSIC/AMAZON.MS every 30 max 3 timeout 3000vs
+          wait pads 200 timeout 9000vs
+          mark level_ingame
+          wait vs 3800 timeout 40000vs
+          mark objective_spawn
+          trainer_probe
+          wait vs 600
+          stick 128 0 128 128
+          wait vs 360 timeout 20000vs
+          stick none
+          mark objective_walk
+          trainer_probe
+          wait vs 600
+          setting game.objective_guidance=off
+          wait vs 120
+          pass objective guidance preview toggled off
