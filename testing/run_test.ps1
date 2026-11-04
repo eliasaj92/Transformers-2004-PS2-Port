@@ -8,6 +8,7 @@ param(
     [int]$Seconds=1200,
     [string]$McSeed='',
     [string]$Env='',
+    [ValidateSet('BelowNormal','Normal')][string]$ProcessPriority='BelowNormal',
     [string[]]$BusyFlag=@(),
     [string]$SlotFile='',
     [string]$PgoSweepTool='',
@@ -84,7 +85,12 @@ try {
     $child=Start-Process -FilePath $Exe -ArgumentList ('"'+$Elf+'"') -WorkingDirectory $workPath -WindowStyle Normal -PassThru -RedirectStandardOutput (Join-Path $workPath 'stdout.log') -RedirectStandardError (Join-Path $workPath 'stderr.log')
     # Retain the process handle so ExitCode remains available after a short run.
     [void]$child.Handle
-    try { if (-not $child.HasExited) { $child.PriorityClass='BelowNormal' } }
+    try {
+        if (-not $child.HasExited) {
+            $child.PriorityClass=$ProcessPriority
+            "RUN_PROCESS_PRIORITY=$($child.PriorityClass)" | Add-Content (Join-Path $workPath 'env.txt')
+        }
+    }
     catch {
         # Preserve the logs and exit code when termination races this update.
         if (-not $child.HasExited) { throw }
@@ -94,7 +100,7 @@ try {
         for ($attempt=1; $attempt -le 60 -and -not $child.HasExited; $attempt++) {
             $sweepLog=Join-Path $workPath "sweep-$attempt.log"
             $sweepErr=Join-Path $workPath "sweep-$attempt.err"
-            $sweep=Start-Process -FilePath $PgoSweepTool -ArgumentList @("/pid:$($child.Id)",'/wait',('"'+$Exe+'"'),('"'+$PgoSweepOutput+'"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput $sweepLog -RedirectStandardError $sweepErr
+            $sweep=Start-Process -FilePath $PgoSweepTool -ArgumentList @("/pid:$($child.Id)",'/wait',('"'+$Exe+'"'),('"'+$PgoSweepOutput+'"')) -WindowStyle Normal -PassThru -RedirectStandardOutput $sweepLog -RedirectStandardError $sweepErr
             $sweepHandle=$sweep.Handle
             try { if (-not $sweep.HasExited) { $sweep.PriorityClass='BelowNormal' } } catch { }
             while (-not $sweep.HasExited) {

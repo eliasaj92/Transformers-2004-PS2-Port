@@ -53,4 +53,26 @@ That investigation now includes a handwritten grass geometry and packet model. O
 
 The standalone accelerated replay now reproduces 5,000 consecutive captured calls exactly, including registers, memory, cycles and GIF output. In one replay's host-thread cycle accounting, grass continuations account for about 7.1% of measured VU execution. This small captured window is not a gameplay benchmark and differs from the sampled scene above. It reinforces that completing only grass cannot be assumed to deliver the needed whole-frame speedup; dual-transform/reflection batches remain important coverage targets.
 
-A private SIMD experiment also matched a simplified saturating float-to-integer conversion against the current helper on 40,388,608 normalized float inputs, all four VU scale factors, and nearest/toward-zero rounding. That arithmetic candidate is not integrated into the game build and carries no gameplay performance claim.
+A private SIMD experiment also matched a simplified saturating float-to-integer conversion against the current helper on 40,388,608 normalized float inputs, all four VU scale factors, and nearest/toward-zero rounding. It was subsequently built into an enhanced experimental executable; the level measurements below do not establish a performance benefit. It has not been promoted into the main toolchain.
+
+## Focused level performance work
+
+Current testing uses enhanced accelerated builds only, including for bug investigation. Do not launch original builds or repeat menu/equipment checks. `testing/enhancements/level_performance.tfs` loads the private save, enters Amazon directly, skips opening and arrival cinematics, then measures movement, a camera turn and sustained level rendering. Navigation is excluded from `perf_begin` through `perf_end`. Captures, memory cards and generated binaries remain private.
+
+Use static VU, direct D3D12 presentation, 4x internal rendering, 1920x1080 output, 16:9, native-timing variant 3 and the movement-blend correction. Disable diagnostic hashing, grass comparison, perfscope and hardware profiling while measuring speed. Pass `-ProcessPriority Normal` to `testing/run_test.ps1`; the generic runner otherwise uses `BelowNormal`. The chosen priority is recorded in the private environment log. Profile collectors also use visible windows.
+
+`python -B testing/summarize_level_performance.py <private-run-directory>` checks the enhanced configuration and successful route, rejects missing/duplicate field samples, and reports host-time intervals for the in-level physics updates. These are simulation updates, not proof of distinct rendered images or sustained 60 fps. The route needs 16.7 ms per update to reach that target.
+
+The first level-only experiments each covered 2,281 physics samples over fields 2697 through 4977, with a 0.0166833512-second timestep:
+
+| Enhanced experiment | Process priority | Updates/s | Median / p95 interval |
+|---|---|---:|---:|
+| Four-lane float-to-integer conversion | BelowNormal | 45.73 | 21.29 / 27.19 ms |
+| Reuse equal affine transforms | BelowNormal | 45.44 | 21.37 / 27.31 ms |
+| Equal transforms plus existing fast EE checkpoints | BelowNormal | 41.72 | 23.15 / 31.73 ms |
+| Combined FMAC arithmetic checks in grass/reflection | BelowNormal | 42.41 | 22.82 / 30.06 ms |
+| Combined FMAC arithmetic checks in grass/reflection | Normal | 41.22 | 23.27 / 31.81 ms |
+
+These are unpaired desktop measurements, affected by other activity and power/thermal conditions. None demonstrates a speed improvement, so the arithmetic candidates and fast checkpoint setting remain experimental. The combined-check candidate matched 5,374 recorded accelerated calls exactly (registers, data, code, cycles and ordered packets), with no interpreter fallback or pending transfer. Its synthetic boundary check also passed 50,000 vector inputs across 72 operation, lane-mask and normalization cases. Correctness alone did not make it faster.
+
+A separate profile of the enhanced matrix build attributed 89.4% of VU worker time to VU execution and 8.5% to VIF work; the VU thread consumed approximately 97% of one CPU core. Grass and reflection remained the largest sampled regions. The GS submission thread mostly waited, which does not measure GPU utilization. That profile's final wait exceeded its script timeout; the valid 20-second sample preceded that test-script failure, and the extended wait now has an explicit longer timeout. No original build was launched to investigate it.
