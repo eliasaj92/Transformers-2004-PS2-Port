@@ -3,8 +3,39 @@
 // Inputs: position.xyz/batch index, raw STQ/packed RGBA (32 bytes per vertex).
 // Batch: two column-major matrices, STQ bias, two restart masks and the first
 // source vertex index (144 bytes). Output uses PACKED XYZF2 depth/fog semantics.
+#ifdef TF_GPU_DUAL_GROUPED
+// Up to eight independent resident source buffers. Grouped transform records
+// have a 160-byte stride: the ordinary 144 bytes, source count and output base.
+ByteAddressBuffer source0 : register(t0);
+ByteAddressBuffer source1 : register(t1);
+ByteAddressBuffer source2 : register(t2);
+ByteAddressBuffer source3 : register(t3);
+ByteAddressBuffer source4 : register(t4);
+ByteAddressBuffer source5 : register(t5);
+ByteAddressBuffer source6 : register(t6);
+ByteAddressBuffer source7 : register(t7);
+ByteAddressBuffer batches : register(t8);
+uint4 sourceWords(uint slot, uint address)
+{
+    switch (slot)
+    {
+    case 0: return source0.Load4(address);
+    case 1: return source1.Load4(address);
+    case 2: return source2.Load4(address);
+    case 3: return source3.Load4(address);
+    case 4: return source4.Load4(address);
+    case 5: return source5.Load4(address);
+    case 6: return source6.Load4(address);
+    default: return source7.Load4(address);
+    }
+}
+#ifdef TF_GPU_DUAL_CAPTURE
+#error Grouped draws use the native frontend diagnostic, not the raw capture layout.
+#endif
+#else
 ByteAddressBuffer inputs : register(t0);
 ByteAddressBuffer batches : register(t1);
+#endif
 RWByteAddressBuffer vertices : register(u0);
 cbuffer Dispatch : register(b0) { uint count; };
 
@@ -98,13 +129,26 @@ float4 transform(uint address, float3 p)
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
+#ifdef TF_GPU_DUAL_GROUPED
+    const uint slot = id.x / 32, vertex = id.x % 32;
+    if (slot >= count)
+        return;
+    const uint batch = slot * 160;
+    if (vertex >= batches.Load(batch + 144))
+        return;
+    const uint4 positionWords = sourceWords(slot, vertex * 32);
+    const uint4 attributes = sourceWords(slot, vertex * 32 + 16);
+    const uint outputVertex = batches.Load(batch + 148) + vertex;
+#else
     if (id.x >= count)
         return;
     const uint4 positionWords = inputs.Load4(id.x * 32);
     const uint4 attributes = inputs.Load4(id.x * 32 + 16);
     const uint batch = positionWords.w * 144;
-    const float bias = asfloat(batches.Load(batch + 128));
     const uint vertex = id.x - batches.Load(batch + 140);
+    const uint outputVertex = id.x;
+#endif
+    const float bias = asfloat(batches.Load(batch + 128));
     const uint mask = batches.Load(batch + 132 + (vertex / 16) * 4);
     const uint flags = (mask << (vertex % 16)) & 65535;
     const float3 raw = asfloat(attributes.xyz);
@@ -119,7 +163,7 @@ void main(uint3 id : SV_DispatchThreadID)
 #endif
     [unroll] for (uint field = 0; field < 2; ++field)
     {
-        const uint address = (id.x * 2 + field) * 32;
+        const uint address = (outputVertex * 2 + field) * 32;
         // Exact constant equality permits reusing the first field's result.
         // GS SCISSOR/XYOFFSET remain separate per-field draw state.
         [branch] if (field != 0 && sameTransform)

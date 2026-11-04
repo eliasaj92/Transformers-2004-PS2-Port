@@ -96,3 +96,33 @@ This establishes a captured-window bypass, not a game FPS result: GPU dispatch
 was performed separately, unresolved registers remain, and the live renderer
 does not yet submit these batches. Details and limitations are recorded in
 [the native-render investigation](native-render-seam.md#dual-transform-state-preservation-and-bypass).
+
+## Profile after live GPU bypass
+
+After the guarded dual-transform tail, setup/UNPACK read-footprint improvements
+and GPU buffer-pool changes, a fresh enhanced level run passed at 55.7436 physics
+updates/s. A separate extended level route then passed with a 20-second
+instruction-pointer sample. It collected 10,110 samples per target thread;
+this instrumented run is not a frame-rate measurement.
+
+| VU region | Role | Samples |
+|---|---|---:|
+| sr729 | Grass | 12.36% |
+| sr728 | Grass | 2.34% |
+| sr752 | First-pass reflection | 3.78% |
+| sr799 | Fast dual-texture transform | 2.84% |
+| commitReadyPipelines | Retained VU execution | 3.40% |
+| progressXgkick | Graphics-packet progression | 2.98% |
+
+The game thread also sampled guest dispatch, checkpoints, memory copies and
+IOP work. The runtime GS submission thread spent 92.10% of its samples waiting;
+that is a separate thread from the hardware renderer and does not establish
+GPU utilization. These observations identify remaining CPU work after the
+dual-transform offload, rather than qualifying removal of another VU program.
+
+The following grouped GPU-dispatch build passed the same uninstrumented level
+route at 57.3835 physics updates/s and 57.1753 direct-frame handoffs/s. It issued
+172,005 compute dispatches over the whole session. See the
+[GPU group contract](../../deps/hwgs/GPU_GEOMETRY.md#ordered-gpu-dispatch-groups)
+for correctness checks and limitations. Grass remains the next geometry lead;
+distinct rendered 60 fps is not yet established.

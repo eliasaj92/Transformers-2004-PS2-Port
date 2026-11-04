@@ -11,6 +11,7 @@
 #include <array>
 #include <bit>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <list>
 #include <memory>
@@ -67,6 +68,7 @@ struct Live
     std::unordered_set<uint64_t> sourceHashes;
     uint64_t packets = 0, gpuDraws = 0, cpuFallbacks = 0, declinedFields = 0, sourceHits = 0, noBounds = 0;
     uint64_t sourceDeclined = 0, outputDeclined = 0;
+    uint64_t packetGroups = 0, groupPackets = 0, groupDeclined = 0;
     // Retain the visible level's source working set. The initial 256-entry
     // cache uploaded 125,208 of 155,337 packets. Extra pool capacity covers
     // released buffers which are still in flight.
@@ -116,10 +118,12 @@ struct Live
                      "[gpu-dual:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu declined_fields=%llu "
                      "source_hits=%llu bounds_declined=%llu dispatches=%llu source_uploads=%llu source_bytes=%llu "
                      "output_allocations=%llu page_probes=%llu source_declined=%llu output_declined=%llu "
-                     "unique_source_hashes=%zu\n",
+                     "unique_source_hashes=%zu grouped_dispatches=%llu grouped_meshes=%llu packet_groups=%llu "
+                     "group_packets=%llu group_declined=%llu\n",
                      packets, gpuDraws, cpuFallbacks, declinedFields, sourceHits, noBounds, s.dispatches, s.meshUploads,
                      s.sourceUploadBytes, s.allocations, s.pageProbes, sourceDeclined, outputDeclined,
-                     sourceHashes.size());
+                     sourceHashes.size(), s.groupedDispatches, s.groupedMeshes, packetGroups, groupPackets,
+                     groupDeclined);
     }
 };
 // Accessed/destroyed only on the owning GS thread, before device shutdown.
@@ -157,6 +161,7 @@ struct Draw
     unsigned vertices;
     const gsnative::DualPacket &geometry;
     std::vector<uint8_t> restored;
+    uint32_t firstSource = 0;
 };
 const uint8_t *fullPacket(Draw &draw)
 {
@@ -186,7 +191,7 @@ bool submit(void *context, GSHWDrawConfig &config)
             return false;
         }
     }
-    if (!d.owner.pool.draw(d.batch, config, 0, d.vertices))
+    if (!d.owner.pool.draw(d.batch, config, d.firstSource, d.vertices))
         return false;
     ++d.owner.gpuDraws;
     return true;
@@ -220,7 +225,14 @@ bool framing(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t byte
     }
     return true;
 }
-void execute(const uint8_t *bytes, uint32_t size)
+struct Prepared
+{
+    tf_gpu::DualGeometry::Mesh mesh;
+    tf_gpu::DualGeometry::Batch batch;
+    std::array<tf_gpu::DualDrawBounds, 2> bounds;
+    uint32_t first = 0;
+};
+void executePacket(const uint8_t *bytes, uint32_t size, const Prepared *prepared)
 {
     if (size < sizeof(Payload))
         return;
@@ -248,15 +260,17 @@ void execute(const uint8_t *bytes, uint32_t size)
     if (!live)
         live = std::make_unique<Live>(*GSDevice12::GetInstance());
     ++live->packets;
-    auto mesh = live->source(p);
+    auto mesh = prepared ? prepared->mesh : live->source(p);
     if (!mesh)
     {
         ++live->sourceDeclined;
         ordinary();
         return;
     }
-    std::array<tf_gpu::DualDrawBounds, 2> bounds;
-    if (!live->pool.bounds(mesh, p.constants.data(), 1, 0, 1, bounds))
+    std::array<tf_gpu::DualDrawBounds, 2> bounds{};
+    if (prepared)
+        bounds = prepared->bounds;
+    else if (!live->pool.bounds(mesh, p.constants.data(), 1, 0, 1, bounds))
     {
         ++live->noBounds;
         ordinary();
@@ -265,6 +279,11 @@ void execute(const uint8_t *bytes, uint32_t size)
     auto *renderer = GSRendererHW::GetInstance();
     const unsigned fieldBytes = (4 + 3 * p.vertices) * 16;
     Draw draw{*live, mesh, p.constants.data(), {}, packet, p.vertices, p, {}};
+    if (prepared && prepared->batch)
+    {
+        draw.batch = prepared->batch;
+        draw.firstSource = prepared->first;
+    }
     for (unsigned field = 0; field < 2; ++field)
     {
         const auto *f = packet + field * fieldBytes;
@@ -312,6 +331,70 @@ void execute(const uint8_t *bytes, uint32_t size)
     if ((live->packets & 4095) == 0)
         live->report();
 }
+void execute(const uint8_t *bytes, uint32_t size)
+{
+    executePacket(bytes, size, nullptr);
+}
+void executeGroup(const kzgs::PacketView *views, uint32_t count)
+{
+    const auto ordinary = [&] {
+        for (unsigned i = 0; i < count; ++i)
+            execute(views[i].data, views[i].bytes);
+    };
+    if (count < 2 || count > kzgs::MaxPacketGroup || !g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12 ||
+        g_gs_renderer->m_path[0].nloop)
+    {
+        ordinary();
+        return;
+    }
+    for (unsigned i = 0; i < count; ++i)
+    {
+        if (views[i].bytes < sizeof(Payload))
+        {
+            ordinary();
+            return;
+        }
+        const auto &p = *reinterpret_cast<const Payload *>(views[i].data);
+        if (p.path != 1 || p.bytes != views[i].bytes - sizeof(Payload) ||
+            !framing(p.geometry, views[i].data + sizeof(Payload), p.bytes))
+        {
+            ordinary();
+            return;
+        }
+    }
+    if (!live)
+        live = std::make_unique<Live>(*GSDevice12::GetInstance());
+    ++live->packetGroups;
+    live->groupPackets += count;
+    std::array<Prepared, kzgs::MaxPacketGroup> prepared;
+    std::array<tf_gpu::DualGeometry::Mesh, kzgs::MaxPacketGroup> meshes;
+    std::array<uint8_t, kzgs::MaxPacketGroup * 144> constants;
+    uint32_t first = 0;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const auto &geometry = reinterpret_cast<const Payload *>(views[i].data)->geometry;
+        prepared[i].mesh = meshes[i] = live->source(geometry);
+        if (!meshes[i] || !live->pool.bounds(meshes[i], geometry.constants.data(), 1, 0, 1, prepared[i].bounds))
+        {
+            ++live->groupDeclined;
+            ordinary();
+            return;
+        }
+        std::memcpy(constants.data() + i * 144, geometry.constants.data(), 144);
+        prepared[i].first = first;
+        first += geometry.vertices;
+    }
+    // Only immutable source buffers and owned output are touched here. All GS
+    // state, textures, fallback handling and draw calls remain in packet order.
+    const auto batch = live->pool.prepareGroup(meshes.data(), constants.data(), count);
+    if (!batch)
+        ++live->groupDeclined;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        prepared[i].batch = batch;
+        executePacket(views[i].data, views[i].bytes, &prepared[i]);
+    }
+}
 } // namespace
 
 extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_t bytes,
@@ -323,6 +406,12 @@ extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_
     const Payload payload{*geometry, path, bytes, 0};
     std::memcpy(storage.data(), &payload, sizeof(payload));
     std::memcpy(storage.data() + sizeof(payload), data, bytes);
+    static const bool grouped = [] {
+        const char *p = std::getenv("PS2X_TF_GPU_GROUPS");
+        return p && !std::strcmp(p, "8");
+    }();
+    if (grouped)
+        return kzgs::QueuePacketGroupCommand(executeGroup, storage.data(), uint32_t(sizeof(payload) + bytes)) ? 1 : 0;
     return kzgs::QueuePacketCommand(execute, storage.data(), uint32_t(sizeof(payload) + bytes)) ? 1 : 0;
 }
 void tfGpuLiveDrawReset()

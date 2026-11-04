@@ -304,7 +304,8 @@ def draw(directory, dll, report_path, frontend=False):
                 "lod_callbacks": stats[6], "painted_pixels": stats[7], "differing_pixels": stats[8],
                 "completed_modes": stats[9], "full_resolution_differing_pixels": stats[10],
                 "full_resolution_compared_pixels": stats[11], "gpu_draws": stats[12],
-                "mipmap_filtered_callbacks": stats[13], "internal_scale": 4} if frontend else
+                "mipmap_filtered_callbacks": stats[13], "internal_scale": 4,
+                "grouped_dispatches": stats[14], "grouped_meshes": stats[15]} if frontend else
                {"allocations": stats[0], "reuses": stats[1], "dispatches": stats[2], "native_draws": stats[3],
               "painted_pixels": stats[4], "differing_pixels": stats[5],
               "handler_replacements": stats[6], "ordinary_draws": stats[7],

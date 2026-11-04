@@ -4,6 +4,8 @@ This opt-in component draws GPU-produced vertices through the existing hardware
 renderer. Mode 1 retains full accelerated VU execution. Mode 2 replaces the bulk
 of admitted dual-transform calls with a short CPU tail and deferred VU memory;
 see [its qualification and limits](#guarded-cpu-tail-and-deferred-vu-memory).
+`PS2X_TF_GPU_GROUPS=8` additionally enables ordered groups of resident-source
+compute jobs; see [the group contract and measurements](#ordered-gpu-dispatch-groups).
 
 Use a separate private checkout of the PCSX2 revision in `dependencies.json`
 and an output directory outside this repository:
@@ -531,3 +533,51 @@ dispatches, including initial allocations; source/output capacity declines
 remained zero. These observations cover one desktop run, with a final frame
 inspection. They do not isolate each change's speedup, qualify the whole game,
 or establish distinct rendered 60 fps.
+
+## Ordered GPU dispatch groups
+
+With `PS2X_TF_GPU_GROUPS=8`, the GS command consumer groups up to eight adjacent,
+already-published native packets with the same callback. It never waits to fill
+a group. Other command types, another callback and ring wrap stop the group.
+The ring retains every payload until the complete callback returns. Ordinary
+GIF operations, synchronization, readbacks and draw order remain unchanged.
+
+`DualGeometry::prepareGroup` binds each packet's existing source buffer as a
+root SRV. A single dispatch writes concatenated output vertices into a retained
+page, and each packet draws from its own output offset. Only transform records
+and source-count/output-offset metadata are uploaded; geometry is neither
+copied between source buffers nor downloaded. The shader shares the existing
+strict arithmetic. Released source buffers remain protected through compute
+completion, and the output page through the last draw's fence. Unsupported
+groups retain ordinary per-packet submission. Grouped work can include a packet
+later culled or materialized by GS preparation, so dispatch counts alone are
+not a speed measurement.
+
+The frontend diagnostic also checks the actual command ring: 95 synthetic
+packets verify order, size guards, callback boundaries, the eight-packet limit,
+wrap and reuse across more than a full ring. For captured enhanced geometry,
+214 grouped dispatches cover 626 independent source buffers, with both fields,
+textures, depth, blending, mipmaps and deliberate CPU fallback. All four modes
+pass with zero differing pixels across 14,680,064 full-resolution comparisons.
+Invalid ranges, offsets and foreign-pool handles decline before dispatch.
+
+```powershell
+$env:PS2X_TF_GPU_GROUPS = '8'
+python -B testing/test_gpu_dual_transform.py draw --frontend --prepared <private-grouped-fixtures> --dll <private-gpu-build>/tf_hwgs.dll --report <fresh-private-report.json>
+```
+
+The enhanced Amazon route passed with the grouped path, cinematics skipped,
+16:9, 4x internal rendering and 1920x1080 direct output. Its 2,280 gameplay
+intervals took 39.732710 seconds: **57.3835 physics updates/s**, median 16.884 ms
+and p95 21.715 ms. The direct trace measured 57.1753 handoffs/s, one skipped
+publication, stable 2048x1788 internal dimensions and an uncapped clean close.
+The final frame was inspected.
+
+Whole-session counters record 172,005 dispatches, including 154,163 groups
+covering 615,276 packets, and 1,190,975 GPU draws. There were no group, bounds or
+capacity declines; source uploads stayed at 1,687. Output-page allocations fell
+to 330. The previous enhanced run recorded 595,482 dispatches and 806 pages;
+these desktop runs are not a controlled estimate of the frame-time improvement.
+Runtime selection, CPU-tail and deferred-memory counters match that preceding
+run exactly. This remains below the target and does not establish distinct
+rendered 60 fps or whole-game reliability.

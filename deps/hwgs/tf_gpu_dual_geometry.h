@@ -48,6 +48,7 @@ class DualGeometry
     {
         uint64_t allocations = 0, reuses = 0, dispatches = 0, draws = 0, bytes = 0, pageProbes = 0;
         uint64_t meshUploads = 0, meshBytes = 0, sourceUploadBytes = 0, constantUploadBytes = 0;
+        uint64_t groupedDispatches = 0, groupedMeshes = 0;
     };
 
     explicit DualGeometry(GSDevice12 &device, uint64_t budget = 128ull * 1024 * 1024,
@@ -71,6 +72,10 @@ class DualGeometry
     // Reusing Mesh uploads only transform records, never source vertices.
     // First-source offsets must match the immutable chunk layout exactly.
     Batch prepare(const Mesh &mesh, const void *constants, uint32_t batches);
+    // One chunk per resident Mesh, at most eight. Output concatenates meshes
+    // in order; only the 144-byte transform records are uploaded. No source
+    // copying or GPU readback. Invalid handles/layouts decline before dispatch.
+    Batch prepareGroup(const Mesh *meshes, const void *constants, uint32_t count);
     // Whole-mesh metadata from cached source bounds and the two transforms.
     // Chunks in this range must share matrices/bias. Does not map GPU output
     // or transform the mesh's vertices on the CPU.
@@ -89,12 +94,14 @@ class DualGeometry
   private:
     GSDevice12 &m_device;
     std::unique_ptr<Pipeline> m_pipeline;
+    std::unique_ptr<Pipeline> m_groupedPipeline;
     std::vector<std::shared_ptr<Page>> m_pages;
     std::size_t m_pageCursor = 0;
     std::vector<std::shared_ptr<Source>> m_sources;
     uint64_t m_budget, m_meshBudget;
     Stats m_stats;
     std::shared_ptr<Page> acquirePage(uint32_t uploadBytes, uint32_t outputBytes);
-    Batch dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices, uint32_t constantsOffset);
+    Batch dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices, uint32_t constantsOffset,
+                   const uint64_t *groupSources = nullptr, uint32_t groups = 0);
 };
 } // namespace tf_gpu

@@ -9,9 +9,11 @@
 #include "GS/Renderers/DX12/GSDevice12.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -28,6 +30,77 @@ void require(bool condition, const char *message)
 {
     if (!condition)
         throw std::runtime_error(message);
+}
+struct QueueCheck
+{
+    std::atomic<bool> ready{false};
+    uint32_t next = 0;
+    bool valid = true;
+    std::array<unsigned, 9> sizes{};
+};
+struct QueueHeader
+{
+    QueueCheck *check;
+    uint32_t serial, bytes;
+};
+void checkQueuedPacket(const uint8_t *data, uint32_t bytes)
+{
+    QueueHeader header;
+    std::memcpy(&header, data, sizeof(header));
+    auto &check = *header.check;
+    check.valid &= header.serial == check.next++ && header.bytes == bytes &&
+                   word(data + bytes - 4) == (header.serial ^ 0xa53f9c17u);
+}
+void checkQueuedGroup(const kzgs::PacketView *views, uint32_t count)
+{
+    QueueHeader first;
+    std::memcpy(&first, views[0].data, sizeof(first));
+    ++first.check->sizes[count];
+    for (unsigned i = 0; i < count; ++i)
+        checkQueuedPacket(views[i].data, views[i].bytes);
+}
+void checkOtherGroup(const kzgs::PacketView *views, uint32_t count)
+{
+    checkQueuedGroup(views, count);
+}
+bool checkPacketQueue()
+{
+    QueueCheck check;
+    std::vector<uint8_t> storage(512 * 1024);
+    QueueCheck *address = &check;
+    bool queued = kzgs::QueuePacketCommand(
+        [](const uint8_t *data, uint32_t) {
+            QueueCheck *state;
+            std::memcpy(&state, data, sizeof(state));
+            state->ready.wait(false, std::memory_order_acquire);
+        },
+        &address, sizeof(address));
+    const auto push = [&](unsigned serial, uint32_t bytes, unsigned kind) {
+        const QueueHeader header{&check, serial, bytes};
+        std::memcpy(storage.data(), &header, sizeof(header));
+        const uint32_t guard = serial ^ 0xa53f9c17u;
+        std::memcpy(storage.data() + bytes - 4, &guard, 4);
+        if (!kind)
+            return kzgs::QueuePacketCommand(checkQueuedPacket, storage.data(), bytes);
+        return kzgs::QueuePacketGroupCommand(kind == 1 ? checkQueuedGroup : checkOtherGroup, storage.data(), bytes);
+    };
+    // Publish everything before releasing the consumer: 8,8,4 / ordinary /
+    // 3 / different callback 2 / original callback 1. Boundaries are observable.
+    for (unsigned i = 0; i < 27; ++i)
+        queued &= push(i, 64, i == 20 ? 0 : (i == 24 || i == 25 ? 2 : 1));
+    check.ready.store(true, std::memory_order_release);
+    check.ready.notify_all();
+    kzgs::RunOnGSThread([] {});
+    const bool first = check.valid && check.next == 27 && check.sizes[8] == 2 && check.sizes[4] == 1 &&
+                       check.sizes[3] == 1 && check.sizes[2] == 1 && check.sizes[1] == 1;
+    // More than one entire ring of owned payloads exercises wrap and reuse.
+    for (unsigned i = 27; i < 95; ++i)
+        queued &= push(i, uint32_t(storage.size()), i % 7 ? 1 : 0);
+    kzgs::RunOnGSThread([] {});
+    const bool passed = queued && first && check.valid && check.next == 95;
+    std::fprintf(stderr, "[gpu:packet-groups] packets=%u order_wrap_boundaries=%s\n", check.next,
+                 passed ? "PASS" : "FAIL");
+    return passed;
 }
 struct alignas(16) Qword
 {
@@ -99,6 +172,14 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
         count > 32768 || !batches || batches > 1024)
         return 0;
     bool passed = false;
+    const char *groupOption = std::getenv("PS2X_TF_GPU_GROUPS");
+    const bool grouped = groupOption && !std::strcmp(groupOption, "8");
+    if (grouped && !checkPacketQueue())
+    {
+        if (error && capacity)
+            std::snprintf(error, capacity, "Ordered packet group diagnostic failed");
+        return 0;
+    }
     kzgs::RunOnGSThread([&] {
         try
         {
@@ -126,6 +207,48 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
             const auto chunkStart = [&](unsigned chunk) {
                 return chunk == batches ? count : word(transforms + chunk * 144 + 140);
             };
+            std::vector<tf_gpu::DualGeometry::Batch> groupedOutputs(groups);
+            if (grouped)
+            {
+                require(!pool.prepareGroup(nullptr, constants, 1) && !pool.prepareGroup(&mesh, nullptr, 1) &&
+                            !pool.prepareGroup(&mesh, constants, 0) && !pool.prepareGroup(&mesh, constants, 9),
+                        "Invalid grouped input was accepted");
+                for (unsigned group = 0; group < groups; ++group)
+                {
+                    const unsigned first = group ? groupEnds[group - 1] : 0, last = groupEnds[group];
+                    if (last - first > 8)
+                        continue;
+                    std::array<tf_gpu::DualGeometry::Mesh, 8> sources;
+                    std::array<uint8_t, 8 * 144> records{};
+                    for (unsigned chunk = first; chunk < last; ++chunk)
+                    {
+                        const unsigned start = chunkStart(chunk), end = chunkStart(chunk + 1), index = chunk - first;
+                        const auto *data = static_cast<const uint8_t *>(inputs);
+                        std::vector<uint8_t> vertices(data + start * 32, data + end * 32);
+                        for (unsigned i = 0; i < end - start; ++i)
+                            std::memset(vertices.data() + i * 32 + 12, 0, 4);
+                        sources[index] = pool.uploadMesh(vertices.data(), end - start, 1);
+                        require(bool(sources[index]), "Cannot upload independent grouped mesh");
+                        std::memcpy(records.data() + index * 144, transforms + chunk * 144, 144);
+                        std::memset(records.data() + index * 144 + 140, 0, 4);
+                    }
+                    if (!group)
+                    {
+                        auto bad = records;
+                        bad[140] = 1;
+                        const auto dispatches = pool.stats().dispatches;
+                        tf_gpu::DualGeometry foreign(*device);
+                        require(!pool.prepareGroup(sources.data(), bad.data(), last - first) &&
+                                    !foreign.prepareGroup(sources.data(), records.data(), last - first) &&
+                                    pool.stats().dispatches == dispatches,
+                                "Invalid grouped layout/ownership dispatched work");
+                    }
+                    groupedOutputs[group] = pool.prepareGroup(sources.data(), records.data(), last - first);
+                    require(bool(groupedOutputs[group]), "Cannot dispatch independent grouped geometry");
+                }
+                require(pool.stats().groupedDispatches > 0 && pool.stats().groupedMeshes > 8,
+                        "Grouped diagnostic did not exercise independent source buffers");
+            }
             // Four independent render pairs exercise texture lookup, depth, alpha
             // blending/testing, mipmap selection and an intentional CPU fallback.
             for (unsigned mode = 0; mode < 4; ++mode)
@@ -267,7 +390,9 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
                                 return float(vertices[i].XYZ.Z) != firstZ;
                             });
                             GSVertexTrace::Vertex minimum{}, maximum{};
-                            Submission submission{&pool, &output, vertices, start, end - start, stats, mode == 3};
+                            const auto &selected = groupedOutputs[group] ? groupedOutputs[group] : output;
+                            Submission submission{&pool,       &selected, vertices, groupedOutputs[group] ? 0u : start,
+                                                  end - start, stats,     mode == 3};
                             if (!side && varyingDepth &&
                                 tf_gpu::prepareDualTrace(bounds[group][field], *renderer->m_context, *renderer->PRIM,
                                                          minimum, maximum))
@@ -361,6 +486,8 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
             }
             device->ExecuteCommandList(true);
             stats[12] = pool.stats().draws;
+            stats[14] = pool.stats().groupedDispatches;
+            stats[15] = pool.stats().groupedMeshes;
             require(stats[8] == 0 && stats[10] == 0, "Native frontend pixels differ from GIF reference draws");
             require(stats[0] > 100 && stats[1] > 100 && stats[2] > 0 && stats[3] > 100 && stats[4] > 100 &&
                         stats[5] > 0 && stats[6] > 0 && stats[13] > 0,

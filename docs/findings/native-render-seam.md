@@ -423,3 +423,23 @@ and does not prove distinct rendered 60 fps; the remaining work needs a new
 in-level profile rather than an assumption that the old bottleneck persists.
 
 See [mode 2's admission rules and test command](../../deps/hwgs/GPU_GEOMETRY.md#guarded-cpu-tail-and-deferred-vu-memory).
+
+## Group resident GPU transforms
+
+The next live enhancement combines up to eight adjacent native packets into
+one compute dispatch, reading their independently cached source buffers.
+Output offsets preserve each packet's vertices, and all GS state changes and
+draws remain in order. Grouping does not cross another command or wait for a
+larger batch. It adds no geometry readback.
+
+The grouped enhanced level route passed at 57.3835 physics updates/s and
+57.1753 direct-frame handoffs/s. Whole-session compute dispatches decreased to
+172,005, with 615,276 packets using grouped work. There were no group, bounds or
+capacity declines. Runtime bypass/deferred-memory counters match the preceding
+enhanced route; the independent textured frontend comparison has zero differing
+pixels. These results remain below true 60 fps. The pre-grouping profile still
+attributes 14.71% of VU instruction-pointer samples to the two hottest grass
+regions, making grass a concrete next GPU geometry target. Its persistent
+VU-state dependencies remain a required part of that replacement.
+
+See [the grouped GPU contract and diagnostics](../../deps/hwgs/GPU_GEOMETRY.md#ordered-gpu-dispatch-groups).
