@@ -1,6 +1,6 @@
 # Transformers native render seam investigation
 
-Status: whole-list capture, exact mesh-input import and a handwritten grass geometry model, November 2026. The model can be compared with accelerated VU output offline or during gameplay. It does not replace VU execution or execute geometry on the GPU. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Normal play retains the accelerated VU path.
+Status: whole-list capture, exact mesh-input import, complete native grass packet generation and accelerated state replay, November 2026. The model can be compared with accelerated VU output offline or during gameplay. It does not replace VU execution or execute geometry on the GPU. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Normal play retains the accelerated VU path.
 
 ## Why this boundary
 
@@ -108,7 +108,7 @@ Grass emits multiple GS sprite passes, not merely one triangle mesh. A replaceme
 
 ## Handwritten grass geometry and output comparison
 
-`PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_geometry.cpp` implements the observed algorithm using typed source vertices, colors, two matrices and grass constants. It transforms the triangle strip, applies restart and coarse clipping decisions, derives density from triangle area, vertex alpha and depth, generates scatter groups, and recursively subdivides dense triangles. It produces eight sprites in each of two fields per group, preserving the alternating endpoint order. Output contains exact XYZ fixed-point words, clipping words and colors; texture coordinates, GIF templates and GS state are deliberately outside this model's output.
+`PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_geometry.cpp` implements the observed algorithm using typed source vertices, colors, two matrices and grass constants. It transforms the triangle strip, applies restart and coarse clipping decisions, derives density from triangle area, vertex alpha and depth, generates scatter groups, and recursively subdivides dense triangles. It produces eight sprites in each of two fields per group, preserving the alternating endpoint order. This geometry output contains exact XYZ fixed-point words, clipping words and colors. The separate packet model described below supplies texture coordinates and emitted GS state updates.
 
 The arithmetic uses separate multiply/add steps, rounding toward zero, and x86 flush-to-zero/denormals-are-zero behavior. The model restores the caller's floating environment. Compile it with `/fp:strict` on MSVC; do not enable contraction or reassociation. Recursion, group count, finite inputs and supported formats are bounded. Unsupported input declines comparison rather than suppressing reference execution. Non-x86 floating behavior is not qualified.
 
@@ -120,7 +120,7 @@ Reproduce the offline check using private captures and a build/output directory 
 python -B testing/inspect_native_seam_capture.py <prefix> --trace <trace.csv> --program-manifest <manifest.json>
 python -B testing/qualify_grass_geometry.py <prefix> --trace <trace.csv> --write-list <fresh-fixtures.txt>
 # In an x64 Visual Studio developer shell, with the working directory outside the checkout:
-cl /nologo /std:c++20 /O2 /EHsc /fp:strict /W4 <repo>/testing/native_grass_geometry.cpp <repo>/PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_geometry.cpp /Fe:native_grass_geometry.exe
+cl /nologo /std:c++20 /O2 /EHsc /fp:strict /W4 <repo>/testing/native_grass_geometry.cpp <repo>/PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_geometry.cpp <repo>/PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_packets.cpp /Fe:native_grass_geometry.exe
 ./native_grass_geometry.exe --self-test
 ./native_grass_geometry.exe <fixtures.txt> <fresh-private-output-directory> 1
 python -B <repo>/testing/qualify_grass_geometry.py <prefix> --trace <trace.csv> --native-directory <private-output-directory>
@@ -134,11 +134,39 @@ Build 28 passed the complete accelerated route with live comparison in both dete
 
 Build 29 reports explicitly after worker shutdown. Its threaded route passed with **38,071 matched grass calls, 1,490,434 exact sprite groups, 17,894 empty reference packets, zero declines and zero mismatches**. All six route counters and eight player position/mode probes remained unchanged. The math and packet comparison are unchanged from build 28. The normal launcher continues to use the previous accelerated build with comparison disabled.
 
+## Complete grass packets
+
+`tf_grass_packets.cpp` reconstructs the full 1,216-byte sprite packets from effective VU input and the geometry model. The grass program initializes two alternating 76-qword buffers at `ITOP+85` and `ITOP+161`. Each field's six-qword prefix comes from context qwords 11..16 or 17..22. ST coordinates alternate corners and center, while the shader's unwritten ST.w padding is preserved separately for each buffer. Geometry and colors fill the remaining slots, with colors repeated in both fields. A draw with no sprites emits the unchanged tag at VU qword 1023 exactly once. No template bytes from the game are embedded in source.
+
+The offline check now compares complete ordered records, including PATH1, byte count, drain/DIRECTHL flags, all tags, GS register writes, ST, colors, XYZ and preserved padding. Both original capture sets pass: **442 calls, 17,096 sprite packets and 225 empty packets, totaling 21,069,472 bytes including record headers**. Deliberate GS-state and transport-header mutations are rejected even when geometry still matches.
+
+Build 30 extends `PS2X_TF_GRASS_VERIFY=1` to the same complete-packet comparison. The deterministic route matched 37,945 calls, 1,485,364 sprite packets and 17,840 empty packets, with all 59 cumulative VU state hashes unchanged. The threaded route matched 38,239 calls, 1,497,194 sprite packets and 17,966 empty packets. Both had zero declines/mismatches and retained all six route counters and all eight player probes. Counts after the route endpoint differ because the worker can finish additional submissions while the final screenshot and shutdown complete.
+
+This closes the emitted-packet gap for the measured route. It does not yet qualify replacing VU execution. Captures also show changes to the input descriptor/attribute stream, both packet buffers, the recursion stack near the top of VU memory, scalar/vector registers, status/clip/MAC flags and the cycle counter. The packet model does not write these persistent effects. A register changing is not proof that its value is consumed by a later shader; that distinction requires dependency analysis and accelerated replay across program transitions.
+
+## Persistent-state replay and the first dependency
+
+`testing/vu1_replay` builds a standalone Release/AVX2 runner from the verified private static package. It never links the interpreter oracle. The [usage notes](../../testing/vu1_replay/README.md) describe capture integrity checks, output comparisons and a deliberately separate register experiment. Ordinary replay compares every semantic state field, including cycles, all VU data/code and full framed GIF output, rejecting fallback and pending transfers.
+
+Exact replay passed all 5,000 consecutive broad-capture calls across nine resident code images: 11,998,416 GIF record bytes, zero data/state/code/packet mismatches and zero fallback or pending transfers. A second exact run after the dependency-mode changes retained those results. This qualifies the replay tool against this accelerated capture, not a native replacement.
+
+The dependency mode restores selected VF registers to each grass call's input values after that call, then runs subsequent accelerated calls with the altered state. It applies observed external component writes between calls and stops at the first changed data write, packet or control result. At capture ticket 1824, a three-stage continuation (`0x2150`, `0x1410`, `0x480` in that resident image) changes scratch data when a preceding grass result is omitted:
+
+| Restored grass result | First changed output | Calls before stopping |
+|---|---|---|
+| VF27 | VU qword 1007 | 1,824 |
+| VF31 | VU qword 1003 | 1,824 |
+| All other VF5..VF31 together | No data, GIF or control change in this capture; 958 register-state differences | 5,000 |
+
+Both failing experiments had restored 34 grass calls; their GIF bytes and control/cycles still matched at the stopping point. This is a concrete reason to preserve shared state even after matching the visible geometry. It does not establish whether either scratch value ultimately affects a visible primitive. Equal-value external writes are not observable in snapshots, so the experiment can conservatively retain a perturbation through such a write. The passing mask is limited to this capture and these input-value perturbations; it does not prove those registers are globally dead.
+
+A private post-memory model also reproduces all 442 grass fixtures outside qwords 987..1022. It accounts for the manager's descriptor/attribute writes and alternating packet buffers. That remaining range contains recursion/scratch state. The model is exploratory and not integrated. Neither a simple cycle-count fit nor complete register/flag reconstruction is qualified. Full persistent effects or a larger independently qualified batch boundary remain required before removing VU execution.
+
 ## Implementation sequence
 
 1. Extend the observed grass boundary and exact first-list importer to more visible lists and static mesh families. Measure coverage instead of assuming every launch belongs to the last grass upload.
 2. Complete the output oracle with surrounding GS state and explicit submission identities. The existing fixtures contain mesh input, effective constants, VU entry/exit state and ordered VU GIF output. Add a runtime mesh cache keyed by content and source generation, invalidating it on guest writes or level unload.
-3. Extend the grass host model's geometry comparison to complete packet state and persistent VU state, including transitions into uncovered programs. Investigate a simpler static mesh family in parallel with this dependency analysis when useful. Keep fallback for every unqualified case.
+3. Extend the now-complete grass packet comparison to persistent VU state, including transitions into uncovered programs. Use accelerated replay to reproduce scratch/register dependencies and cycle effects. Investigate a simpler static mesh family when useful. Keep fallback for every unqualified case.
 4. Replace only qualified whole batches with that host transform, still producing ordered GS primitives. This separates mesh/transform correctness from graphics backend work and can already remove interpreted VIF/VU overhead.
 5. Add native vertex buffers, constants and a vertex shader to the hardware renderer. Extend the ordered GS command stream with native draw packets and preserve current texture/CLUT, target/depth, alpha, scissor, multipass and VRAM dependency handling. Keep transformed vertices on the GPU; reuse the existing direct presentation path.
 

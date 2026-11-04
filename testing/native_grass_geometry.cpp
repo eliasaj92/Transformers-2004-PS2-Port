@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Standalone qualification driver. Inputs/outputs are private captured data.
 #include "../PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_geometry.h"
+#include "../PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_packets.h"
 #include <windows.h>
 #include <xmmintrin.h>
 #include <array>
@@ -122,6 +123,22 @@ int main(int argc, char** argv) {
             result.write(reinterpret_cast<const char*>(resultHeader), sizeof(resultHeader));
             result.write(reinterpret_cast<const char*>(output.data()), output.size()*sizeof(GrassBatch));
             if (!result) throw std::runtime_error("Cannot write native geometry fixture");
+            GrassPacketTemplates templates;
+            if (!prepareGrassPackets(data, static_cast<uint32_t>(itop), 53, templates))
+                throw std::runtime_error("Native packet templates declined: " + line);
+            std::ofstream packets(outputDirectory / (name + "-native-gif.bin"), std::ios::binary);
+            auto writePacket = [&](const void* bytes, uint32_t size) {
+                const uint32_t metadata[] = {1, size, 1, 0}; // PATH1, immediate drain, no DIRECTHL.
+                packets.write(reinterpret_cast<const char*>(metadata), sizeof(metadata));
+                packets.write(static_cast<const char*>(bytes), size);
+            };
+            if (output.empty()) writePacket(templates.empty.data(), 16);
+            for (size_t index = 0; index < output.size(); ++index) {
+                GrassPacket packet;
+                writeGrassPacket(templates, output[index], index, packet);
+                writePacket(packet.data(), sizeof(packet));
+            }
+            if (!packets) throw std::runtime_error("Cannot write native packet fixture");
             timing << name << ',' << output.size() << ',' << stats.triangles << ',' << stats.coarseCulled << ','
                    << stats.subdivisions << ',' << stats.maxDepth << ',' << repetitions << ',' << last-first << '\n';
             ++fixtures; groups += output.size();

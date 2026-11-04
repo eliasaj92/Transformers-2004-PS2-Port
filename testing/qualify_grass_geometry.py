@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Select private grass fixtures and compare native geometry with captured GIF.
 
-This checks emitted XYZ, clipping words, colors, counts and order. It does not
-qualify packet templates, textures/GS state, persistent VU state or a bypass.
+This checks emitted attributes and complete ordered GIF records independently.
+It does not qualify persistent VU state, renderer behavior or a runtime bypass.
 Run inspect_native_seam_capture.py first for capture/trace integrity checks.
 """
 import argparse
@@ -83,8 +83,12 @@ def compare(fixtures, native_directory):
             raise ValueError("Invalid native geometry output")
         expected, empty = geometry_from_gif(Path(str(pre)[:-7] + "gif.bin"))
         actual = raw[32:]
+        expected_packets = Path(str(pre)[:-7] + "gif.bin").read_bytes()
+        actual_packets = (native_directory / (pre.stem + "-native-gif.bin")).read_bytes()
         row = {"fixture": pre.name, "groups": groups, "reference_groups": len(expected) // 640,
                "empty_reference_packets": empty, "exact": actual == expected,
+               "complete_packets_exact": actual_packets == expected_packets,
+               "packet_bytes": len(expected_packets),
                "triangles": triangles, "culled": culled, "subdivisions": subdivisions, "max_depth": depth}
         if actual != expected:
             first = next((index for index in range(0, min(len(actual), len(expected)), 4)
@@ -92,11 +96,13 @@ def compare(fixtures, native_directory):
             row["first_mismatched_word"] = None if first is None else first // 4
         results.append(row)
     return {"fixtures": len(results), "exact_fixtures": sum(r["exact"] for r in results),
+            "exact_packet_fixtures": sum(r["complete_packets_exact"] for r in results),
+            "packet_bytes": sum(r["packet_bytes"] for r in results),
             "sprite_groups": sum(r["groups"] for r in results),
             "sprite_pairs_per_group": 8, "fields_per_group": 2,
-            "pass": bool(results) and all(r["exact"] for r in results), "results": results,
-            "limitations": ["Compares emitted geometry/color attributes and their order, not complete GIF bytes.",
-                            "No GS-state, persistent VU-state or runtime-bypass qualification.",
+            "pass": bool(results) and all(r["exact"] and r["complete_packets_exact"] for r in results), "results": results,
+            "limitations": ["Compares complete emitted GIF records; surrounding renderer state is not captured.",
+                            "No persistent VU-state or runtime-bypass qualification.",
                             "Coverage is restricted to these captured calls."]}
 
 

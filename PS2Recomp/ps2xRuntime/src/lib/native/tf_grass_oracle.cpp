@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "tf_grass_oracle.h"
 #include "tf_grass_geometry.h"
+#include "tf_grass_packets.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -44,6 +45,7 @@ struct Call {
     bool active = false;
     size_t next = 0;
     std::vector<tf_native::GrassBatch> batches;
+    tf_native::GrassPacketTemplates packets;
     Clock::time_point referenceStart;
 };
 thread_local Call call;
@@ -62,7 +64,7 @@ void install(uint32_t crc) {
     if (std::strcmp(option, "1") != 0 || crc != 0x74c982c0 || enabled)
         throw std::runtime_error("PS2X_TF_GRASS_VERIFY=1 requires the supported SLUS-20668 executable, installed once");
     enabled = true;
-    std::fprintf(stderr, "[grass-oracle] comparison enabled; accelerated VU/GS execution remains authoritative\n");
+    std::fprintf(stderr, "[grass-oracle] complete packet comparison enabled; accelerated VU/GS execution remains authoritative\n");
 }
 
 bool begin(uint32_t pc, bool continuing, uint32_t itop, const uint8_t* code, const uint8_t* data) {
@@ -74,6 +76,9 @@ bool begin(uint32_t pc, bool continuing, uint32_t itop, const uint8_t* code, con
     if (constants > 1024-56 || itop > 1024-243 || word(data, itop, 1) != 3) { ++stats.declined; return false; }
     const unsigned count = word(data, itop) & 0x7fff;
     if (count < 2 || count > 28) { ++stats.declined; return false; }
+    if (!tf_native::prepareGrassPackets(std::span<const uint8_t, 16384>(data, 16384), itop, constants, call.packets)) {
+        ++stats.declined; return false;
+    }
     tf_native::GrassContext context;
     context.clipScale = vector(data, constants); context.clipOffset = vector(data, constants+1);
     context.billboardOffset = vector(data, constants+2);
@@ -102,28 +107,17 @@ bool begin(uint32_t pc, bool continuing, uint32_t itop, const uint8_t* code, con
     return true;
 }
 
-void gif(uint32_t path, const uint8_t* data, uint32_t bytes) {
+void gif(uint32_t path, const uint8_t* data, uint32_t bytes, bool drain, bool directHl) {
     if (!call.active) return; // Later EE replay has no active VU invocation.
-    if (path != 1 || !data || bytes < 16) mismatch("unexpected path or packet");
-    if (bytes == 16 && (word(data, 0) & 0x7fff) == 0) { ++stats.empty; return; }
-    if (bytes != 1216 || call.next >= call.batches.size()) mismatch("packet count/size");
-    constexpr unsigned offsets[] = {0, 3, 5, 38, 41, 43};
-    constexpr uint64_t registers[] = {0xe, 2, 0x4124, 0xe, 2, 0x4124};
-    constexpr unsigned loops[] = {2, 1, 8, 2, 1, 8};
-    for (unsigned tag = 0; tag < 6; ++tag) {
-        uint64_t low, high;
-        std::memcpy(&low, data+offsets[tag]*16, 8); std::memcpy(&high, data+offsets[tag]*16+8, 8);
-        if ((low & 0x7fff) != loops[tag] || ((low >> 58) & 3) != 0 ||
-            (low >> 60) != (tag % 3 == 2 ? 4u : 1u) || high != registers[tag]) mismatch("GIF layout");
-    }
-    const auto& expected = call.batches[call.next];
-    for (unsigned field = 0; field < 2; ++field) {
-        const unsigned base = field == 0 ? 6 : 44;
-        for (unsigned sprite = 0; sprite < 8; ++sprite) {
-            if (std::memcmp(data+(base+sprite*4)*16, expected.positions[field][sprite*2].data(), 16) ||
-                std::memcmp(data+(base+sprite*4+3)*16, expected.positions[field][sprite*2+1].data(), 16)) mismatch("XYZ/clip");
-            if (std::memcmp(data+(base+sprite*4+2)*16, expected.colors[sprite].data(), 16)) mismatch("color");
-        }
+    if (path != 1 || !drain || directHl || !data || bytes < 16) mismatch("packet metadata");
+    if (call.batches.empty()) {
+        if (call.next || bytes != 16 || std::memcmp(data, call.packets.empty.data(), 16)) mismatch("empty packet");
+        ++stats.empty;
+    } else {
+        if (bytes != sizeof(tf_native::GrassPacket) || call.next >= call.batches.size()) mismatch("packet count/size");
+        tf_native::GrassPacket expected;
+        tf_native::writeGrassPacket(call.packets, call.batches[call.next], call.next, expected);
+        if (std::memcmp(data, expected.data(), sizeof(expected))) mismatch("complete GIF bytes");
     }
     ++call.next;
 }
@@ -131,10 +125,10 @@ void gif(uint32_t path, const uint8_t* data, uint32_t bytes) {
 void end(bool needsTransfer, bool fellBack) {
     if (!call.active) throw std::runtime_error("Missing native grass comparison begin");
     if (needsTransfer || fellBack) mismatch("incomplete accelerated reference");
-    if (call.next != call.batches.size()) mismatch("missing emitted groups");
+    if (call.next != (call.batches.empty() ? 1 : call.batches.size())) mismatch("missing emitted packets");
     call.active = false;
     stats.referenceNs.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-call.referenceStart).count(), std::memory_order_relaxed);
-    stats.groups.fetch_add(call.next, std::memory_order_relaxed);
+    stats.groups.fetch_add(call.batches.size(), std::memory_order_relaxed);
     if ((++stats.matched & 1023) == 0) stats.print("progress");
 }
 

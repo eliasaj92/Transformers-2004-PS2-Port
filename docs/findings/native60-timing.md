@@ -40,6 +40,14 @@ The original-speed comparison `original-skip-vulkan-01` passed with 4,793 fields
 
 Build 18 corrected the CSV's field label to read the EE scheduler directly. Older traces used the presentation-thread counter, which can lag by a field; do not infer missing/extra physics updates from those older labels. Guest counters and recorded positions are unaffected by that diagnostic change.
 
+## Dense acceleration comparison
+
+`movement-dense-original-01` and `movement-dense-native-01` use the same accelerated build 30, direct 4x hardware presentation, 16:9, a fresh copy of the private Trainer save and the cinematic-skipping route. Grass comparison is off. They record player state every two guest fields for 180 fields after applying the same full-forward stick input; these are simulation comparisons, not speed benchmarks.
+
+Original timing performs 90 physics updates at 0.0333667025 seconds; variant 3 performs 180 at 0.0166833512 seconds. Both integrate 3.0030032 seconds. Original speed reaches about 21.9969 world units/s and variant 3 reaches 21.9968. The three-second displacement is 51.3733 versus 52.8288 units. Thus the persistent distance difference arises during acceleration, while terminal running speed agrees.
+
+The first nonzero speed appears at relative field 4 in the original run and field 2 in variant 3. A further divergence occurs during the transition near fields 28..42: original speeds are 6.99445, 8.26128, 9.27460 and 10.0851 at fields 28, 30, 32 and 34; variant 3 records 9.02881, 10.3360, 11.1724 and 11.7075. The original increments in that segment shrink by roughly 0.8 per update, versus roughly 0.64 over two native updates. This suggests a per-update blend in the walk/run transition; its writer and timing inputs have not yet been traced. Treat this as a lead, not a qualified correction, and do not compensate by changing maximum movement speed.
+
 ## Remaining work
 
 Compare movement, acceleration, firing, animation and physics against original speed using equivalent guest-time intervals. The existing timing route's vehicle stick input verifies steering/transformation, not acceleration. Measure distinct complete scene images per wall second, investigate GS readback/queue costs, and qualify demanding areas and transitions. Do not promote the experimental flags or claim true 60 fps from pad counters, field output, or the timestep trace alone.

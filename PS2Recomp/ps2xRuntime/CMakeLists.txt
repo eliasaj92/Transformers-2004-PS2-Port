@@ -400,6 +400,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_objectives.cpp
     src/lib/ps2_native_seam_probe.cpp
     src/lib/native/tf_grass_geometry.cpp
+    src/lib/native/tf_grass_packets.cpp
     src/lib/native/tf_grass_oracle.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp

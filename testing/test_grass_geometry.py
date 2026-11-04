@@ -47,10 +47,20 @@ class GeometryQualificationTests(unittest.TestCase):
             root = Path(temp)
             pre = root / "synthetic-pre.bin"
             (root / "synthetic-gif.bin").write_bytes(record(packet()))
+            native_gif = root / "synthetic-pre-native-gif.bin"
+            native_gif.write_bytes(record(packet()))
             native = root / "synthetic-pre-native.bin"
             header = struct.pack("<8I", 0x53415247, 1, 1, 1, 0, 0, 0, 640)
             native.write_bytes(header + bytes(640))
             self.assertTrue(compare([pre], root)["pass"])
+            # Geometry still matches, but a GS state write or transport flag differs.
+            altered = packet()
+            altered[16] = 1
+            native_gif.write_bytes(record(altered))
+            self.assertFalse(compare([pre], root)["pass"])
+            native_gif.write_bytes(record(packet(), source=2))
+            self.assertFalse(compare([pre], root)["pass"])
+            native_gif.write_bytes(record(packet()))
             changed = bytearray(640)
             changed[511] = 1  # Last clip word of the second field.
             native.write_bytes(header + changed)
