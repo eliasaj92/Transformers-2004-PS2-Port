@@ -254,13 +254,17 @@ def replay(directory, capture_path, gpu_report_path, fixtures, runner, report_pa
     return result.returncode
 
 
-def draw(directory, dll, report_path, frontend=False):
+def draw(directory, dll, report_path, frontend=False, merge=False):
     """Render captured meshes from GPU buffers; compare final diagnostic images."""
     directory, dll, report_path = private(directory), private(dll), private(report_path)
     if report_path.exists():
         raise FileExistsError("Use a fresh private draw report path")
     meta = json.loads((directory / "manifest.json").read_text())
+    frontend = frontend or merge
     inputs, batches, expected = ((directory / name).read_bytes() for name in ("inputs.bin", "batches.bin", "expected.bin"))
+    packed = (directory / "packed.bin").read_bytes() if merge else None
+    if merge and (digest(packed) != meta["sha256"]["packed.bin"] or len(packed) != meta["vertices"] * 96):
+        raise ValueError("Prepared packed geometry changed")
     for name, value in (("inputs.bin", inputs), ("batches.bin", batches), ("expected.bin", expected)):
         if digest(value) != meta["sha256"][name]:
             raise ValueError("Prepared private fixture hash mismatch")
@@ -286,17 +290,20 @@ def draw(directory, dll, report_path, frontend=False):
         gs.tf_gs_open.restype = c.c_int
         gs.tf_gs_close.argtypes = []
         gs.tf_gs_close.restype = None
-        probe = gs.tf_gs_gpu_frontend_probe_v1 if frontend else gs.tf_gs_gpu_dual_draw_probe_v3
+        probe = gs.tf_gs_gpu_dual_merged_probe if merge else gs.tf_gs_gpu_frontend_probe_v1 if frontend else gs.tf_gs_gpu_dual_draw_probe_v3
         probe.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32, c.POINTER(c.c_uint32), c.c_uint32, c.c_void_p,
                           c.POINTER(c.c_uint64), c.c_void_p, c.c_uint32]
         probe.restype = c.c_int
-        error, stats = c.create_string_buffer(4096), (c.c_uint64 * 17)()
+        if merge:
+            probe.argtypes += [c.c_void_p]
+        error, stats = c.create_string_buffer(4096), (c.c_uint64 * (28 if merge else 17))()
         source, constants, reference = (c.create_string_buffer(value) for value in (inputs, batches, expected))
         if not gs.tf_gs_open(4 if frontend else 1, 0, str(dll.parent / "resources").encode(), error, len(error)):
             raise RuntimeError(error.value.decode(errors="replace"))
         try:
+            extra = [c.create_string_buffer(packed)] if merge else []
             passed = bool(probe(source, count, constants, batch_count, group_ends, len(groups),
-                                reference, stats, error, len(error)))
+                                reference, stats, error, len(error), *extra))
         finally:
             gs.tf_gs_close()
     metrics = ({"native_submissions": stats[0], "submit_callbacks": stats[1], "cpu_materializations": stats[2],
@@ -313,7 +320,13 @@ def draw(directory, dll, report_path, frontend=False):
               "source_upload_bytes": stats[10], "constant_upload_bytes": stats[11],
               "bounded_groups": stats[12], "declined_bounds": stats[13], "bounded_vertices": stats[14],
               "wrapped_bounds": stats[15], "max_bounds_area_ratio": stats[16] / 1000000})
-    report = {"passed": passed, "batches": batch_count, "groups": len(groups), "source_vertices": count, **metrics,
+    if merge:
+        metrics = {key: metrics[key] for key in ("painted_pixels", "differing_pixels", "completed_modes",
+                   "full_resolution_differing_pixels", "full_resolution_compared_pixels", "gpu_draws", "internal_scale")}
+        metrics.update(zip(("latch_checks", "rejection_checks", "address_range_checks", "merged_groups", "merged_packets",
+                            "merged_gpu_draws", "cpu_materializations", "ordinary_fields", "state_declined", "feedback_declined",
+                            "bounds_declined", "output_declined"), stats[16:28]))
+    report = {"passed": passed, "merge": merge, "batches": batch_count, "groups": len(groups), "source_vertices": count, **metrics,
               "dll_sha256": digest(dll.read_bytes()), "fixture_sha256": meta["sha256"],
               "prepared_manifest_sha256": digest((directory / "manifest.json").read_bytes()),
               "scope": ("Real GS frontend with synthetic texture/depth/blend state and enhanced captured meshes; "
@@ -350,6 +363,7 @@ if __name__ == "__main__":
     resident.add_argument("--dll", type=Path, required=True)
     resident.add_argument("--report", type=Path, required=True)
     resident.add_argument("--frontend", action="store_true", help="Exercise GS texture/depth/blend preparation")
+    resident.add_argument("--merge", action="store_true", help="Exercise ordered merged mesh packets and rejection guards")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.fixtures, args.program_manifest, args.output)
@@ -359,4 +373,4 @@ if __name__ == "__main__":
         raise SystemExit(replay(args.prepared, args.gpu_capture, args.gpu_report,
                                args.fixtures, args.runner, args.report))
     else:
-        raise SystemExit(draw(args.prepared, args.dll, args.report, args.frontend))
+        raise SystemExit(draw(args.prepared, args.dll, args.report, args.frontend, args.merge))

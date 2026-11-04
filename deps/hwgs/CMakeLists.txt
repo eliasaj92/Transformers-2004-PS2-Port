@@ -32,7 +32,7 @@ if(TF_HWGS_GPU_GEOMETRY)
     target_sources(tf_hwgs PRIVATE tf_gpu_geometry_probe.cpp tf_gpu_dual_probe.cpp
         tf_gpu_dual_geometry.cpp tf_gpu_grass_probe.cpp tf_gpu_grass_draw_probe.cpp tf_gpu_dual_draw_probe.cpp tf_gpu_draw_trace.cpp
         tf_gpu_dual_frontend.cpp tf_gpu_frontend_probe.cpp tf_gpu_grass_frontend_probe.cpp tf_gpu_live_draw.cpp
-        tf_gpu_live_grass.cpp tf_scene_capture_probe.cpp)
+        tf_gpu_live_grass.cpp tf_gpu_live_dual.cpp tf_gpu_merge_guards.cpp tf_scene_capture_probe.cpp)
     # Bounds must honor/restore the caller's floating-point environment. Keep
     # this object separate from kzgs_flags, whose /fp:contract conflicts with
     # /fp:strict under MSVC.

@@ -909,6 +909,53 @@ accelerated static VU and D3D12 hardware-renderer prerequisites. The diagnostic
 reports actual merged GPU draws, largest accepted group, cache hits, guard
 checks and full-resolution pixel differences.
 
+## Merged mesh packets
+
+`PS2X_TF_GPU_DUAL_MERGE=1`, together with `PS2X_TF_GPU_GROUPS=8`, merges
+compatible adjacent dual-transform packets into one triangle draw per field.
+The existing resident source buffers feed one compute dispatch; its interleaved
+GPU output is consumed directly through a combined index list. Indices retain
+each strip's primitive order and restart masks without joining separate strips.
+No transformed geometry is read back from the GPU.
+
+Admission requires matching primitive/context and per-field scissor/offset,
+disjoint field scissors, valid source bounds and a nonconstant-depth witness.
+The shared grass/mesh VRAM guard rejects target overlap, wrap, and texture,
+mipmap or palette feedback. Rejected groups consume no GS state. Accepted
+groups retain source-based CPU fallback and restore final GS latches from the
+last packet's resolved tail.
+
+Textured IIP triangles qualify; blended groups additionally require one
+identical constant vertex alpha across every packet and field. Combining alpha
+ranges changed the backend's blending choices and produced small pixel
+differences in the first diagnostic. Mixed or varying alpha now retains the
+existing individual draw path. This restriction is part of the contract, not
+an approximate image tolerance. Rejecting all blend-enabled draws was too
+restrictive: every recorded dual-transform packet enables the GS blend flag.
+
+The final captured-mesh check covers 740 packets in groups of 2, 3, 4 and 8.
+Five render modes exercise opaque textures, mipmaps, deliberate native CPU
+fallback, blended/alpha-tested and blended/mipmapped groups. Each GPU mode must
+actually execute merged GPU draws. It performs 796 merged GPU draws and 875
+boundary latch comparisons. All 18,350,080 full-resolution pixels match, with
+nine rejection checks and 36,267
+GS-address-range checks. The grass and existing triangle frontend checks also
+retain zero differences. These diagnostics are separate from gameplay timing.
+
+The accelerated Amazon route performs 878,731 mesh GPU draws and 1,018 native
+CPU materializations, versus 1,188,551 and 6,297 in the saved wide-grass run.
+It measures 57.4907 physics updates/s and 56.4953 direct handoffs/s; this does
+not establish an FPS improvement. The feature remains opt-in. A separate
+32-image camera-turn capture matches the saved enhanced output exactly across
+117,178,368 pixels at 2048x1788. No older game executable is rerun.
+
+```powershell
+$env:PS2X_TF_GPU_GROUPS = '8'
+python -B testing/test_gpu_dual_transform.py draw --merge `
+  --prepared $private/dual-grouped --dll $private/gpu-build/tf_hwgs.dll `
+  --report $private/dual-merged-result.json
+```
+
 ## Bounded output-image cadence capture
 
 `PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;

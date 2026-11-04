@@ -224,3 +224,29 @@ routine, not a newly discovered geometry calculation. VU samples include
 the profile does not prove that moving another individual operation to the GPU
 will improve frame rate. Enabling the existing scheduler fast path separately
 measures 56.8230 updates/s and provides no demonstrated improvement.
+
+Requesting a host presentation cap of 120 on the same enhanced wide-grass
+build measures 57.9225 physics updates/s and 56.7441 direct handoffs/s, with
+46 skipped published frames. The simulation timestep remains 0.0166833512
+seconds and reported host FPS remains about 60. This does not establish an
+uncapped presentation run or a speed gain; the selected performance
+configuration retains its previous host cap.
+
+## Merged mesh submissions
+
+The next enhanced build merges compatible dual-transform packets, extending
+the existing resident geometry path. Blended groups require identical constant
+vertex alpha to preserve the backend's blend selection. The diagnostic checks
+the actual packet path, strip restart masks, final latches, source fallback and
+full-resolution images; details are in the [mesh merge contract](../../deps/hwgs/GPU_GEOMETRY.md#merged-mesh-packets).
+
+The Amazon route passes at 57.4907 physics updates/s and 56.4953 direct handoffs/s
+(16.7605 / 21.780 ms median / p95). It performs 878,731 mesh GPU draws and 1,018
+CPU materializations, compared with 1,188,551 and 6,297 in the saved enhanced
+wide-grass result. Of those draws, 104,513 are merged submissions covering
+214,563 packets. Another 102,832 groups fail the state/alpha guard and 120 fail
+the feedback guard. No bounds/output-capacity groups are rejected.
+
+This reduces submission and materialization work but does not establish an FPS
+improvement. Thirty-nine published frames are skipped by host acquisition.
+The feature remains opt-in, and sustained true 60 fps remains unfinished.

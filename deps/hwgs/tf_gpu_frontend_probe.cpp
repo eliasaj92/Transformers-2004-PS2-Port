@@ -4,6 +4,9 @@
 #include "tf_hwgs.h"
 #include "tf_gpu_dual_geometry.h"
 #include "tf_gpu_dual_frontend.h"
+#include "tf_gpu_live_dual.h"
+#include "tf_gpu_merge_guards.h"
+#include "runtime/gs/gs_native_dual_math.h"
 #include "kzgs_internal.h"
 #include "GS/Renderers/HW/GSRendererHW.h"
 #include "GS/Renderers/DX12/GSDevice12.h"
@@ -188,12 +191,174 @@ void materialize(void *context, GSVertex *vertices, uint32_t count)
     ++s.stats[2];
     std::memcpy(vertices, s.reference, size_t(count) * sizeof(GSVertex));
 }
+
+void packetScene(const void *inputs, const uint8_t *constants, const void *packed, unsigned vertices, unsigned count,
+                 unsigned side, unsigned mode, GIFRegPRIM prim, tf_gpu::DualGeometry &pool,
+                 tf_gpu::DualMergeStats &stats, std::vector<GSVertex> &latches, std::vector<bool> &latchEnds,
+                 uint64_t *counters)
+{
+    auto *renderer = GSRendererHW::GetInstance();
+    struct alignas(16) RawPacket
+    {
+        std::array<uint8_t, (8 + 28 * 6) * 16> data{};
+    };
+    std::vector<RawPacket> raw(count);
+    std::vector<gsnative::DualPacket> sources(count);
+    std::vector<tf_gpu::DualPacketView> views(count);
+    std::vector<tf_gpu::PreparedDual> prepared(count);
+    prim.PRIM = GS_TRIANGLESTRIP;
+    for (unsigned packet = 0; packet < count; ++packet)
+    {
+        const unsigned first = word(constants + packet * 144 + 140);
+        const unsigned last = packet + 1 == count ? vertices : word(constants + (packet + 1) * 144 + 140);
+        require(last > first && last - first >= 3 && last - first <= 28 && last <= vertices,
+                "Invalid packet source range");
+        auto &source = sources[packet];
+        source.version = 2;
+        source.vertices = last - first;
+        std::memcpy(source.constants.data(), constants + packet * 144, 144);
+        std::memset(source.constants.data() + 140, 0, 4);
+        std::memcpy(source.inputs.data(), static_cast<const uint8_t *>(inputs) + first * 32, source.vertices * 32);
+        for (unsigned i = 0; i < source.vertices; ++i)
+            std::memset(source.inputs.data() + i * 32 + 12, 0, 4);
+        for (unsigned field = 0; field < 2; ++field)
+        {
+            auto *qwords = reinterpret_cast<Qword *>(raw[packet].data.data()) + field * (4 + source.vertices * 3);
+            qwords[0] = {2ull | (1ull << 60), GIF_REG_A_D};
+            GIFRegSCISSOR scissor{};
+            scissor.SCAX1 = 511;
+            scissor.SCAY0 = field ? 224 : 0;
+            scissor.SCAY1 = field ? 447 : 223;
+            GIFRegXYOFFSET offset{};
+            offset.OFX = 28671;
+            offset.OFY = field ? 25591 : 29183;
+            qwords[1] = {scissor.U64, uint64_t(0x40 + prim.CTXT)};
+            qwords[2] = {offset.U64, uint64_t(0x18 + prim.CTXT)};
+            qwords[3] = {source.vertices | (uint64_t(field) << 15) | (1ull << 46) | (prim.U64 << 47) | (3ull << 60),
+                         0x412};
+            unsigned firstZ = 0;
+            bool found = false;
+            for (unsigned i = 0; i < source.vertices; ++i)
+            {
+                const auto *p = static_cast<const uint8_t *>(packed) + ((first + i) * 2 + field) * 48;
+                std::memcpy(qwords + 4 + i * 3, p, 48);
+                const uint32_t mask = word(source.constants.data() + 132 + (i / 16) * 4);
+                if (i < 2 || ((mask << (i % 16)) & 32768))
+                    continue;
+                for (unsigned corner = i - 2; corner <= i; ++corner)
+                {
+                    const auto *v = static_cast<const uint8_t *>(packed) + ((first + corner) * 2 + field) * 48;
+                    const unsigned z = (word(v + 40) >> 4) & 0xffffff;
+                    if (found && z != firstZ)
+                        source.varyingDepth |= 1u << field;
+                    firstZ = z;
+                    found = true;
+                }
+            }
+            if (!side)
+                for (unsigned i = 0; i + 2 < source.vertices; ++i)
+                {
+                    auto *p = reinterpret_cast<uint8_t *>(qwords + 4 + i * 3);
+                    std::memset(p, 0xcd, 12);
+                    std::memset(p + 32, 0xcd, 12);
+                }
+        }
+        views[packet] = {&source, raw[packet].data.data(), (8 + source.vertices * 6) * 16};
+        require(tf_gpu::dualPacketFraming(source, views[packet].packet, views[packet].bytes),
+                "Invalid constructed mesh packet");
+        if (!side)
+        {
+            prepared[packet].mesh = pool.uploadMesh(source.inputs.data(), source.vertices, 1);
+            require(bool(prepared[packet].mesh) &&
+                        pool.bounds(prepared[packet].mesh, source.constants.data(), 1, 0, 1, prepared[packet].bounds),
+                    "Cannot prepare packet bounds");
+        }
+    }
+    if (!side && !mode)
+    {
+        const auto decline = [&](unsigned n) {
+            const auto environment = renderer->m_env;
+            const auto latch = renderer->GetNativeVertexLatch();
+            const auto dispatches = pool.stats().dispatches;
+            require(!tf_gpu::drawDualGroup(pool, views.data(), prepared.data(), n, stats),
+                    "Unsafe dual merge accepted");
+            require(dispatches == pool.stats().dispatches &&
+                        !std::memcmp(&environment, &renderer->m_env, sizeof(environment)) &&
+                        !std::memcmp(&latch, &renderer->GetNativeVertexLatch(), sizeof(latch)),
+                    "Declined merge changed GS state");
+            ++counters[17];
+        };
+        decline(0);
+        decline(9);
+        const auto saved0 = raw[0], saved1 = raw[1];
+        raw[1].data[16] ^= 1;
+        decline(2);
+        raw[1] = saved1;
+        for (unsigned i = 0; i < 2; ++i)
+            std::memcpy(raw[i].data.data() + (4 + sources[i].vertices * 3) * 16 + 16, raw[i].data.data() + 16, 8);
+        decline(2);
+        raw[0] = saved0;
+        raw[1] = saved1;
+        auto &context = renderer->m_env.CTXT[prim.CTXT];
+        const auto saved = context;
+        context.TEX0.TBP0 = context.FRAME.Block();
+        decline(2);
+        context = saved;
+        context.TEX0.TBP0 = context.ZBUF.Block();
+        decline(2);
+        context = saved;
+        context.TEX0.PSM = PSMT8;
+        context.TEX0.CBP = context.FRAME.Block();
+        decline(2);
+        context = saved;
+        context.TEX1.MXL = 1;
+        context.MIPTBP1.TBP1 = context.FRAME.Block();
+        context.MIPTBP1.TBW1 = 1;
+        decline(2);
+        context = saved;
+        sources[0].vertices = 2;
+        decline(2);
+        sources[0].vertices = (views[0].bytes / 16 - 8) / 6;
+    }
+    const auto ordinary = [&](unsigned i) {
+        if (!side)
+            gsnative::materializeDualPacket(sources[i], raw[i].data.data(), views[i].bytes);
+        kzgs::ExecuteGIFOnGSThread(1, raw[i].data.data(), views[i].bytes);
+    };
+    if (!side)
+    {
+        std::fill(latchEnds.begin(), latchEnds.end(), false);
+        for (unsigned i = 0, group = 0; i < count; ++group)
+        {
+            constexpr unsigned sizes[] = {2, 3, 4, 8};
+            const unsigned n = std::min(sizes[group % 4], count - i);
+            if (n < 2 || !tf_gpu::drawDualGroup(pool, views.data() + i, prepared.data() + i, n, stats, mode == 3))
+                for (unsigned j = i; j < i + n; ++j)
+                    ordinary(j);
+            latches[i + n - 1] = renderer->GetNativeVertexLatch();
+            latchEnds[i + n - 1] = true;
+            require(renderer->m_path[0].nloop == 0, "Merged dual draw left unfinished GIF");
+            i += n;
+        }
+    }
+    else
+        for (unsigned i = 0; i < count; ++i)
+        {
+            ordinary(i);
+            if (latchEnds[i])
+            {
+                require(!std::memcmp(&latches[i], &renderer->GetNativeVertexLatch(), sizeof(GSVertex)),
+                        "Merged dual latch changed");
+                ++counters[16];
+            }
+        }
+    renderer->Flush(GSState::GSFlushReason::CONTEXTCHANGE);
+}
 } // namespace
 
-extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint32_t count, const void *constants,
-                                                       uint32_t batches, const uint32_t *groupEnds, uint32_t groups,
-                                                       const void *expected, uint64_t *stats, char *error,
-                                                       uint32_t capacity)
+static int frontendProbe(const void *inputs, uint32_t count, const void *constants, uint32_t batches,
+                         const uint32_t *groupEnds, uint32_t groups, const void *expected, uint64_t *stats, char *error,
+                         uint32_t capacity, const void *packed = nullptr)
 {
     if (!inputs || !constants || !expected || !stats || !groupEnds || !groups || groups > batches || count < 3 ||
         count > 32768 || !batches || batches > 1024)
@@ -217,6 +382,11 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
             std::vector<GSVertex> reference(count * 2);
             std::memcpy(reference.data(), expected, size_t(count) * 64);
             tf_gpu::DualGeometry pool(*device);
+            tf_gpu::DualMergeStats merged;
+            std::vector<GSVertex> packetLatches(batches);
+            std::vector<bool> packetLatchEnds(batches);
+            if (packed)
+                require(batches >= 2 && tf_gpu::probeMergeRanges(stats[18]), "Invalid mesh packet fixture/ranges");
             auto mesh = pool.uploadMesh(inputs, count, batches);
             require(bool(mesh), "Cannot upload frontend mesh");
             auto output = pool.prepare(mesh, constants, batches);
@@ -235,7 +405,7 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
                 return chunk == batches ? count : word(transforms + chunk * 144 + 140);
             };
             std::vector<tf_gpu::DualGeometry::Batch> groupedOutputs(groups);
-            if (grouped)
+            if (grouped && !packed)
             {
                 require(!pool.prepareGroup(nullptr, constants, 1) && !pool.prepareGroup(&mesh, nullptr, 1) &&
                             !pool.prepareGroup(&mesh, constants, 0) && !pool.prepareGroup(&mesh, constants, 9),
@@ -276,11 +446,14 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
                 require(pool.stats().groupedDispatches > 0 && pool.stats().groupedMeshes > 8,
                         "Grouped diagnostic did not exercise independent source buffers");
             }
-            // Four independent render pairs exercise texture lookup, depth, alpha
-            // blending/testing, mipmap selection and an intentional CPU fallback.
-            for (unsigned mode = 0; mode < 4; ++mode)
+            // Independent render pairs exercise texture lookup, depth, alpha
+            // blending/testing, mipmaps and deliberate CPU fallback. Packet
+            // merging also separates opaque and blended mipmap cases.
+            for (unsigned mode = 0; mode < (packed ? 5u : 4u); ++mode)
             {
                 const uint64_t fallbackBefore = stats[2];
+                const auto mergedFallbackBefore = merged.materializations;
+                const auto mergedGpuBefore = merged.gpuDraws;
                 renderer->Flush(GSState::GSFlushReason::CONTEXTCHANGE);
                 renderer->ReadbackTextureCache();
                 GIFRegBITBLTBUF blit{};
@@ -336,10 +509,12 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
                     }
                     for (unsigned field = 0; field < 2; ++field)
                     {
+                        if (packed && field)
+                            break;
                         GIFRegPRIM prim{};
                         prim.PRIM = GS_TRIANGLELIST;
                         prim.IIP = prim.TME = 1;
-                        prim.ABE = mode == 1 || mode == 2;
+                        prim.ABE = mode == 1 || (packed ? mode == 4 : mode == 2);
                         GIFRegFRAME frame{};
                         frame.FBP = framebuffer;
                         frame.FBW = 8;
@@ -364,8 +539,9 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
                         tex.TCC = 1;
                         GIFRegTEX1 tex1{};
                         tex1.MMAG = 1;
-                        tex1.MMIN = mode == 2 ? 5 : 1;
-                        tex1.MXL = mode == 2 ? 1 : 0;
+                        const bool mipmap = mode == 2 || mode == 4;
+                        tex1.MMIN = mipmap ? 5 : 1;
+                        tex1.MXL = mipmap ? 1 : 0;
                         GIFRegMIPTBP1 mip{};
                         mip.TBP1 = textureBase + 64;
                         mip.TBW1 = 1;
@@ -390,6 +566,12 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
                         reg(state, 0x18, xy);
                         reg(state, 0x40, scissor);
                         transfer(state);
+                        if (packed)
+                        {
+                            packetScene(inputs, transforms, packed, count, batches, side, mode, prim, pool, merged,
+                                        packetLatches, packetLatchEnds, stats);
+                            continue;
+                        }
                         for (unsigned group = 0; group < groups; ++group)
                         {
                             const unsigned firstChunk = group ? groupEnds[group - 1] : 0, lastChunk = groupEnds[group];
@@ -507,6 +689,12 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
                 require(painted > 1000, "Frontend comparison did not paint enough pixels");
                 require(mode == 3 || stats[2] == fallbackBefore,
                         "A GPU frontend mode unexpectedly materialized CPU vertices");
+                require(!packed || mode == 3 || merged.materializations == mergedFallbackBefore,
+                        "A GPU merged mode unexpectedly materialized vertices");
+                if (packed)
+                    require(mode == 3 ? merged.materializations > mergedFallbackBefore
+                                      : merged.gpuDraws > mergedGpuBefore,
+                            "Merged mode did not exercise its GPU/fallback path");
                 std::fprintf(stderr,
                              "[gpu:frontend] mode=%u painted=%llu differences=%llu submits=%llu fallback=%llu\n", mode,
                              painted, differences, stats[1], stats[2]);
@@ -516,9 +704,25 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
             stats[14] = pool.stats().groupedDispatches;
             stats[15] = pool.stats().groupedMeshes;
             require(stats[8] == 0 && stats[10] == 0, "Native frontend pixels differ from GIF reference draws");
-            require(stats[0] > 100 && stats[1] > 100 && stats[2] > 0 && stats[3] > 100 && stats[4] > 100 &&
-                        stats[5] > 0 && stats[6] > 0 && stats[13] > 0,
-                    "Frontend diagnostic did not exercise required paths");
+            if (packed)
+            {
+                stats[19] = merged.groups;
+                stats[20] = merged.packets;
+                stats[21] = merged.gpuDraws;
+                stats[22] = merged.materializations;
+                stats[23] = merged.ordinaryFields;
+                stats[24] = merged.stateDeclined;
+                stats[25] = merged.feedbackDeclined;
+                stats[26] = merged.boundsDeclined;
+                stats[27] = merged.outputDeclined;
+                require(merged.groups > 100 && merged.gpuDraws > 100 && merged.materializations > 0 &&
+                            stats[16] > 100 && stats[17] >= 9,
+                        "Merged dual diagnostic did not exercise required paths");
+            }
+            else
+                require(stats[0] > 100 && stats[1] > 100 && stats[2] > 0 && stats[3] > 100 && stats[4] > 100 &&
+                            stats[5] > 0 && stats[6] > 0 && stats[13] > 0,
+                        "Frontend diagnostic did not exercise required paths");
             passed = true;
         }
         catch (const std::exception &ex)
@@ -528,4 +732,22 @@ extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint3
         }
     });
     return passed ? 1 : 0;
+}
+
+extern "C" TF_HWGS_API int tf_gs_gpu_frontend_probe_v1(const void *inputs, uint32_t count, const void *constants,
+                                                       uint32_t batches, const uint32_t *groupEnds, uint32_t groups,
+                                                       const void *expected, uint64_t *stats, char *error,
+                                                       uint32_t capacity)
+{
+    return frontendProbe(inputs, count, constants, batches, groupEnds, groups, expected, stats, error, capacity);
+}
+extern "C" TF_HWGS_API int tf_gs_gpu_dual_merged_probe(const void *inputs, uint32_t count, const void *constants,
+                                                       uint32_t batches, const uint32_t *groupEnds, uint32_t groups,
+                                                       const void *expected, uint64_t *stats, char *error,
+                                                       uint32_t capacity, const void *packed)
+{
+    if (!packed)
+        return 0;
+    return frontendProbe(inputs, count, constants, batches, groupEnds, groups, expected, stats, error, capacity,
+                         packed);
 }

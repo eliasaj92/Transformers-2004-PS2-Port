@@ -526,3 +526,18 @@ negative feedback/state guards, textured native/fallback comparisons and the
 triangle regression. All 117,178,368 pixels in a 32-image live capture match the
 saved enhanced camera-turn output exactly. No original or older game build is
 run. See [the contract, measurements and commands](../../deps/hwgs/GPU_GEOMETRY.md#merged-grass-draws-and-wider-batches).
+
+## Merged dual-transform meshes
+
+The resident mesh path can now merge up to eight compatible packets into one
+triangle draw per field. Index lists preserve strip order and restart masks.
+Shared feedback guards keep the two fields independent, and blended groups
+require identical constant vertex alpha to retain the backend's blend choice.
+Rejected groups continue through the established individual draw path.
+
+The accelerated Amazon run reduces mesh GPU draws by 26% and native CPU
+materializations by 84% relative to the saved enhanced wide-grass run. It
+measures 57.4907 physics updates/s and 56.4953 direct handoffs/s, with no
+demonstrated FPS improvement. The 32-image camera turn again matches all
+117,178,368 pixels exactly. The feature remains opt-in; remaining VU geometry
+work is the next offload target. See [the contract and diagnostics](../../deps/hwgs/GPU_GEOMETRY.md#merged-mesh-packets).

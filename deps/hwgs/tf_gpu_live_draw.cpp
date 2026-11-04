@@ -2,6 +2,7 @@
 #include "tf_hwgs.h"
 #include "tf_gpu_live_draw.h"
 #include "tf_gpu_live_grass.h"
+#include "tf_gpu_live_dual.h"
 #include "tf_gpu_dual_geometry.h"
 #include "tf_gpu_dual_frontend.h"
 #include "runtime/gs/gs_native_grass_math.h"
@@ -71,6 +72,7 @@ struct Live
     uint64_t sourceDeclined = 0, outputDeclined = 0;
     uint64_t packetGroups = 0, groupPackets = 0, groupDeclined = 0;
     tf_gpu::GrassLiveStats grass;
+    tf_gpu::DualMergeStats merged;
     // Retain the visible level's source working set. The initial 256-entry
     // cache uploaded 125,208 of 155,337 packets. Extra pool capacity covers
     // released buffers which are still in flight.
@@ -121,11 +123,15 @@ struct Live
                      "source_hits=%llu bounds_declined=%llu dispatches=%llu source_uploads=%llu source_bytes=%llu "
                      "output_allocations=%llu page_probes=%llu source_declined=%llu output_declined=%llu "
                      "unique_source_hashes=%zu grouped_dispatches=%llu grouped_meshes=%llu packet_groups=%llu "
-                     "group_packets=%llu group_declined=%llu\n",
-                     packets, gpuDraws, cpuFallbacks, declinedFields, sourceHits, noBounds, s.dispatches, s.meshUploads,
+                     "group_packets=%llu group_declined=%llu merged_groups=%llu merged_packets=%llu "
+                     "merged_draws=%llu merge_state_declined=%llu merge_feedback_declined=%llu "
+                     "merge_bounds_declined=%llu merge_output_declined=%llu\n",
+                     packets + merged.packets, gpuDraws + merged.gpuDraws, cpuFallbacks + merged.materializations,
+                     declinedFields + merged.ordinaryFields, sourceHits, noBounds, s.dispatches, s.meshUploads,
                      s.sourceUploadBytes, s.allocations, s.pageProbes, sourceDeclined, outputDeclined,
                      sourceHashes.size(), s.groupedDispatches, s.groupedMeshes, packetGroups, groupPackets,
-                     groupDeclined);
+                     groupDeclined, merged.groups, merged.packets, merged.gpuDraws, merged.stateDeclined,
+                     merged.feedbackDeclined, merged.boundsDeclined, merged.outputDeclined);
         std::fprintf(stderr,
                      "[gpu-grass:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
                      "declined_fields=%llu bounds_declined=%llu output_declined=%llu dispatches=%llu batches=%llu "
@@ -219,35 +225,7 @@ void materialize(void *context, GSVertex *vertices, uint32_t)
     decodeField(packet, d.vertices, 0, vertices);
     decodeField(packet, d.vertices, 1, vertices);
 }
-bool framing(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes)
-{
-    if (p.kind != gsnative::GeometryKind::DualTransform || (p.version != 1 && p.version != 2) || p.vertices < 3 ||
-        p.vertices > 28 || bytes != (8 + p.vertices * 6) * 16 || word(p.constants.data() + 140))
-        return false;
-    for (unsigned i = 0; i < p.vertices; ++i)
-        if (word(p.inputs.data() + i * 32 + 12))
-            return false;
-    for (unsigned field = 0; field < 2; ++field)
-    {
-        const auto *f = packet + field * (4 + 3 * p.vertices) * 16;
-        const uint64_t state = wide(f), tag = wide(f + 48);
-        const unsigned context = (tag >> (47 + 9)) & 1;
-        if ((state & 32767) != 2 || (state >> 58 & 3) || state >> 60 != 1 || wide(f + 8) != 14 ||
-            (tag & 32767) != p.vertices || (tag >> 58 & 3) || tag >> 60 != 3 || wide(f + 56) != 0x412 ||
-            (tag >> 47 & 7) != 4 || !(tag & (1ull << 46)) || wide(f + 24) != 0x40 + context ||
-            wide(f + 40) != 0x18 + context)
-            return false;
-    }
-    return true;
-}
-struct Prepared
-{
-    tf_gpu::DualGeometry::Mesh mesh;
-    tf_gpu::DualGeometry::Batch batch;
-    std::array<tf_gpu::DualDrawBounds, 2> bounds;
-    uint32_t first = 0;
-};
-void executePacket(const uint8_t *bytes, uint32_t size, const Prepared *prepared,
+void executePacket(const uint8_t *bytes, uint32_t size, const tf_gpu::PreparedDual *prepared,
                    const tf_gpu::PreparedGrass *grassPrepared = nullptr)
 {
     if (size < sizeof(Payload))
@@ -280,7 +258,7 @@ void executePacket(const uint8_t *bytes, uint32_t size, const Prepared *prepared
         return;
     }
     if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || payload.path != 1 ||
-        !framing(p, packet, payload.bytes) || g_gs_renderer->m_path[0].nloop)
+        !tf_gpu::dualPacketFraming(p, packet, payload.bytes) || g_gs_renderer->m_path[0].nloop)
     {
         ordinary();
         return;
@@ -386,7 +364,7 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
         }
         const auto &p = *reinterpret_cast<const Payload *>(views[i].data);
         if (p.path != 1 || p.bytes != views[i].bytes - sizeof(Payload) ||
-            (!framing(p.geometry, views[i].data + sizeof(Payload), p.bytes) &&
+            (!tf_gpu::dualPacketFraming(p.geometry, views[i].data + sizeof(Payload), p.bytes) &&
              !tf_gpu::grassPacketFraming(p.geometry, views[i].data + sizeof(Payload), p.bytes)))
         {
             ordinary();
@@ -428,13 +406,15 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
     }
     ++live->packetGroups;
     live->groupPackets += count;
-    std::array<Prepared, maxComputeGroup> prepared;
+    std::array<tf_gpu::PreparedDual, maxComputeGroup> prepared;
+    std::array<tf_gpu::DualPacketView, maxComputeGroup> packets;
     std::array<tf_gpu::DualGeometry::Mesh, maxComputeGroup> meshes;
     std::array<uint8_t, maxComputeGroup * 144> constants;
     uint32_t first = 0;
     for (unsigned i = 0; i < count; ++i)
     {
         const auto &geometry = reinterpret_cast<const Payload *>(views[i].data)->geometry;
+        packets[i] = {&geometry, views[i].data + sizeof(Payload), views[i].bytes - uint32_t(sizeof(Payload))};
         prepared[i].mesh = meshes[i] = live->source(geometry);
         if (!meshes[i] || !live->pool.bounds(meshes[i], geometry.constants.data(), 1, 0, 1, prepared[i].bounds))
         {
@@ -446,6 +426,12 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
         prepared[i].first = first;
         first += geometry.vertices;
     }
+    static const bool merge = [] {
+        const char *option = std::getenv("PS2X_TF_GPU_DUAL_MERGE");
+        return option && !std::strcmp(option, "1");
+    }();
+    if (merge && tf_gpu::drawDualGroup(live->pool, packets.data(), prepared.data(), count, live->merged))
+        return;
     // Only immutable source buffers and owned output are touched here. All GS
     // state, textures, fallback handling and draw calls remain in packet order.
     const auto batch = live->pool.prepareGroup(meshes.data(), constants.data(), count);
@@ -501,7 +487,7 @@ extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_
                                      const gsnative::DualPacket *geometry)
 {
     if (path != 1 || !data || !geometry ||
-        (!framing(*geometry, data, bytes) && !tf_gpu::grassPacketFraming(*geometry, data, bytes)))
+        (!tf_gpu::dualPacketFraming(*geometry, data, bytes) && !tf_gpu::grassPacketFraming(*geometry, data, bytes)))
         return 0;
     alignas(16) std::array<uint8_t, sizeof(Payload) + (8 + 28 * 6) * 16> storage;
     const Payload payload{*geometry, path, bytes, 0};
