@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "runtime/gs/gs_native_geometry.h"
 
 #ifdef TF_HWGS_BUILD
 #define TF_HWGS_API __declspec(dllexport)
@@ -17,6 +18,10 @@ TF_HWGS_API void tf_gs_reset();
 TF_HWGS_API void tf_gs_sync();
 TF_HWGS_API void tf_gs_configure(int scale, int fxaa);
 TF_HWGS_API void tf_gs_gif(uint32_t path, const uint8_t* data, uint32_t bytes);
+// Copies the companion and fallback packet into the same ordered GS queue.
+// Returns zero without enqueuing when unsupported. No per-draw completion wait.
+TF_HWGS_API int tf_gs_native_dual_gif(uint32_t path, const uint8_t* data, uint32_t bytes,
+                                    const gsnative::DualPacket* geometry);
 TF_HWGS_API void tf_gs_vsync(const uint8_t* privilegedRegisters);
 // Returns required bytes. Copy only when capacity is sufficient; dimensions always returned.
 TF_HWGS_API uint32_t tf_gs_frame(uint8_t* data, uint32_t capacity, uint32_t* width, uint32_t* height);

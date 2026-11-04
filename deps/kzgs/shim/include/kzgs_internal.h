@@ -17,6 +17,13 @@ namespace kzgs
 	// Debug/tooling: runs fn on the GS thread after everything queued so far, and waits for it.
 	void RunOnGSThread(std::function<void()> fn);
 
+	// Ordered owned payload, no completion wait. Callback executes on the GS
+	// thread and must not retain the payload pointer. Bounded to 1 MiB.
+	using PacketCommand = void (*)(const uint8_t*, uint32_t);
+	bool QueuePacketCommand(PacketCommand command, const void* payload, uint32_t bytes);
+	// Only for a callback already executing on the GS thread.
+	void ExecuteGIFOnGSThread(uint32_t path, const uint8_t* data, uint32_t bytes);
+
 	// SMAA 1x on the D3D11 device (src/kz_smaa11.cpp). SmaaInstall() swaps the device's FXAA hook; call it after GSopen and
 	// after every GSUpdateConfig (a renderer switch creates a new device).
 	// Measurement: while a sink is set, every Direct3D 11 Present first hands the finished back buffer (RGBA8) to it (src/kz_present11.cpp).

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <algorithm>
 #include "ps2_gs_timeline.h"
+#include "runtime/gs/gs_native_geometry.h"
 int ps2Vu1CurrentPriority() noexcept;
 void ps2Vu1SetPriority(int) noexcept;
 // TEMP(transformers) qualification: perfscope hooks (ps2_perfscope.cpp). Worker qualification = busy/idle; EE fence waits are
@@ -50,7 +51,7 @@ public:
     std::function<void(uint32_t)> publishStatus;
     std::function<gsTimeline::Context()> captureContext;
     std::function<void()> afterReplay;
-    std::function<void(const uint8_t*,uint32_t,uint32_t,bool,bool)> packetReplay;
+    std::function<void(const uint8_t*,uint32_t,uint32_t,bool,bool,gsnative::DualPacketPtr)> packetReplay;
     uint64_t oracleField=0; // worker-only serial reference of the EE timeline CSR FIELD
     std::atomic<uint64_t> csrOracleReads{0},csrOracleFailures{0}; // TEMP(transformers)
     std::atomic<uint64_t> directPackets{0},batchedPackets{0},packetBatches{0}; // TEMP(transformers)
@@ -65,8 +66,10 @@ public:
     }
     // Packet bytes and descriptors share one allocation-growing batch. EE packets
     // are placed AFTER the last admitted ticket, without a worker job or wakeup.
-    void packet(const uint8_t *data,uint32_t size,uint32_t path,bool immediate,bool hl) {
+    void packet(const uint8_t *data,uint32_t size,uint32_t path,bool immediate,bool hl,gsnative::DualPacketPtr geometry={}) {
         const bool worker=inWorker();
+        const size_t companionBytes=geometry?sizeof(gsnative::DualPacket):0;
+        const size_t retainedBytes=size+companionBytes;
         // TEMP(transformers) qualification: the worker appends its packets to a private chunk without the queue mutex and
         // publishes the chunk as ONE event once it holds PS2X_VU1_WCHUNK bytes (default 64 KiB) or 4096 packets, before
         // any other worker event (emit) and at the end of every job (before `completed` moves). Queue order is (ticket,
@@ -80,29 +83,30 @@ public:
                 wchunk->bytes.reserve(std::max<size_t>(size,std::min<size_t>(chunkLimit(),std::max<size_t>(wLastBytes,4096u))));
                 wchunk->packets.reserve(std::min<size_t>(4096u,std::max<size_t>(wLastPackets,64u)));
             }
-            wchunk->packets.push_back({wchunk->bytes.size(),size,path,immediate,hl,c});
+            wchunk->companionBytes+=companionBytes;
+            wchunk->packets.push_back({wchunk->bytes.size(),size,path,immediate,hl,c,std::move(geometry)});
             wchunk->bytes.insert(wchunk->bytes.end(),data,data+size);batchedPackets.fetch_add(1,std::memory_order_relaxed);
-            if(wchunk->bytes.size()>=chunkLimit() || wchunk->packets.size()>=4096u) {std::lock_guard<std::mutex> l(mutex);check();publishChunk();}
+            if(wchunk->bytes.size()+wchunk->companionBytes>=chunkLimit() || wchunk->packets.size()>=4096u) {std::lock_guard<std::mutex> l(mutex);check();publishChunk();}
             return;
         }
         std::optional<Vu1PerfWorkScope> perf;if(!worker)perf.emplace(0); // TEMP(transformers) qualification
         const auto c=context();
         std::lock_guard<std::mutex> l(mutex);check();
-        if(size>128u*1024u*1024u-retained)throw std::runtime_error("VU1 GS event capacity exceeded");
+        if(retainedBytes>128u*1024u*1024u-retained)throw std::runtime_error("VU1 GS event capacity exceeded");
         idle.store(false,std::memory_order_release);
         const uint64_t ticket=worker?executingTicket:submitted;
         auto at=insertPos([&](const Event &e){return e.ticket>ticket || (e.ticket==ticket && e.after>!worker);});
         std::shared_ptr<PacketBatch> batch;
         if(at!=events.begin()) {
             auto prev=std::prev(at);
-            if(prev->ticket==ticket && prev->after==!worker && prev->batch && prev->bytes+size<=65536u)batch=prev->batch;
+            if(prev->ticket==ticket && prev->after==!worker && prev->batch && prev->bytes+retainedBytes<=65536u)batch=prev->batch;
         }
         if(!batch) {
             batch=std::make_shared<PacketBatch>();batch->bytes.reserve(std::max<uint32_t>(size,4096u));batch->packets.reserve(128);
             at=events.insert(at,Event{{},0,ticket,!worker,c,batch});++packetBatches;nEvents.store(static_cast<uint32_t>(events.size()),std::memory_order_release);
         } else --at;
-        batch->packets.push_back({batch->bytes.size(),size,path,immediate,hl,c});
-        batch->bytes.insert(batch->bytes.end(),data,data+size);at->bytes+=size;retained+=size;++batchedPackets;
+        batch->packets.push_back({batch->bytes.size(),size,path,immediate,hl,c,std::move(geometry)});
+        batch->bytes.insert(batch->bytes.end(),data,data+size);at->bytes+=retainedBytes;retained+=retainedBytes;++batchedPackets;
     }
     void emit(std::function<void()> event,size_t bytes=0) {
         std::lock_guard<std::mutex> l(mutex);
@@ -148,7 +152,7 @@ public:
                 if(e.batch) {
                     for(const auto &p:e.batch->packets) {
                         gsTimeline::Scope scope(p.context);
-                        packetReplay(e.batch->bytes.data()+p.offset,p.size,p.path,p.immediate,p.hl);
+                        packetReplay(e.batch->bytes.data()+p.offset,p.size,p.path,p.immediate,p.hl,p.geometry);
                     }
                 } else {gsTimeline::Scope scope(e.context);e.fn();}
                 if(afterReplay)afterReplay();
@@ -199,8 +203,8 @@ private:
         return at;
     }
     uint64_t qScans=0,qScanSteps=0,qMaxEvents=0;
-    struct Packet {size_t offset;uint32_t size,path;bool immediate,hl;gsTimeline::Context context;};
-    struct PacketBatch {std::vector<uint8_t> bytes;std::vector<Packet> packets;};
+    struct Packet {size_t offset;uint32_t size,path;bool immediate,hl;gsTimeline::Context context;gsnative::DualPacketPtr geometry;};
+    struct PacketBatch {std::vector<uint8_t> bytes;std::vector<Packet> packets;size_t companionBytes=0;};
     struct Job {std::function<void()> fn;uint64_t ticket;bool stream;uint32_t ctl;gsTimeline::Context context;int priority;};
     struct Event {std::function<void()> fn;size_t bytes;uint64_t ticket;bool after;gsTimeline::Context context;std::shared_ptr<PacketBatch> batch;};
     uint64_t executingTicket=0;
@@ -220,12 +224,12 @@ private:
     void publishChunk() { // mutex held, worker thread
         if(!wchunk)return;
         if(wchunk->packets.empty()){wchunk.reset();return;}
-        const size_t n=wchunk->bytes.size();
+        const size_t n=wchunk->bytes.size()+wchunk->companionBytes;
         if(n>128u*1024u*1024u-retained)throw std::runtime_error("VU1 GS event capacity exceeded");
         idle.store(false,std::memory_order_release);
         const uint64_t ticket=executingTicket;
         auto at=insertPos([&](const Event &e){return e.ticket>ticket || (e.ticket==ticket && e.after);});
-        wLastBytes=n;wLastPackets=wchunk->packets.size();
+        wLastBytes=wchunk->bytes.size();wLastPackets=wchunk->packets.size();
         const auto c=wchunk->packets.front().context;
         events.insert(at,Event{{},n,ticket,false,c,std::move(wchunk)});wchunk.reset();
         retained+=n;++packetBatches;nEvents.store(static_cast<uint32_t>(events.size()),std::memory_order_release);

@@ -223,7 +223,7 @@ index c3499e8..b47f735 100644
  	bool IsRealLinear() const { return m_filter.linear; }
  
 diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
-index cf918b3..8b8e094 100644
+index cf918b3..e4dcae0 100644
 --- a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
 +++ b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
 @@ -4406,6 +4406,10 @@ void GSDevice12::FeedbackBarrier(const GSTexture12* texture)
@@ -237,17 +237,15 @@ index cf918b3..8b8e094 100644
  	GSTexture12* colclip_rt = static_cast<GSTexture12*>(g_gs_device->GetColorClipTexture());
  	GSTexture12* draw_rt = config.ps.HasColorROV() ? nullptr : static_cast<GSTexture12*>(config.rt);
  	GSTexture12* draw_ds = config.ps.HasDepthROV() ? nullptr : static_cast<GSTexture12*>(config.ds);
-@@ -4859,10 +4863,47 @@ void GSDevice12::UpdateHWPipelineSelector(GSHWDrawConfig& config)
+@@ -4859,10 +4863,53 @@ void GSDevice12::UpdateHWPipelineSelector(GSHWDrawConfig& config)
  	m_pipeline_selector.ds_as_rt = m_ds_as_rt != nullptr && !config.ps.HasDepthROV();
  }
  
-+bool GSDevice12::RenderHWFromGPU(GSHWDrawConfig& config, const D3D12_VERTEX_BUFFER_VIEW& vertices)
++bool GSDevice12::CanRenderHWFromGPU(const GSHWDrawConfig& config) const
 +{
 +	// Expanded primitives read a different vertex stream in the vertex shader.
 +	// Start with ordinary indexed triangles; do not silently bind the CPU stream.
-+	if (m_native_geometry_vertices.BufferLocation || !vertices.BufferLocation ||
-+		(vertices.BufferLocation & 31u) || vertices.StrideInBytes != sizeof(GSVertex) ||
-+		!config.nverts || config.nverts > vertices.SizeInBytes / sizeof(GSVertex) ||
++	if (m_native_geometry_vertices.BufferLocation || !config.nverts ||
 +		!config.indices || !config.nindices || config.nindices % 3u ||
 +		config.topology != GSHWDrawConfig::Topology::Triangle ||
 +		config.vs.expand != GSHWDrawConfig::VSExpand::None || config.line_expand)
@@ -257,6 +255,14 @@ index cf918b3..8b8e094 100644
 +		if (config.indices[i] >= config.nverts)
 +			return false;
 +	}
++	return true;
++}
++
++bool GSDevice12::RenderHWFromGPU(GSHWDrawConfig& config, const D3D12_VERTEX_BUFFER_VIEW& vertices)
++{
++	if (!vertices.BufferLocation || (vertices.BufferLocation & 31u) || vertices.StrideInBytes != sizeof(GSVertex) ||
++		config.nverts > vertices.SizeInBytes / sizeof(GSVertex) || !CanRenderHWFromGPU(config))
++		return false;
 +
 +	struct ResetNativeInput
 +	{
@@ -288,10 +294,10 @@ index cf918b3..8b8e094 100644
  	{
  		m_index.start = 0;
 diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.h b/pcsx2/GS/Renderers/DX12/GSDevice12.h
-index 3eeab02..95d4fc1 100644
+index 3eeab02..a959060 100644
 --- a/pcsx2/GS/Renderers/DX12/GSDevice12.h
 +++ b/pcsx2/GS/Renderers/DX12/GSDevice12.h
-@@ -603,6 +603,23 @@ public:
+@@ -603,6 +603,24 @@ public:
  	void UploadHWDrawVerticesAndIndices(GSHWDrawConfig& config);
  
  public:
@@ -301,6 +307,7 @@ index 3eeab02..95d4fc1 100644
 +	/// True means accepted for submission, not GPU completion. Unsupported expansion
 +	/// modes return false before changing draw state; the caller retains its fallback.
 +	/// Complex alpha/feedback configurations still need game-level testing.
++	bool CanRenderHWFromGPU(const GSHWDrawConfig& config) const;
 +	bool RenderHWFromGPU(GSHWDrawConfig& config, const D3D12_VERTEX_BUFFER_VIEW& vertices);
 +	// GS-thread native submission hook. Return true only after completing the
 +	// replacement submission; false must leave configuration/state unchanged.
@@ -315,7 +322,7 @@ index 3eeab02..95d4fc1 100644
  	/// Ends any render pass, executes the command buffer, and invalidates cached state.
  	void ExecuteCommandList(bool wait_for_completion);
  	void ExecuteCommandList(bool wait_for_completion, const char* reason, ...);
-@@ -710,6 +727,9 @@ private:
+@@ -710,6 +728,9 @@ private:
  	u32 m_dirty_flags = 0;
  
  	// input assembly

@@ -387,6 +387,8 @@ public:
     void flushMaskedPath3Packets(bool drainImmediately = true);
 
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
+    void submitGifPacketWithGeometry(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes,
+                                    bool drainImmediately, bool path2DirectHl, gsnative::DualPacketPtr geometry);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr);

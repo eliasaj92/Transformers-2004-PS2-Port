@@ -64,6 +64,7 @@ void ps2PadStopHostRumble();        // ps2_pad.cpp, TEMP(transformers): playtest
 #include "ps2_objectives.h"
 #include "ps2_native_seam_probe.h"
 #include "native/tf_grass_oracle.h"
+#include "native/tf_gpu_live.h"
 #include "ps2_crash_reporter.h"     // crash report + minidump (generic, ported from SSX3)
 #include "ps2_sprint_probe.h"       // TEMP(transformers): qualification - PS2X_SPRINT_LOG=1 robot walk/run telemetry
 #include "ps2_movement_timing.h"
@@ -1368,9 +1369,10 @@ bool PS2Runtime::syncCoreSubsystems()
             auto &csr=m_memory.gs().csr;auto old=csr.load();
             while(!csr.compare_exchange_weak(old,(old&~0x2000ull)|m_memory.m_vif1EeField.load())){}
         };
-        instant.packetReplay=[this](const uint8_t *p,uint32_t n,uint32_t path,bool immediate,bool hl) {
-            if(ps2Vu1CoalescePacket(m_memory,p,n,path,immediate,hl))return; // TEMP(transformers) qualification
-            m_memory.submitGifPacket(static_cast<GifPathId>(path),p,n,immediate,hl);
+        instant.packetReplay=[this](const uint8_t *p,uint32_t n,uint32_t path,bool immediate,bool hl,gsnative::DualPacketPtr geometry) {
+            if(geometry) ps2Vu1CoalesceFlush(m_memory);
+            else if(ps2Vu1CoalescePacket(m_memory,p,n,path,immediate,hl))return;
+            m_memory.submitGifPacketWithGeometry(static_cast<GifPathId>(path),p,n,immediate,hl,std::move(geometry));
         };
         m_memory.m_vif1CaptureControls=[this] {auto *c=m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;return c?c->vu0_fbrst:m_cpuContext.vu0_fbrst;};
         m_vu1.setDependencyFence([this]{Vu1FenceReason r_(kVu1FenceMem);m_memory.m_vif1Instant->fence();}); // qualification: reason
@@ -3394,6 +3396,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2_objectives::install(*this, elfCrc32);
     if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2_native_seam_probe::install(*this, elfCrc32);
     if (module.name == "SLUS_206.68" && elfCrc32Valid) tf_grass_oracle::install(elfCrc32);
+    if (module.name == "SLUS_206.68" && elfCrc32Valid) tf_gpu_live::install(elfCrc32);
     {
         // Profile selection follows executable validation and precedes guest execution.
         // configureIoPathsFromElf runs before the CRC and initially resolves the normal card.
@@ -6060,6 +6063,7 @@ void PS2Runtime::run()
     }
     PS2IopTransport::finishAudioCapture(this); // TEMP(transformers): joined producer; flush before _Exit
     tf_grass_oracle::finish();
+    tf_gpu_live::finish();
     ps2_perfscope::stop();                                // TEMP(transformers) qualification: final TOTAL line
     ps2_perfscope::setAudioStatsProvider(nullptr, nullptr); // before hostAudio is destroyed
 

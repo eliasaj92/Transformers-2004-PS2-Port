@@ -402,6 +402,7 @@ add_library(ps2_runtime STATIC
     src/lib/native/tf_grass_geometry.cpp
     src/lib/native/tf_grass_packets.cpp
     src/lib/native/tf_grass_oracle.cpp
+    src/lib/native/tf_gpu_live.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp

@@ -98,6 +98,21 @@ public:
     }
     void RawAD(uint8_t reg, uint64_t value) override
     { Enqueue([=, this] { m_backend->RawAD(reg, value); }); }
+    void RawNativeDual(uint32_t path, const uint8_t *data, uint32_t size, const gsnative::DualPacket &geometry) override
+    {
+        if (!data || !size) return;
+        if (!m_threaded) { m_backend->RawNativeDual(path, data, size, geometry); return; }
+        std::lock_guard<std::mutex> lock(m_rawBatchMutex);
+        const size_t at = m_rawBatch.size(), padded = (size_t(size) + 15u) & ~size_t(15);
+        constexpr uint32_t extra = sizeof(gsnative::DualPacket);
+        m_rawBatch.resize(at + 16u + extra + padded);
+        uint8_t *dst = m_rawBatch.data() + at;
+        std::memcpy(dst, &path, 4); std::memcpy(dst + 4, &size, 4);
+        std::memcpy(dst + 8, &extra, 4); std::memset(dst + 12, 0, 4);
+        std::memcpy(dst + 16, &geometry, extra);
+        std::memcpy(dst + 16 + extra, data, size);
+        if (m_rawBatch.size() >= kRawBatchBytes) FlushRawBatchLocked();
+    }
     void RawVsync(const std::array<uint8_t,8192> &priv) override
     { Enqueue([this, priv] { m_backend->RawVsync(priv); }); }
     bool WantsDecodedRaster() const override { return m_decoded; }
@@ -303,10 +318,16 @@ private:
             const uint8_t *p = batch.data(), *end = p + batch.size();
             while (p + 16 <= end)
             {
-                uint32_t path, size;
-                std::memcpy(&path, p, 4); std::memcpy(&size, p + 4, 4);
-                m_backend->RawGIF(path, p + 16, size);
-                p += 16u + ((size_t(size) + 15u) & ~size_t(15));
+                uint32_t path, size, extra;
+                std::memcpy(&path, p, 4); std::memcpy(&size, p + 4, 4); std::memcpy(&extra, p + 8, 4);
+                if (extra) {
+                    if (extra != sizeof(gsnative::DualPacket) || size_t(end - p) < 16u + extra + size)
+                        throw std::runtime_error("Malformed owned GS geometry batch");
+                    gsnative::DualPacket geometry;
+                    std::memcpy(&geometry, p + 16, extra);
+                    m_backend->RawNativeDual(path, p + 16 + extra, size, geometry);
+                } else m_backend->RawGIF(path, p + 16, size);
+                p += 16u + extra + ((size_t(size) + 15u) & ~size_t(15));
             }
             if (RawRecycle() && batch.capacity() <= 2u * (kRawBatchBytes + 4096u))
             {

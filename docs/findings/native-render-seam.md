@@ -347,3 +347,26 @@ bypass disabled. Its measured gameplay window reached 54.9299 physics updates/s
 (17.736 ms median, 22.2 ms p95). Only the enhanced accelerated build ran, with
 cinematics skipped. This sample does not attribute a speedup to GPU offload or
 establish distinct rendered 60 fps.
+
+## Ordered live GPU drawing
+
+The opt-in live handoff now carries owned source geometry with its original
+GIF packet through every worker/GS queue. It preserves state prefixes, strip
+ordering and final GS latches, with ordinary accelerated packet data available
+for fallback. GPU compute runs only when a draw actually reaches the native
+submission callback; both fields reuse its result.
+
+The first enhanced Amazon attempt exposed severe source-cache thrashing and
+was stopped. Expanding the cache from 256 to 2,048 entries eliminated that
+churn in the subsequent passing route: 1,687 source uploads, 99.7365% source
+reuse, 1,190,571 native GPU submissions and no pool-capacity declines. All
+640,436 selected VU calls attached their companions; GS totals can be lower
+because runtime rewrites/fallback and shutdown delivery are separate stages.
+This is live GPU rendering, but static VU still computes the retained CPU
+fallback and guest state.
+
+The gameplay-only measurement was 49.9560 physics updates/s at 4x internal
+resolution and 1920x1080 direct presentation, with cinematics skipped. The
+final frame was inspected, not qualified for exact pixel equality. Actual VU
+bypass, CPU-independent fallback/state preservation and distinct rendered
+60 fps remain unfinished. See [the handoff contract and results](../../deps/hwgs/GPU_GEOMETRY.md#ordered-live-geometry-handoff).

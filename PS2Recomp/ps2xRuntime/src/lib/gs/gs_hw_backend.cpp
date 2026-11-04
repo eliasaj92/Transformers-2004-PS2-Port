@@ -93,6 +93,11 @@ public:
         alignas(16) const uint64_t packet[] = {uint64_t(1) | (uint64_t(1) << 15) | (uint64_t(1) << 60), 0x0e, value, reg};
         tf_gs_gif(3, reinterpret_cast<const uint8_t*>(packet), sizeof(packet));
     }
+    void RawNativeDual(uint32_t path, const uint8_t* data, uint32_t bytes, const gsnative::DualPacket& geometry) override {
+        if (!initialized || !data || !bytes) return;
+        if (path == 1) lastSceneTick = ticks + 1;
+        if (!tf_gs_native_dual_gif(path, data, bytes, &geometry)) RawGIF(path, data, bytes);
+    }
     void RawVsync(const std::array<uint8_t,8192>& regs) override {
         if (!initialized) return;
         ++ticks;

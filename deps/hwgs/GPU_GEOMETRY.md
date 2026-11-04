@@ -357,3 +357,63 @@ and arrival cinematics were skipped. Its gameplay-only window measured
 geometry submission was disabled in that run. This single sample is a shared
 renderer regression check, not an attributed GPU-offload speedup or a count of
 distinct rendered frames.
+
+## Ordered live geometry handoff
+
+`PS2X_TF_GPU_DUAL=1` enables a guarded live draw qualification path for the
+supported USA executable. It requires the GPU-enabled HWGS build and D3D12.
+Use an enhanced static-VU build, direct presentation, and the saved Amazon
+performance route with cinematics skipped. Rebuild runtime and VU core objects
+after changing queue headers; their inline queue code must agree on layout.
+
+This mode still executes the static VU call. Before execution, it authenticates
+the manager and both microprograms, then snapshots the qualified source vertices
+and transforms. At XGKICK it validates packet framing, colors and strip restart
+flags and derives the nonconstant-depth witness from the computed packet.
+Consequently this stage does **not** remove CPU geometry work.
+
+The owned companion follows the original packet through the VIF worker, GIF
+arbiter, threaded raw batch and GS command ring. Earlier coalesced packets are
+flushed before its submission. Queues never retain guest pointers or associate
+geometry by a later packet hash. The VIF queue accounts for companion storage
+in its existing memory limit. GS submission is asynchronous; there is no
+per-packet completion wait or geometry download.
+
+On the GS thread, a 2,048-entry cache reuses byte-identical source geometry,
+with a 192 MiB source pool and 128 MiB output pool. The
+existing GPU pool computes vertices and supplies them to the textured native
+frontend. Each field preserves its original state prefix and triangle order.
+After a consumed field, two ADC-marked tail vertices update the ordinary GS
+latches and strip leftovers without drawing again. Unsupported cases retain
+the original GIF path; a renderer helper needing CPU vertices decodes the
+retained accelerated output. GPU resources retain their existing fence-based
+lifetime rules.
+
+Compute dispatch is deferred until the frontend accepts a GPU draw. Culled
+draws and cases already requiring CPU vertices do not dispatch compute.
+Both fields share one output batch. A device preflight checks draw eligibility
+before compute changes graphics state, preserving the fallback contract.
+
+`[gpu-dual]` reports runtime selection/attachment counts, and `[gpu-dual:gs]`
+reports GPU draws, CPU materializations, source reuse, uploads and capacity
+declines. A route passing without nonzero `gpu_draws` does not qualify this path.
+Removing the static VU call still requires preserved or lazily materialized
+guest state, a source-derived depth witness, and fallback vertices independent
+of that call. Dispatch grouping and live texture/state correctness must be
+measured before enabling it as a performance default.
+
+The first live run exposed source-cache thrashing: its 256 entries caused
+125,208 uploads in 155,337 native packets. That enhanced run was stopped after
+reaching Amazon; it was not a passing performance result. With the larger
+bounded cache, the same enhanced level route passed, with 640,224 GS packets,
+1,190,571 native GPU draw submissions, 6,297 CPU materializations and 595,374
+compute dispatches. Source uploads fell to 1,687 (1,255,936 bytes), with 638,537
+cache hits (99.7365%) and no source/output capacity declines. These totals
+include navigation; the timed gameplay window is separate.
+
+That gameplay window measured 49.9560 physics updates/s, median 18.965 ms and
+p95 29.814 ms, with 16:9, 4x internal rendering and 1920x1080 direct output.
+Only enhanced accelerated builds ran, with opening and arrival cinematics
+skipped. The final frame was inspected; it does not establish pixel equality
+throughout the level. CPU VU geometry still runs, and this is neither a net
+offload speedup nor proof of distinct rendered 60 fps.

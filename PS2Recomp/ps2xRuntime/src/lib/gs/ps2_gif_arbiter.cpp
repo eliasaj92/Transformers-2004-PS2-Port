@@ -36,13 +36,15 @@ bool GifArbiter::isImagePacket(const uint8_t *data, uint32_t sizeBytes)
     return flg >= 2u; // TEMP(transformers): both IMAGE encodings (GoW 353ac83c)
 }
 
-void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
+void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl,
+                        gsnative::DualPacketPtr geometry)
 {
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
 
     GifArbiterPacket pkt;
     pkt.pathId = pathId;
+    pkt.geometry = std::move(geometry);
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
     pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(data, sizeBytes);
     if (g_gifPacketPool && !t_gifPacketPool.empty())
@@ -79,6 +81,7 @@ void GifArbiter::drain()
         if (!pkt.data.empty())
         {
             gsraw::PathScope rawPath(static_cast<uint32_t>(pkt.pathId)); // TEMP(transformers)
+            gsnative::Scope native(pkt.geometry);
             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
         }
     }

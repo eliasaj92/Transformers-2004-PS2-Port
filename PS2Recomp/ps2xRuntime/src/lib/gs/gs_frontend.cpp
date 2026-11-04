@@ -1029,6 +1029,8 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    auto nativeGeometry = gsnative::current;
+    gsnative::Scope nestedGeometry({}); // Nested/rewritten glyph packets must not inherit this companion.
     // GAME(transformers): nested glyph submissions inherit the outer ordered GS entry.
     if (glyphSubmissionOwner != this) fenceVu1();
     ps2_perfscope::Scope perf(ps2_perfscope::EeGif); // TEMP(transformers) qualification
@@ -1053,7 +1055,10 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             [&](const uint8_t *p, uint32_t n) { processGIFPacket(p, n); }, emit)) return;
     }
 
-    if (m_rawTap) m_backend->RawGIF(gsraw::path, data, sizeBytes); // TEMP(transformers): M1 raw tap, before any decode
+    if (m_rawTap) {
+        if (nativeGeometry) m_backend->RawNativeDual(gsraw::path, data, sizeBytes, *nativeGeometry);
+        else m_backend->RawGIF(gsraw::path, data, sizeBytes);
+    }
     if (rawOnly(m_backend, m_rawTap))
     {
         scanRawGifForEeState(data, sizeBytes, [this](uint8_t reg, uint64_t value) { writeRegisterUnlocked(reg, value); });

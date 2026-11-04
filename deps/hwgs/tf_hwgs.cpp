@@ -3,6 +3,7 @@
 #include "tf_hwgs.h"
 #ifdef TF_HWGS_GPU_GEOMETRY
 #include "tf_gpu_draw_trace.h"
+#include "tf_gpu_live_draw.h"
 #endif
 #include "kzgs.h"
 #include "kzgs_internal.h"
@@ -111,12 +112,21 @@ int tf_gs_open(int scale, int fxaa, const char* resources, char* error, uint32_t
 }
 void tf_gs_close() {
 #ifdef TF_HWGS_GPU_GEOMETRY
+    tfGpuLiveDrawReset();
     tfGpuDrawTraceClose();
 #endif
     if(kzgsIsOpen() && tf_gs_direct_enabled())tf_gs_direct_close();
     kzgsClose(); frame.clear(); frameWidth = frameHeight = 0;
 }
-void tf_gs_reset() { kzgsReset(); frame.clear(); frameWidth = frameHeight = 0; }
+void tf_gs_reset() {
+#ifdef TF_HWGS_GPU_GEOMETRY
+    tfGpuLiveDrawReset();
+#endif
+    kzgsReset(); frame.clear(); frameWidth = frameHeight = 0;
+}
+#ifndef TF_HWGS_GPU_GEOMETRY
+int tf_gs_native_dual_gif(uint32_t, const uint8_t*, uint32_t, const gsnative::DualPacket*) { return 0; }
+#endif
 void tf_gs_sync() { Timed time(Cost::Sync); kzgsSync(); }
 void tf_gs_configure(int scale, int fxaa) {
     config.upscale = std::clamp(scale, 1, 8); config.fxaa = fxaa != 0;

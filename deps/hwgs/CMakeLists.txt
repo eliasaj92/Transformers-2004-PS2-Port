@@ -16,6 +16,7 @@ target_compile_definitions(tf_hwgs PRIVATE TF_HWGS_BUILD)
 target_compile_features(tf_hwgs PRIVATE cxx_std_20)
 target_link_libraries(tf_hwgs PRIVATE kzgs kzgs_flags)
 target_include_directories(tf_hwgs PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
+target_include_directories(tf_hwgs PUBLIC "${CMAKE_CURRENT_LIST_DIR}/../../PS2Recomp/ps2xRuntime/include")
 if(TF_HWGS_GPU_GEOMETRY)
     target_compile_definitions(tf_hwgs PRIVATE TF_HWGS_GPU_GEOMETRY=1)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS shaders/dual_transform.hlsl)
@@ -24,7 +25,7 @@ if(TF_HWGS_GPU_GEOMETRY)
     target_include_directories(tf_hwgs PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_sources(tf_hwgs PRIVATE tf_gpu_geometry_probe.cpp tf_gpu_dual_probe.cpp
         tf_gpu_dual_geometry.cpp tf_gpu_dual_draw_probe.cpp tf_gpu_draw_trace.cpp
-        tf_gpu_dual_frontend.cpp tf_gpu_frontend_probe.cpp)
+        tf_gpu_dual_frontend.cpp tf_gpu_frontend_probe.cpp tf_gpu_live_draw.cpp)
     # Bounds must honor/restore the caller's floating-point environment. Keep
     # this object separate from kzgs_flags, whose /fp:contract conflicts with
     # /fp:strict under MSVC.

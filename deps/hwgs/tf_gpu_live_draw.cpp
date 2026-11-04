@@ -1,0 +1,308 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include "tf_hwgs.h"
+#include "tf_gpu_live_draw.h"
+#include "tf_gpu_dual_geometry.h"
+#include "tf_gpu_dual_frontend.h"
+#include "kzgs_internal.h"
+#include "GS/Renderers/HW/GSRendererHW.h"
+#include "GS/Renderers/DX12/GSDevice12.h"
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstdio>
+#include <cstring>
+#include <list>
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace
+{
+uint32_t word(const void *p)
+{
+    uint32_t v;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+uint64_t wide(const void *p)
+{
+    uint64_t v;
+    std::memcpy(&v, p, 8);
+    return v;
+}
+void put(void *p, uint32_t v)
+{
+    std::memcpy(p, &v, 4);
+}
+uint64_t hash(const uint8_t *p, unsigned bytes)
+{
+    uint64_t h = 14695981039346656037ull;
+    for (unsigned i = 0; i < bytes; ++i)
+    {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+struct alignas(16) Payload
+{
+    gsnative::DualPacket geometry;
+    uint32_t path, bytes;
+    uint64_t reserved = 0;
+};
+struct CacheEntry
+{
+    uint64_t hash;
+    uint32_t vertices;
+    std::array<uint8_t, 28 * 32> inputs;
+    tf_gpu::DualGeometry::Mesh mesh;
+};
+struct Live
+{
+    tf_gpu::DualGeometry pool;
+    std::list<CacheEntry> meshes;
+    std::unordered_multimap<uint64_t, std::list<CacheEntry>::iterator> lookup;
+    std::unordered_set<uint64_t> sourceHashes;
+    uint64_t packets = 0, gpuDraws = 0, cpuFallbacks = 0, declinedFields = 0, sourceHits = 0, noBounds = 0;
+    uint64_t sourceDeclined = 0, outputDeclined = 0;
+    // Retain the visible level's source working set. The initial 256-entry
+    // cache uploaded 125,208 of 155,337 packets. Extra pool capacity covers
+    // released buffers which are still in flight.
+    explicit Live(GSDevice12 &device) : pool(device, 128ull * 1024 * 1024, 192ull * 1024 * 1024)
+    {
+    }
+    tf_gpu::DualGeometry::Mesh source(const gsnative::DualPacket &p)
+    {
+        const uint64_t key = hash(p.inputs.data(), p.vertices * 32);
+        if (sourceHashes.size() < 65536)
+            sourceHashes.insert(key);
+        const auto [first, last] = lookup.equal_range(key);
+        for (auto it = first; it != last; ++it)
+        {
+            auto entry = it->second;
+            if (entry->vertices == p.vertices && !std::memcmp(entry->inputs.data(), p.inputs.data(), p.vertices * 32))
+            {
+                ++sourceHits;
+                meshes.splice(meshes.begin(), meshes, entry);
+                return entry->mesh;
+            }
+        }
+        while (meshes.size() >= 2048)
+        {
+            const auto old = std::prev(meshes.end());
+            const auto range = lookup.equal_range(old->hash);
+            for (auto it = range.first; it != range.second; ++it)
+                if (it->second == old)
+                {
+                    lookup.erase(it);
+                    break;
+                }
+            meshes.erase(old);
+        }
+        auto mesh = pool.uploadMesh(p.inputs.data(), p.vertices, 1);
+        if (mesh)
+        {
+            meshes.push_front({key, p.vertices, p.inputs, mesh});
+            lookup.emplace(key, meshes.begin());
+        }
+        return mesh;
+    }
+    void report() const
+    {
+        const auto &s = pool.stats();
+        std::fprintf(stderr,
+                     "[gpu-dual:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu declined_fields=%llu "
+                     "source_hits=%llu bounds_declined=%llu dispatches=%llu source_uploads=%llu source_bytes=%llu "
+                     "output_allocations=%llu source_declined=%llu output_declined=%llu unique_source_hashes=%zu\n",
+                     packets, gpuDraws, cpuFallbacks, declinedFields, sourceHits, noBounds, s.dispatches, s.meshUploads,
+                     s.sourceUploadBytes, s.allocations, sourceDeclined, outputDeclined, sourceHashes.size());
+    }
+};
+// Accessed/destroyed only on the owning GS thread, before device shutdown.
+std::unique_ptr<Live> live;
+void decodeField(const uint8_t *packet, unsigned vertices, unsigned field, GSVertex *output)
+{
+    const auto *f = packet + field * (4 + 3 * vertices) * 16;
+    for (unsigned i = 0; i < vertices; ++i)
+    {
+        const auto *p = f + 64 + i * 48;
+        GSVertex &v = output[2 * i + field];
+        v = {};
+        v.ST.U64 = wide(p);
+        uint32_t q = word(p + 8);
+        if (!q)
+            q = 0x00800000;
+        v.RGBAQ.Q = std::bit_cast<float>(q);
+        v.RGBAQ.R = uint8_t(word(p + 16));
+        v.RGBAQ.G = uint8_t(word(p + 20));
+        v.RGBAQ.B = uint8_t(word(p + 24));
+        v.RGBAQ.A = uint8_t(word(p + 28));
+        v.XYZ.X = uint16_t(word(p + 32));
+        v.XYZ.Y = uint16_t(word(p + 36));
+        v.XYZ.Z = (word(p + 40) >> 4) & 0xffffff;
+        v.FOG = (word(p + 44) >> 4) & 255;
+    }
+}
+struct Draw
+{
+    Live &owner;
+    const tf_gpu::DualGeometry::Mesh &mesh;
+    const uint8_t *constants;
+    tf_gpu::DualGeometry::Batch batch;
+    const uint8_t *packet;
+    unsigned vertices;
+};
+bool submit(void *context, GSHWDrawConfig &config)
+{
+    auto &d = *static_cast<Draw *>(context);
+    if (config.nverts != d.vertices * 2 || !GSDevice12::GetInstance()->CanRenderHWFromGPU(config))
+        return false;
+    // Do not dispatch compute for culled draws or frontend cases which already
+    // chose CPU materialization. Both fields share this one prepared output.
+    if (!d.batch)
+    {
+        d.batch = d.owner.pool.prepare(d.mesh, d.constants, 1);
+        if (!d.batch)
+        {
+            ++d.owner.outputDeclined;
+            return false;
+        }
+    }
+    if (!d.owner.pool.draw(d.batch, config, 0, d.vertices))
+        return false;
+    ++d.owner.gpuDraws;
+    return true;
+}
+void materialize(void *context, GSVertex *vertices, uint32_t)
+{
+    auto &d = *static_cast<Draw *>(context);
+    ++d.owner.cpuFallbacks;
+    decodeField(d.packet, d.vertices, 0, vertices);
+    decodeField(d.packet, d.vertices, 1, vertices);
+}
+bool framing(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes)
+{
+    if (p.version != 1 || p.vertices < 3 || p.vertices > 28 || bytes != (8 + p.vertices * 6) * 16 ||
+        word(p.constants.data() + 140))
+        return false;
+    for (unsigned i = 0; i < p.vertices; ++i)
+        if (word(p.inputs.data() + i * 32 + 12))
+            return false;
+    for (unsigned field = 0; field < 2; ++field)
+    {
+        const auto *f = packet + field * (4 + 3 * p.vertices) * 16;
+        const uint64_t state = wide(f), tag = wide(f + 48);
+        const unsigned context = (tag >> (47 + 9)) & 1;
+        if ((state & 32767) != 2 || (state >> 58 & 3) || state >> 60 != 1 || wide(f + 8) != 14 ||
+            (tag & 32767) != p.vertices || (tag >> 58 & 3) || tag >> 60 != 3 || wide(f + 56) != 0x412 ||
+            (tag >> 47 & 7) != 4 || !(tag & (1ull << 46)) || wide(f + 24) != 0x40 + context ||
+            wide(f + 40) != 0x18 + context)
+            return false;
+    }
+    return true;
+}
+void execute(const uint8_t *bytes, uint32_t size)
+{
+    if (size < sizeof(Payload))
+        return;
+    const auto &payload = *reinterpret_cast<const Payload *>(bytes);
+    const auto &p = payload.geometry;
+    const auto *packet = bytes + sizeof(Payload);
+    if (payload.bytes != size - sizeof(Payload))
+        return;
+    const auto ordinary = [&] { kzgs::ExecuteGIFOnGSThread(payload.path, packet, payload.bytes); };
+    if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || payload.path != 1 ||
+        !framing(p, packet, payload.bytes) || g_gs_renderer->m_path[0].nloop)
+    {
+        ordinary();
+        return;
+    }
+    if (!live)
+        live = std::make_unique<Live>(*GSDevice12::GetInstance());
+    ++live->packets;
+    auto mesh = live->source(p);
+    if (!mesh)
+    {
+        ++live->sourceDeclined;
+        ordinary();
+        return;
+    }
+    std::array<tf_gpu::DualDrawBounds, 2> bounds;
+    if (!live->pool.bounds(mesh, p.constants.data(), 1, 0, 1, bounds))
+    {
+        ++live->noBounds;
+        ordinary();
+        return;
+    }
+    auto *renderer = GSRendererHW::GetInstance();
+    const unsigned fieldBytes = (4 + 3 * p.vertices) * 16;
+    Draw draw{*live, mesh, p.constants.data(), {}, packet, p.vertices};
+    for (unsigned field = 0; field < 2; ++field)
+    {
+        const auto *f = packet + field * fieldBytes;
+        // Ordinary A+D state plus explicit PRIM from the geometry tag. No
+        // transformed vertices enter GS draw preparation on the native path.
+        alignas(16) std::array<uint64_t, 8> prefix;
+        std::memcpy(prefix.data(), f, 48);
+        prefix[0] = (prefix[0] & ~32767ull) | 3 | (1ull << 15);
+        prefix[6] = (wide(f + 48) >> 47) & 0x7ff;
+        prefix[7] = 0;
+        kzgs::ExecuteGIFOnGSThread(1, reinterpret_cast<const uint8_t *>(prefix.data()), sizeof(prefix));
+        std::array<uint16_t, 26 * 3> indices;
+        unsigned nindices = 0;
+        for (unsigned i = 2; i < p.vertices; ++i)
+        {
+            const uint32_t mask = word(p.constants.data() + 132 + (i / 16) * 4);
+            if ((mask << (i % 16)) & 32768)
+                continue;
+            for (unsigned corner = i - 2; corner <= i; ++corner)
+                indices[nindices++] = uint16_t(corner * 2 + field);
+        }
+        GSVertexTrace::Vertex minimum{}, maximum{};
+        const bool consumed =
+            !nindices ||
+            ((p.varyingDepth & (1u << field)) &&
+             tf_gpu::prepareDualTrace(bounds[field], *renderer->m_context, *renderer->PRIM, minimum, maximum) &&
+             renderer->DrawNativeTriangles(minimum, maximum, indices.data(), nindices, p.vertices * 2, true, &draw,
+                                           submit, materialize));
+        if (!consumed)
+        {
+            ++live->declinedFields;
+            kzgs::ExecuteGIFOnGSThread(1, f, fieldBytes);
+            continue;
+        }
+        // Reproduce the actual final STQ/RGBA/XYZ/FOG latches and the last two
+        // strip vertices without drawing them again. ADC is not a GS attribute.
+        alignas(16) std::array<uint8_t, 16 + 2 * 48> tail;
+        std::memcpy(tail.data(), f + 48, 16);
+        put(tail.data(), (word(tail.data()) & ~32767u) | 2);
+        std::memcpy(tail.data() + 16, f + 64 + (p.vertices - 2) * 48, 96);
+        for (unsigned i = 0; i < 2; ++i)
+            put(tail.data() + 16 + i * 48 + 44, word(tail.data() + 16 + i * 48 + 44) | 0x8000);
+        kzgs::ExecuteGIFOnGSThread(1, tail.data(), uint32_t(tail.size()));
+    }
+    if ((live->packets & 4095) == 0)
+        live->report();
+}
+} // namespace
+
+extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_t bytes,
+                                     const gsnative::DualPacket *geometry)
+{
+    if (path != 1 || !data || !geometry || !framing(*geometry, data, bytes))
+        return 0;
+    alignas(16) std::array<uint8_t, sizeof(Payload) + (8 + 28 * 6) * 16> storage;
+    const Payload payload{*geometry, path, bytes, 0};
+    std::memcpy(storage.data(), &payload, sizeof(payload));
+    std::memcpy(storage.data() + sizeof(payload), data, bytes);
+    return kzgs::QueuePacketCommand(execute, storage.data(), uint32_t(sizeof(payload) + bytes)) ? 1 : 0;
+}
+void tfGpuLiveDrawReset()
+{
+    kzgs::RunOnGSThread([] {
+        if (live)
+            live->report();
+        live.reset();
+    });
+}

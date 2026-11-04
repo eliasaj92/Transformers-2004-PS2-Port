@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <vector>
+#include "runtime/gs/gs_native_geometry.h"
 
 enum class GifPathId : uint8_t
 {
@@ -18,6 +19,7 @@ struct GifArbiterPacket
     bool path2DirectHl = false;
     bool path3Image = false;
     std::vector<uint8_t> data;
+    gsnative::DualPacketPtr geometry;
 };
 
 class GifArbiter
@@ -30,7 +32,8 @@ public:
 
     void setProcessPacketFn(ProcessPacketFn fn) { m_processFn = std::move(fn); }
 
-    void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
+    void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false,
+                gsnative::DualPacketPtr geometry = {});
 
     void drain();
     bool empty() const { return m_queue.empty(); }

@@ -49,6 +49,7 @@ namespace
 		Sync,
 		Readback,
 		Call,
+		PacketCommand,
 		Quit,
 	};
 
@@ -785,6 +786,14 @@ namespace
 				case Cmd::Quit:
 					quit = true;
 					break;
+
+				case Cmd::PacketCommand:
+				{
+					kzgs::PacketCommand command;
+					std::memcpy(&command, payload, sizeof(command));
+					command(payload + 16, hdr.a);
+				}
+				break;
 			}
 
 			r += sizeof(CmdHeader) + hdr.size;
@@ -1066,6 +1075,24 @@ void kzgs::RunOnGSThread(std::function<void()> fn)
 void kzgsSetLogCallback(KzgsLogFn fn)
 {
 	s_log_fn = fn;
+}
+
+bool kzgs::QueuePacketCommand(PacketCommand command, const void* payload, uint32_t bytes)
+{
+	if (!command || !payload || !bytes || bytes > MAX_TRANSFER_CHUNK || !s_open.load(std::memory_order_relaxed))
+		return false;
+	std::lock_guard lock(s_produce_lock);
+	u8* slot = Reserve(16 + bytes);
+	std::memset(slot + sizeof(CmdHeader), 0, 16);
+	std::memcpy(slot + sizeof(CmdHeader), &command, sizeof(command));
+	std::memcpy(slot + sizeof(CmdHeader) + 16, payload, bytes);
+	Publish(slot, Cmd::PacketCommand, 16 + bytes, bytes, 0);
+	return true;
+}
+
+void kzgs::ExecuteGIFOnGSThread(uint32_t path, const uint8_t* data, uint32_t bytes)
+{
+	DoTransfer(path | TRANSFER_END_OF_PACKET, data, bytes / 16);
 }
 
 void kzgsSetTraceHook(KzgsTraceFn fn)

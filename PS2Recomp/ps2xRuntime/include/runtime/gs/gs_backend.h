@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime/gs/gs_types.h"
+#include "runtime/gs/gs_native_geometry.h"
 
 #include <cstdint>
 #include <array>
@@ -45,4 +46,6 @@ public:
     virtual void WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value) = 0;
     virtual void SnapshotVram(std::vector<uint8_t> &out) const = 0;
     virtual GSTransferSnapshot GetTransferSnapshot() const = 0;
+    virtual void RawNativeDual(uint32_t path, const uint8_t *data, uint32_t bytes, const gsnative::DualPacket &)
+    { RawGIF(path, data, bytes); }
 };

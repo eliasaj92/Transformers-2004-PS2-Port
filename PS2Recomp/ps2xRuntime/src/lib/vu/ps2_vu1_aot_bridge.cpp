@@ -23,6 +23,7 @@
 #include "../debug_counters.h"
 #include "../ps2_native_seam_probe.h"
 #include "../native/tf_grass_oracle.h"
+#include "../native/tf_gpu_live.h"
 
 // Implemented in the private, generated object library.
 int ps2Vu1AotIdentify(const uint8_t* code,uint32_t size,uint32_t entry);
@@ -391,6 +392,8 @@ bool VU1Interpreter::tryAot(uint8_t* code,uint32_t codeSize,uint8_t* data,uint32
     const uint32_t seamTicket = ps2_native_seam_probe::captureEnabled
         ? ps2_native_seam_probe::vuBegin(pc, continuing, top, itop, code, data, m_state) : 0;
     const bool grassOracle = tf_grass_oracle::enabled && tf_grass_oracle::begin(pc, continuing, itop, code, data);
+    const bool nativeGeometry = tf_gpu_live::enabled && tf_gpu_live::begin(pc, continuing, itop, generation,
+        memory, code, data, m_state);
     const bool needsTransfer=(staticReady?ps2Vu1StaticRun:ps2Vu1AotRun)(image,&m_state,continuing,code,data,gs,memory,entry,top,itop,budget,transfer.data());
     bool probeFell=false;
     { // TEMP(transformers) qualification (release fix): the package counter moved during this call = mid-call fallback.
@@ -399,6 +402,7 @@ bool VU1Interpreter::tryAot(uint8_t* code,uint32_t codeSize,uint8_t* data,uint32
         if(fb!=lastFallback && fb!=UINT64_MAX){lastFallback=fb;++aotStats.midFallback;ps2_perfscope::noteVu1MidFallback();probeFell=true;}
     }
     if (grassOracle) tf_grass_oracle::end(needsTransfer, probeFell);
+    if (nativeGeometry) tf_gpu_live::end(needsTransfer, probeFell);
     if (seamTicket) ps2_native_seam_probe::vuEnd(seamTicket, code, data, m_state, needsTransfer, probeFell);
     if(probe.on)
     { // TEMP(transformers) qualification (release fix)

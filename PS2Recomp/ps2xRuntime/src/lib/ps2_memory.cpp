@@ -4,6 +4,7 @@ extern "C" void iopIdleStatsTimerWalk() noexcept;
 #include "ps2_drain.h"
 #include "ps2_native_seam_probe.h"
 #include "native/tf_grass_oracle.h"
+#include "native/tf_gpu_live.h"
 #include "runtime/ps2_eeopt.h"
 // checkpoint fast path adapted from brad-richardson/PS2Recomp (GPL-3.0); budget design after snuri00/ps2-web-recomp (MIT)
 #include "ps2_vu1new.h" // TEMP(transformers)
@@ -2979,6 +2980,13 @@ done:
 
 void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
 {
+    submitGifPacketWithGeometry(pathId, data, sizeBytes, drainImmediately, path2DirectHl,
+        tf_gpu_live::enabled ? tf_gpu_live::packet(static_cast<uint32_t>(pathId), data, sizeBytes) : nullptr);
+}
+
+void PS2Memory::submitGifPacketWithGeometry(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes,
+                                          bool drainImmediately, bool path2DirectHl, gsnative::DualPacketPtr geometry)
+{
     if (tf_grass_oracle::enabled) tf_grass_oracle::gif(static_cast<uint32_t>(pathId), data, sizeBytes, drainImmediately, path2DirectHl);
     // Capture before worker buffering. Its later EE replay has no active VU
     // ticket, so each emitted packet is recorded once in original call order.
@@ -2987,15 +2995,15 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     if(m_vif1Instant && !m_vif1Instant->replaying()) {
         if(!data || sizeBytes<16)return;
         if(instantWorker() || !m_vif1Instant->directReady()) {
-            m_vif1Instant->packet(data,sizeBytes,static_cast<uint32_t>(pathId),drainImmediately,path2DirectHl);
+            m_vif1Instant->packet(data,sizeBytes,static_cast<uint32_t>(pathId),drainImmediately,path2DirectHl,std::move(geometry));
             return;
         }
         ++m_vif1Instant->directPackets; // TEMP(transformers)
     }
     if (vif1StreamExecuting()) {
         std::vector<uint8_t> copy(data,data+sizeBytes);
-        m_vif1Stream->emit([this,pathId,copy=std::move(copy),drainImmediately,path2DirectHl] {
-            submitGifPacket(pathId,copy.data(),static_cast<uint32_t>(copy.size()),drainImmediately,path2DirectHl);
+        m_vif1Stream->emit([this,pathId,copy=std::move(copy),drainImmediately,path2DirectHl,geometry=std::move(geometry)] {
+            submitGifPacketWithGeometry(pathId,copy.data(),static_cast<uint32_t>(copy.size()),drainImmediately,path2DirectHl,geometry);
         },sizeBytes);
         return;
     }
@@ -3020,8 +3028,8 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     }
 
     if (m_gifArbiter)
-        m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
-    else if (m_gifPacketCallback) { gsraw::PathScope path(static_cast<uint32_t>(pathId));m_gifPacketCallback(data,sizeBytes); } // TEMP(transformers)
+        m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl, std::move(geometry));
+    else if (m_gifPacketCallback) { gsraw::PathScope path(static_cast<uint32_t>(pathId));gsnative::Scope native(std::move(geometry));m_gifPacketCallback(data,sizeBytes); }
 
     if (m_gifArbiter && drainImmediately)
         m_gifArbiter->drain();
