@@ -164,5 +164,25 @@ at 2048x1792 with zero differences. It uses source-derived bounds and a depth
 witness from resolved tail sprites, without rebuilding the omitted geometry
 just to qualify native drawing. See the [runtime contract and commands](../../deps/hwgs/GPU_GEOMETRY.md#deferred-grass-packets-and-runtime-hook).
 
-These are correctness results from enhanced captures; the last live measurement
-above remains the performance reference until the new enhanced level run.
+The live individual-dispatch implementation measures 24.8854 physics updates/s;
+grouping grass compute improves this to 38.9721, while eliminating output-pool
+capacity fallback. Both remain below the saved mesh-only enhanced measurement.
+See the [full live counters](../../deps/hwgs/GPU_GEOMETRY.md#grouped-grass-dispatches-and-live-results).
+
+## Profile after grouped grass
+
+A separate enhanced Amazon run sampled the VU, EE, submission and busiest worker
+threads for 20 seconds, collecting 10,168 instruction-pointer samples per thread.
+The hardware renderer was included explicitly; sampling only the runtime GS
+submission thread would mostly reveal its wait. The renderer's linker map was
+matched to the loaded DLL's exact code bytes and addresses. This instrumented
+run passed and is not a frame-rate measurement.
+
+The VU thread spends 29.25% of samples waiting, with 3.47% in the retained grass
+region `sr729`. EE waiting accounts for 31.54%; the runtime GS submission thread
+waits for 91.82%. On the active hardware-renderer thread, `GSRendererHW::Draw`
+accounts for 8.50%, grass bounds and its principal helper for 6.69%, packed grass
+GIF handling for 3.31%, and texture-cache invalidation plus its helper for 5.70%.
+Driver and D3D12 functions are also prominent. The next optimization should
+reduce grass draw preparation/submission work while preserving state and order.
+Adding further VU shortcuts alone does not address this measured bottleneck.

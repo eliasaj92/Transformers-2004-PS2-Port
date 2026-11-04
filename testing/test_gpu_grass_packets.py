@@ -53,9 +53,10 @@ def main():
             gs.tf_gs_close()
     names = ("native_packets", "gpu_draws", "cpu_materializations", "declined_fields", "bounds_declined",
              "output_declined", "latch_checks", "painted_pixels", "differing_pixels", "completed_modes",
-             "full_resolution_differing_pixels", "full_resolution_compared_pixels", "pool_draws", "reserved",
+             "full_resolution_differing_pixels", "full_resolution_compared_pixels", "pool_draws", "grouped_gpu_draws",
              "grass_dispatches", "grass_batches", "invalid_framing_checks", "ordinary_packets")
-    result = {"passed": passed, "batches": count, **dict(zip(names, stats)), "selected_indices": indices,
+    result = {"passed": passed, "batches": count, "grouping": os.environ.get("PS2X_TF_GPU_GROUPS") == "8",
+              **dict(zip(names, stats)), "selected_indices": indices,
               "dll_sha256": digest(dll.read_bytes()), "capture_inputs_sha256": meta["capture_inputs_sha256"],
               "capture_packets_sha256": meta["capture_packets_sha256"], "fixture_sha256": meta["sha256"],
               "scope": "GS-thread packet handoff, GPU-resident grass and source fallback from enhanced captures; not live FPS"}

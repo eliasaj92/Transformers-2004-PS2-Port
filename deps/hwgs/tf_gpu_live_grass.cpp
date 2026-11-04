@@ -52,7 +52,10 @@ struct Draw
     std::array<uint8_t, 320> inputs{};
     GrassRasterState raster{};
     DualGeometry::Batch batch;
-    std::array<uint8_t, 1216> restored;
+    uint32_t firstSource = 0;
+    bool grouped = false;
+    // GIF handlers load aligned qwords, including CPU fallback packets.
+    alignas(16) std::array<uint8_t, 1216> restored;
     bool hasRestored = false;
 };
 const uint8_t *fullPacket(Draw &draw)
@@ -81,9 +84,10 @@ bool submit(void *context, GSHWDrawConfig &config)
             return false;
         }
     }
-    if (!draw.pool.draw(draw.batch, config, draw.field * 8, 8))
+    if (!draw.pool.draw(draw.batch, config, draw.firstSource + draw.field * 8, 8))
         return false;
     ++draw.stats.gpuDraws;
+    draw.stats.groupedDraws += draw.grouped;
     return true;
 }
 void vertex(GSVertex &v, const uint8_t *xyz, const uint8_t *stq, const uint8_t *rgba)
@@ -129,6 +133,30 @@ bool varyingDepth(const Draw &draw, unsigned field)
            !culled(draw.raster, field, b, b + 48) &&
            ((word(a + 56) >> 4) & 0xffffff) != ((word(b + 56) >> 4) & 0xffffff);
 }
+bool prepare(const gsnative::DualPacket &geometry, const uint8_t *packet, const uint32_t *incoming,
+             PreparedGrass &result)
+{
+    result.geometry = &geometry;
+    result.packet = packet;
+    std::memcpy(result.inputs.data(), geometry.inputs.data(), 256);
+    for (unsigned field = 0; field < 2; ++field)
+    {
+        const auto *f = packet + field * 608;
+        std::memcpy(result.inputs.data() + 256 + field * 16, f + 64, 16);
+        GIFRegSCISSOR scissor{};
+        GIFRegXYOFFSET offset{};
+        std::memcpy(&scissor, f + 16, 8);
+        std::memcpy(&offset, f + 32, 8);
+        if (scissor.SCAX0 > scissor.SCAX1 || scissor.SCAY0 > scissor.SCAY1)
+            return false;
+        result.raster.scissor[field] = {int(scissor.SCAX0) * 16 - 8, int(scissor.SCAY0) * 16 - 8,
+                                        int(scissor.SCAX1) * 16 + 8, int(scissor.SCAY1) * 16 + 8};
+        result.raster.offset[field] = {int(offset.OFX), int(offset.OFY), 0, 1};
+    }
+    std::memcpy(result.inputs.data() + 288, incoming, 16);
+    std::memcpy(result.inputs.data() + 304, packet + 36 * 16, 16);
+    return projectGrassBounds(result.inputs.data(), result.bounds);
+}
 } // namespace
 
 bool grassPacketFraming(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes)
@@ -159,8 +187,51 @@ bool grassPacketFraming(const gsnative::DualPacket &p, const uint8_t *packet, ui
     return true;
 }
 
+bool prepareGrassGroup(DualGeometry &pool, const GrassPacketView *views, uint32_t count, PreparedGrass *prepared,
+                       GrassLiveStats &stats)
+{
+    const auto declined = [&] {
+        ++stats.groupDeclined;
+        return false;
+    };
+    if (!views || !prepared || count < 2 || count > 8 || !g_gs_device ||
+        g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || g_gs_renderer->m_path[0].nloop ||
+        GSRendererHW::GetInstance()->GetUpscaleMultiplier() <= 1.0f)
+        return declined();
+    std::array<PreparedGrass, 8> candidate;
+    std::array<uint8_t, 8 * 320> inputs;
+    std::array<GrassRasterState, 8> raster;
+    const auto &rgba = GSRendererHW::GetInstance()->GetNativeVertexLatch().RGBAQ;
+    uint32_t incoming[] = {rgba.R, rgba.G, rgba.B, rgba.A};
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const auto &view = views[i];
+        if (!view.geometry || !grassPacketFraming(*view.geometry, view.packet, view.bytes) ||
+            !prepare(*view.geometry, view.packet, incoming, candidate[i]))
+            return declined();
+        std::memcpy(inputs.data() + i * 320, candidate[i].inputs.data(), 320);
+        raster[i] = candidate[i].raster;
+        // The final RGBA of field 1 is retained even in deferred packets.
+        // GS latches packed color bytes, not the untruncated raw qword lanes.
+        for (unsigned channel = 0; channel < 4; ++channel)
+            incoming[channel] = word(view.packet + 74 * 16 + channel * 4) & 255;
+    }
+    const auto batch = pool.prepareGrass(inputs.data(), count, raster.data());
+    if (!batch)
+        return declined();
+    for (unsigned i = 0; i < count; ++i)
+    {
+        candidate[i].batch = batch;
+        candidate[i].firstSource = i * 16;
+        prepared[i] = std::move(candidate[i]);
+    }
+    ++stats.groupedDispatches;
+    stats.groupedPackets += count;
+    return true;
+}
+
 bool drawGrassPacket(DualGeometry &pool, const gsnative::DualPacket &geometry, const uint8_t *packet, uint32_t bytes,
-                     GrassLiveStats &stats, bool forceFallback)
+                     GrassLiveStats &stats, bool forceFallback, const PreparedGrass *prepared)
 {
     if (!grassPacketFraming(geometry, packet, bytes) || !g_gs_device ||
         g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || g_gs_renderer->m_path[0].nloop)
@@ -168,32 +239,25 @@ bool drawGrassPacket(DualGeometry &pool, const gsnative::DualPacket &geometry, c
     auto *renderer = GSRendererHW::GetInstance();
     if (renderer->GetUpscaleMultiplier() <= 1.0f)
         return false; // Native-resolution primitive culling uses another rule.
-    Draw draw{pool, geometry, packet, stats, forceFallback};
-    std::memcpy(draw.inputs.data(), geometry.inputs.data(), 256);
-    for (unsigned field = 0; field < 2; ++field)
-    {
-        const auto *f = packet + field * 608;
-        std::memcpy(draw.inputs.data() + 256 + field * 16, f + 64, 16);
-        GIFRegSCISSOR scissor{};
-        GIFRegXYOFFSET offset{};
-        std::memcpy(&scissor, f + 16, 8);
-        std::memcpy(&offset, f + 32, 8);
-        if (scissor.SCAX0 > scissor.SCAX1 || scissor.SCAY0 > scissor.SCAY1)
-            return false;
-        draw.raster.scissor[field] = {int(scissor.SCAX0) * 16 - 8, int(scissor.SCAY0) * 16 - 8,
-                                      int(scissor.SCAX1) * 16 + 8, int(scissor.SCAY1) * 16 + 8};
-        draw.raster.offset[field] = {int(offset.OFX), int(offset.OFY), 0, 1};
-    }
+    PreparedGrass local;
     const auto &rgba = renderer->GetNativeVertexLatch().RGBAQ;
     const uint32_t incoming[] = {rgba.R, rgba.G, rgba.B, rgba.A};
-    std::memcpy(draw.inputs.data() + 288, incoming, 16);
-    std::memcpy(draw.inputs.data() + 304, packet + 36 * 16, 16);
-    std::array<DualDrawBounds, 2> bounds;
-    if (!projectGrassBounds(draw.inputs.data(), bounds))
+    if (prepared && (prepared->geometry != &geometry || prepared->packet != packet || !prepared->batch ||
+                     std::memcmp(prepared->inputs.data() + 288, incoming, 16)))
+        prepared = nullptr;
+    if (!prepared && !prepare(geometry, packet, incoming, local))
     {
         ++stats.boundsDeclined;
         return false;
     }
+    if (!prepared)
+        prepared = &local;
+    Draw draw{pool, geometry, packet, stats, forceFallback};
+    draw.inputs = prepared->inputs;
+    draw.raster = prepared->raster;
+    draw.batch = prepared->batch;
+    draw.firstSource = prepared->firstSource;
+    draw.grouped = bool(prepared->batch);
     ++stats.packets;
     constexpr std::array<uint16_t, 16> indices{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
     for (unsigned field = 0; field < 2; ++field)
@@ -206,7 +270,7 @@ bool drawGrassPacket(DualGeometry &pool, const gsnative::DualPacket &geometry, c
         GSVertexTrace::Vertex minimum{}, maximum{};
         const bool consumed =
             varyingDepth(draw, field) &&
-            prepareGrassTrace(bounds[field], *renderer->m_context, *renderer->PRIM, minimum, maximum) &&
+            prepareGrassTrace(prepared->bounds[field], *renderer->m_context, *renderer->PRIM, minimum, maximum) &&
             renderer->DrawNativeSprites(minimum, maximum, indices.data(), 16, true, &draw, submit, materialize);
         if (!consumed)
         {

@@ -11,7 +11,7 @@ endif()
 set(KZGS_BUILD_TEST OFF CACHE BOOL "" FORCE)
 set(KZGS_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../kzgs" "${CMAKE_CURRENT_BINARY_DIR}/kzgs")
-add_library(tf_hwgs SHARED tf_hwgs.cpp tf_direct.cpp)
+add_library(tf_hwgs SHARED tf_hwgs.cpp tf_direct.cpp tf_scene_capture.cpp)
 target_compile_definitions(tf_hwgs PRIVATE TF_HWGS_BUILD)
 target_compile_features(tf_hwgs PRIVATE cxx_std_20)
 target_link_libraries(tf_hwgs PRIVATE kzgs kzgs_flags)
@@ -32,7 +32,7 @@ if(TF_HWGS_GPU_GEOMETRY)
     target_sources(tf_hwgs PRIVATE tf_gpu_geometry_probe.cpp tf_gpu_dual_probe.cpp
         tf_gpu_dual_geometry.cpp tf_gpu_grass_probe.cpp tf_gpu_grass_draw_probe.cpp tf_gpu_dual_draw_probe.cpp tf_gpu_draw_trace.cpp
         tf_gpu_dual_frontend.cpp tf_gpu_frontend_probe.cpp tf_gpu_grass_frontend_probe.cpp tf_gpu_live_draw.cpp
-        tf_gpu_live_grass.cpp)
+        tf_gpu_live_grass.cpp tf_scene_capture_probe.cpp)
     # Bounds must honor/restore the caller's floating-point environment. Keep
     # this object separate from kzgs_flags, whose /fp:contract conflicts with
     # /fp:strict under MSVC.

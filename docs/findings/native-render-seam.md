@@ -492,5 +492,15 @@ at 2048x1792 with zero differences. It uses source-derived bounds and a depth
 witness from resolved tail sprites, without rebuilding the omitted geometry
 just to qualify native drawing. See the [runtime contract and commands](../../deps/hwgs/GPU_GEOMETRY.md#deferred-grass-packets-and-runtime-hook).
 
-These are correctness results from enhanced captures; the last live measurement
-above remains the performance reference until the new enhanced level run.
+The live grass integration passes the saved Amazon route, but individual
+dispatches exhaust the output pool and measure only 24.8854 physics updates/s.
+Grouping adjacent grass compute eliminates capacity fallback and improves that
+to 38.9721 updates/s, still below the saved 57.3835 mesh-only enhanced result.
+No original or older game build was rerun. Grass therefore remains opt-in.
+
+The subsequent profile shows waiting VU/EE workers and substantial work in the
+hardware renderer, texture cache and driver. The next useful seam is larger
+grass draw submissions; sharing compute alone leaves millions of GS draws.
+The grouped image comparisons and a bounded 32-image camera-turn capture pass,
+but do not establish true 60 fps. See the [grouping contract, live measurements
+and capture procedure](../../deps/hwgs/GPU_GEOMETRY.md#grouped-grass-dispatches-and-live-results).

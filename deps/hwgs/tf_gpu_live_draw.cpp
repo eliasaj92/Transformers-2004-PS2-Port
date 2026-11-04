@@ -126,10 +126,13 @@ struct Live
                      s.sourceUploadBytes, s.allocations, s.pageProbes, sourceDeclined, outputDeclined,
                      sourceHashes.size(), s.groupedDispatches, s.groupedMeshes, packetGroups, groupPackets,
                      groupDeclined);
-        std::fprintf(stderr, "[gpu-grass:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
-                     "declined_fields=%llu bounds_declined=%llu output_declined=%llu dispatches=%llu batches=%llu\n",
-                     grass.packets, grass.gpuDraws, grass.materializations, grass.declinedFields,
-                     grass.boundsDeclined, grass.outputDeclined, s.grassDispatches, s.grassBatches);
+        std::fprintf(stderr,
+                     "[gpu-grass:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
+                     "declined_fields=%llu bounds_declined=%llu output_declined=%llu dispatches=%llu batches=%llu "
+                     "grouped_dispatches=%llu grouped_packets=%llu grouped_draws=%llu group_declined=%llu\n",
+                     grass.packets, grass.gpuDraws, grass.materializations, grass.declinedFields, grass.boundsDeclined,
+                     grass.outputDeclined, s.grassDispatches, s.grassBatches, grass.groupedDispatches,
+                     grass.groupedPackets, grass.groupedDraws, grass.groupDeclined);
     }
 };
 // Accessed/destroyed only on the owning GS thread, before device shutdown.
@@ -212,9 +215,8 @@ void materialize(void *context, GSVertex *vertices, uint32_t)
 }
 bool framing(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes)
 {
-    if (p.kind != gsnative::GeometryKind::DualTransform || (p.version != 1 && p.version != 2) ||
-        p.vertices < 3 || p.vertices > 28 || bytes != (8 + p.vertices * 6) * 16 ||
-        word(p.constants.data() + 140))
+    if (p.kind != gsnative::GeometryKind::DualTransform || (p.version != 1 && p.version != 2) || p.vertices < 3 ||
+        p.vertices > 28 || bytes != (8 + p.vertices * 6) * 16 || word(p.constants.data() + 140))
         return false;
     for (unsigned i = 0; i < p.vertices; ++i)
         if (word(p.inputs.data() + i * 32 + 12))
@@ -239,7 +241,8 @@ struct Prepared
     std::array<tf_gpu::DualDrawBounds, 2> bounds;
     uint32_t first = 0;
 };
-void executePacket(const uint8_t *bytes, uint32_t size, const Prepared *prepared)
+void executePacket(const uint8_t *bytes, uint32_t size, const Prepared *prepared,
+                   const tf_gpu::PreparedGrass *grassPrepared = nullptr)
 {
     if (size < sizeof(Payload))
         return;
@@ -264,7 +267,7 @@ void executePacket(const uint8_t *bytes, uint32_t size, const Prepared *prepared
         {
             if (!live)
                 live = std::make_unique<Live>(*GSDevice12::GetInstance());
-            if (tf_gpu::drawGrassPacket(live->pool, p, packet, payload.bytes, live->grass))
+            if (tf_gpu::drawGrassPacket(live->pool, p, packet, payload.bytes, live->grass, false, grassPrepared))
                 return;
         }
         ordinary();
@@ -366,6 +369,7 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
         ordinary();
         return;
     }
+    bool grass = true, triangles = true;
     for (unsigned i = 0; i < count; ++i)
     {
         if (views[i].bytes < sizeof(Payload))
@@ -375,14 +379,41 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
         }
         const auto &p = *reinterpret_cast<const Payload *>(views[i].data);
         if (p.path != 1 || p.bytes != views[i].bytes - sizeof(Payload) ||
-            !framing(p.geometry, views[i].data + sizeof(Payload), p.bytes))
+            (!framing(p.geometry, views[i].data + sizeof(Payload), p.bytes) &&
+             !tf_gpu::grassPacketFraming(p.geometry, views[i].data + sizeof(Payload), p.bytes)))
         {
             ordinary();
             return;
         }
+        grass &= p.geometry.kind == gsnative::GeometryKind::GrassSprites;
+        triangles &= p.geometry.kind == gsnative::GeometryKind::DualTransform;
+    }
+    if (!grass && !triangles)
+    {
+        ordinary();
+        return;
     }
     if (!live)
         live = std::make_unique<Live>(*GSDevice12::GetInstance());
+    if (grass)
+    {
+        static_assert(kzgs::MaxPacketGroup <= 8);
+        std::array<tf_gpu::GrassPacketView, kzgs::MaxPacketGroup> packets;
+        std::array<tf_gpu::PreparedGrass, kzgs::MaxPacketGroup> prepared;
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const auto &payload = *reinterpret_cast<const Payload *>(views[i].data);
+            packets[i] = {&payload.geometry, views[i].data + sizeof(Payload), payload.bytes};
+        }
+        if (!tf_gpu::prepareGrassGroup(live->pool, packets.data(), count, prepared.data(), live->grass))
+        {
+            ordinary();
+            return;
+        }
+        for (unsigned i = 0; i < count; ++i)
+            executePacket(views[i].data, views[i].bytes, nullptr, &prepared[i]);
+        return;
+    }
     ++live->packetGroups;
     live->groupPackets += count;
     std::array<Prepared, kzgs::MaxPacketGroup> prepared;

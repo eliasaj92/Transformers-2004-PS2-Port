@@ -781,5 +781,71 @@ python -B testing/test_gpu_grass_packets.py --prepared $private/grass-native `
 ```
 
 These checks qualify the captured windows and GS integration, not full-campaign
-reliability or distinct rendered 60 fps. A live enhanced level measurement is
-required before attributing a performance gain to the grass offload.
+reliability or distinct rendered 60 fps. The live results below show why grass
+offloading remains experimental.
+
+## Grouped grass dispatches and live results
+
+With `PS2X_TF_GPU_GROUPS=8`, homogeneous groups of two to eight adjacent grass
+packets share one compute dispatch. Each packet keeps its own output offsets,
+bounds and original ordered GS draws. Incoming color starts at the actual GS
+latch and then follows each preceding packet's retained, byte-truncated color.
+Mixed groups and unsupported packets retain individual processing. Rejected
+groups consume neither GS state nor GPU output. Reconstructed GIF buffers have
+explicit 16-byte alignment, including when the enclosing draw structure changes.
+
+The two enhanced-capture comparisons pass 2,048 final latch checks and all
+29,360,128 pixels at 2048x1792. They issue 2,088 GPU draws, including 1,716 from
+grouped compute, with 386 grass dispatches for 1,786 emitter batches. Deliberate
+CPU fallback and invalid group/framing checks pass. The triangle regression
+also passes 1,216 GPU draws and 14,680,064 pixels with zero differences.
+
+The saved Amazon route ran with accelerated static VU, native60 mode 3, 16:9,
+2048x1788 internal output, 1920x1080 presentation and cinematics skipped:
+
+| Enhanced configuration | Physics updates/s | Direct handoffs/s | Median / p95 interval |
+|---|---:|---:|---:|
+| Individual grass compute dispatches | 24.8854 | 24.8810 | 31.747 / 79.084 ms |
+| Grouped grass compute dispatches | 38.9721 | 38.9582 | 24.586 / 48.993 ms |
+
+Individual dispatches exhausted the output pool, causing 4,218,029 grass
+native-draw materializations and about 4.40 billion page probes. Grouping removes
+those capacity declines and reduces probes to 1,087,936. It executes 6,434,941
+grass GPU draws, including 6,298,046 using grouped output. Ordinary packet
+fallback still handles 2,321,549 field/depth declines and 189,361 bounds declines;
+zero native-draw materializations does not mean zero CPU geometry work.
+
+Both runs preserve 4,567,606 ordered emitter companions, skip 9,135,212 VU loop
+iterations and finish with no unresolved grass memory. These desktop measurements
+remain slower than the saved mesh-only enhanced result of 57.3835 updates/s;
+that earlier build was not rerun. Grass remains opt-in. A fresh profile identifies
+hardware-renderer/driver submission work as the next bottleneck; compute grouping
+does not merge the individual GS draws. See [the profile](../../docs/findings/vu-performance.md#profile-after-grouped-grass).
+
+To exercise grouped packets, set `PS2X_TF_GPU_GROUPS=8` before the existing
+`test_gpu_grass_packets.py` command. Reports distinguish actual grouped GPU
+draws from batches merely prepared by a compute dispatch.
+
+## Bounded output-image cadence capture
+
+`PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;
+`PS2X_TF_SCENE_RANGE=first:last` selects at most 64 consecutive presentation
+fields. The diagnostic copies complete RGBA8 output textures into one bounded
+readback buffer and writes `.rgba` pixels and `.json` metadata after GPU work
+finishes. Mapping and file output happen at shutdown. Normal direct presentation
+does not enable this readback, and diagnostic timings are not FPS measurements.
+
+```powershell
+python -B testing/test_scene_capture.py --dll $private/gpu-build/tf_hwgs.dll `
+  --prefix $private/capture-probe --report $private/capture-probe-result.json
+python -B testing/analyze_scene_capture.py --prefix $private/scene `
+  --report $private/scene-analysis.json
+```
+
+The synthetic probe checks all 464,400 bytes, including padded GPU rows, an
+intentional duplicated image and separate alternating-row updates. The enhanced
+camera-turn capture contains 32 distinct 2048x1788 images at fields 3027..3058,
+inside the scripted turn at 2997..3177. There are no adjacent or two-field full
+duplicates; both output-row parities change on every pair. The minimum changed
+central-crop area is 87.47%. This establishes different complete output textures
+in that window, not 60 images per second or full-campaign timing correctness.

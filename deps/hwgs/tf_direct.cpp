@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // D3D12 -> OpenGL shared textures. No frame pixels cross the CPU boundary.
 #include "tf_hwgs.h"
+#include "tf_scene_capture.h"
 #include "kzgs_internal.h"
 #include "GS/Renderers/DX12/GSDevice12.h"
 #include "GS/Renderers/DX12/GSTexture12.h"
@@ -170,6 +171,10 @@ int tf_gs_direct_publish(uint32_t scale, uint32_t scene, uint32_t display_fbp, u
             command->CopyTextureRegion(&dst,0,0,0,&src,&box);
             std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
             command->ResourceBarrier(1,&barrier);
+            TfGpuFrame captureFrame=s.info;
+            captureFrame.width=width;captureFrame.height=height;captureFrame.scale=scale;captureFrame.scene=scene;
+            captureFrame.display_fbp=display_fbp;captureFrame.sequence=sequence+1;captureFrame.tick=tick;
+            tf_capture::record(*device,*current,captureFrame);
             current->TransitionToState(oldState);
             const uint64_t ready=s.nextValue; s.nextValue+=2;
             if(!device->ExecuteCommandList(GSDevice12::WaitType::None))throw std::runtime_error("direct frame submission failed");
@@ -215,7 +220,11 @@ void tf_gs_direct_release(uint32_t slot,uint32_t generation) {
 void tf_gs_direct_close() {
     // Caller has finished/deleted GL imports and stopped the producer first.
     kzgs::RunOnGSThread([] {
-        if(g_gs_device)GSDevice12::GetInstance()->WaitForGPUIdle();
+        if(g_gs_device) {
+            auto* device=GSDevice12::GetInstance();
+            device->WaitForGPUIdle();
+            tf_capture::finish(*device);
+        }
         std::lock_guard<std::mutex> lock(mutex);
         for(auto& s:slots){destroy(s);s.state=State::Free;}
         frameTrace().close();
