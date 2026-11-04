@@ -13,12 +13,21 @@ bool begin(uint32_t pc, bool continuing, uint32_t itop, uint64_t generation, con
            const uint8_t *data, const VU1State &state);
 gsnative::DualPacketPtr packet(uint32_t path, const uint8_t *data, uint32_t bytes);
 bool suppressPacket();
+bool prepareSetup(uint32_t entry, bool continuing, const void *owner, const uint8_t *code, uint8_t *data);
 bool tryTail(uint8_t *code, uint8_t *data, VU1State &state, GS &gs, PS2Memory *memory, uint32_t entry, uint32_t top,
              uint32_t itop, uint32_t budget, void *transfer);
 // Caller must hold exclusive VU-memory ownership, or fence the worker first.
-void readMemory(const void *owner, uint8_t *data, unsigned first = 0, unsigned count = 1024);
+enum ReadReason : unsigned
+{
+    EeRead,
+    InputRead,
+    UnpackRead,
+    ProgramRead
+};
+void readMemory(const void *owner, uint8_t *data, unsigned first = 0, unsigned count = 1024,
+                ReadReason reason = EeRead);
 void unpackMemory(const void *owner, uint8_t *data, unsigned address, unsigned count, unsigned cl, unsigned wl,
-                  bool fullWrite);
+                  bool overwritesXYZ);
 void resetMemory(const void *owner);
 void end(bool transferred, bool fellBack);
 void finish();

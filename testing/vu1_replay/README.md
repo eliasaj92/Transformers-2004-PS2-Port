@@ -60,3 +60,18 @@ control state by that point. Restoring all other VF5..VF31 registers together
 (`77ffffe0`) retains data, packets and control through the capture, with 958
 different register states. See [the investigation](../../docs/findings/native-render-seam.md)
 for coverage and the remaining replacement gates.
+
+## Short CPU tail and deferred memory
+
+Configure with `-DTF_REPLAY_DUAL_TAIL=ON` to build `tf_dual_tail` instead.
+Pass the selected dual-transform capture list and optionally the broad list:
+
+```powershell
+C:/private/tail-check/tf_dual_tail.exe C:/private/qualified-captures.txt C:/private/all-captures.txt
+```
+
+The selected calls compare complete final semantic state, deferred-memory
+materialization, strict CPU fallback geometry and caller floating-point state.
+The optional broad list also verifies the authenticated manager and context
+setup programs' read footprints by poisoning all data outside their inputs. Both use only
+the accelerated static package. See [the contract and recorded results](../../deps/hwgs/GPU_GEOMETRY.md#guarded-cpu-tail-and-deferred-vu-memory).

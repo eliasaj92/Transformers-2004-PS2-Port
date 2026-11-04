@@ -49,6 +49,8 @@ uint64_t hash(const uint8_t *p, unsigned bytes)
 }
 std::atomic<uint64_t> selected{0}, attached{0}, declined{0};
 std::atomic<uint64_t> bypassed{0}, tailVertices{0}, skippedVertices{0};
+// VU-memory owner only; reported after producer shutdown.
+uint64_t setupCalls = 0, contextSetupCalls = 0, readVertices[4] = {};
 thread_local bool dropping = false;
 thread_local unsigned dropped = 0;
 struct Memory
@@ -123,13 +125,26 @@ void install(uint32_t crc)
     std::fprintf(stderr, "[gpu-dual] ordered live renderer enabled; CPU geometry bypass=%u\n", unsigned(bypassEnabled));
 }
 
-void readMemory(const void *owner, uint8_t *data, unsigned first, unsigned count)
+void readMemory(const void *owner, uint8_t *data, unsigned first, unsigned count, ReadReason reason)
 {
     if (bypassEnabled && memoryState.owner == owner && memoryState.data == data && memoryState.deferred)
+    {
+        const auto before = memoryState.deferred->materializedVertices;
         memoryState.deferred->read(data, first, count);
+        readVertices[reason] += memoryState.deferred->materializedVertices - before;
+    }
+}
+bool prepareSetup(uint32_t entry, bool continuing, const void *owner, const uint8_t *code, uint8_t *data)
+{
+    if (!bypassEnabled || !tf_native::isDualSetup(code, entry, continuing))
+        return false;
+    readMemory(owner, data, entry ? 0 : 4, entry ? 4 : 1, InputRead);
+    ++setupCalls;
+    contextSetupCalls += entry != 0;
+    return true;
 }
 void unpackMemory(const void *owner, uint8_t *data, unsigned address, unsigned count, unsigned cl, unsigned wl,
-                  bool fullWrite)
+                  bool overwritesXYZ)
 {
     if (!bypassEnabled || memoryState.owner != owner || memoryState.data != data || !memoryState.deferred ||
         !memoryState.deferred->dirtyQwords)
@@ -137,10 +152,10 @@ void unpackMemory(const void *owner, uint8_t *data, unsigned address, unsigned c
     for (unsigned i = 0; i < count; ++i)
     {
         const unsigned qword = (address + (cl >= wl ? (i / wl) * cl + i % wl : i)) & 1023;
-        if (fullWrite)
+        if (overwritesXYZ)
             memoryState.deferred->overwrite(qword, 1);
         else
-            memoryState.deferred->read(data, qword, 1);
+            readMemory(owner, data, qword, 1, UnpackRead);
     }
 }
 void resetMemory(const void *owner)
@@ -158,27 +173,27 @@ bool suppressPacket()
 bool begin(uint32_t pc, bool continuing, uint32_t itop, uint64_t generation, const void *owner, const uint8_t *code,
            const uint8_t *data, const VU1State &state)
 {
+    if (!continuing || (pc != 0x10 && pc != 0xf8) || word(data + 64) != 2 || itop < 3 || itop > 1000)
+        return false;
     if (bypassEnabled)
     {
         auto *writable = const_cast<uint8_t *>(data);
-        readMemory(owner, writable, 0, 32);
+        readMemory(owner, writable, 0, 32, InputRead);
         if (itop < 1024)
-            readMemory(owner, writable, itop, 1);
+            readMemory(owner, writable, itop, 1, InputRead);
         const unsigned context = word(data + 84);
         if (context <= 1009)
-            readMemory(owner, writable, context, 15);
+            readMemory(owner, writable, context, 15, InputRead);
         if (itop >= 3 && itop < 1024)
         {
             const unsigned n = word(data + itop * 16) & 0x7fff;
             const unsigned padded = (n + 3) & ~3u;
             const unsigned end = itop + std::max(padded * 3 + 1, n * 3 + 5);
             if (n >= 3 && n <= 28 && end <= 1024)
-                readMemory(owner, writable, itop - 3, end - (itop - 3));
+                readMemory(owner, writable, itop - 3, end - (itop - 3), InputRead);
         }
-        readMemory(owner, writable, 1023, 1);
+        readMemory(owner, writable, 1023, 1, InputRead);
     }
-    if (!continuing || (pc != 0x10 && pc != 0xf8) || word(data + 64) != 2 || itop < 3 || itop > 1000)
-        return false;
     const uint32_t count = word(data + itop * 16) & 0x7fff, context = word(data + 84);
     if (count < 3 || count > 28 || itop + 6 * count + 5 > 1023 || context > 1009 || word(data + itop * 16 + 4) != 3 ||
         wide(data + 21 * 16) || wide(data + 21 * 16 + 8))
@@ -423,5 +438,12 @@ void finish()
                      "materialized_qwords=%llu dirty_qwords=%u\n",
                      d.recorded, d.overwrittenQwords, d.materializedVertices, d.materializedQwords, d.dirtyQwords);
     }
+    if (bypassEnabled)
+        std::fprintf(stderr,
+                     "[gpu-dual:reads] setup_calls=%llu context_setup_calls=%llu ee_vertices=%llu input_vertices=%llu "
+                     "unpack_vertices=%llu "
+                     "program_vertices=%llu\n",
+                     setupCalls, contextSetupCalls, readVertices[EeRead], readVertices[InputRead],
+                     readVertices[UnpackRead], readVertices[ProgramRead]);
 }
 } // namespace tf_gpu_live

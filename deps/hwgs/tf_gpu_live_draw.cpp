@@ -115,9 +115,11 @@ struct Live
         std::fprintf(stderr,
                      "[gpu-dual:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu declined_fields=%llu "
                      "source_hits=%llu bounds_declined=%llu dispatches=%llu source_uploads=%llu source_bytes=%llu "
-                     "output_allocations=%llu source_declined=%llu output_declined=%llu unique_source_hashes=%zu\n",
+                     "output_allocations=%llu page_probes=%llu source_declined=%llu output_declined=%llu "
+                     "unique_source_hashes=%zu\n",
                      packets, gpuDraws, cpuFallbacks, declinedFields, sourceHits, noBounds, s.dispatches, s.meshUploads,
-                     s.sourceUploadBytes, s.allocations, sourceDeclined, outputDeclined, sourceHashes.size());
+                     s.sourceUploadBytes, s.allocations, s.pageProbes, sourceDeclined, outputDeclined,
+                     sourceHashes.size());
     }
 };
 // Accessed/destroyed only on the owning GS thread, before device shutdown.

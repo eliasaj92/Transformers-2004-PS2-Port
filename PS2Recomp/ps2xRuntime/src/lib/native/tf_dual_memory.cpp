@@ -34,10 +34,15 @@ void DualDeferredMemory::read(uint8_t *data, unsigned first, unsigned count)
         throw std::runtime_error("Deferred geometry read outside VU memory");
     if (!dirtyQwords)
         return;
+    const unsigned last = first + count;
+    while (first < last && cells[first].slot == 255)
+        ++first;
+    if (first == last)
+        return;
     gsnative::DualFloatScope floating;
     if (!floating.ready)
         throw std::runtime_error("Cannot restore deferred VU geometry");
-    for (unsigned qword = first; qword < first + count; ++qword)
+    for (unsigned qword = first; qword < last; ++qword)
     {
         const auto cell = cells[qword];
         if (cell.slot == 255)

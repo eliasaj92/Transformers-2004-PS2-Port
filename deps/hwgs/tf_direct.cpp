@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <stdexcept>
 #include <algorithm>
+#include <chrono>
+#include <vector>
 
 namespace {
 enum class State { Free, Writing, Ready, Acquired };
@@ -25,6 +27,49 @@ struct Slot {
 std::array<Slot,3> slots;
 std::mutex mutex;
 uint64_t sequence = 0;
+struct FrameTrace {
+    struct Row {
+        uint64_t hostUs, sequence, tick;
+        uint32_t width, height, scene, displayFbp;
+        char event;
+    };
+    FILE* file = nullptr;
+    std::vector<Row> rows;
+    bool capped = false;
+    FrameTrace() {
+        const char* path = std::getenv("PS2X_TF_PRESENT_TRACE");
+        if (!path || !*path) return;
+        if (fopen_s(&file, path, "wx") || !file)
+            throw std::runtime_error("Cannot create fresh private direct-frame trace");
+        rows.reserve(20000);
+    }
+    ~FrameTrace() { if (file) std::fclose(file); }
+    // Calls are serialized by the existing presentation-slot mutex.
+    void record(char event, const TfGpuFrame& frame) {
+        if (!file) return;
+        if (rows.size() == 200000) { capped = true; return; }
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        rows.push_back({static_cast<uint64_t>(us), frame.sequence, frame.tick, frame.width, frame.height,
+            frame.scene, frame.display_fbp, event});
+    }
+    void close() {
+        if (!file) return;
+        std::fputs("event,host_us,sequence,tick,width,height,scene,display_fbp\n", file);
+        bool failed = false;
+        for (const auto& row : rows) {
+            failed |= std::fprintf(file, "%c,%llu,%llu,%llu,%u,%u,%u,%u\n", row.event,
+                static_cast<unsigned long long>(row.hostUs), static_cast<unsigned long long>(row.sequence),
+                static_cast<unsigned long long>(row.tick), row.width, row.height, row.scene, row.displayFbp) < 0;
+        }
+        failed |= std::fclose(file) != 0;
+        file = nullptr;
+        std::fprintf(stderr, "[hwgs:frame-trace] rows=%zu capped=%u write_error=%u\n", rows.size(), capped, failed);
+        rows.clear();
+        if (failed) throw std::runtime_error("Cannot write private direct-frame trace");
+    }
+};
+FrameTrace& frameTrace() { static FrameTrace trace; return trace; }
 void check(HRESULT hr, const char* action) {
     if (FAILED(hr)) {
         char message[192]; std::snprintf(message,sizeof(message),"%s failed: %08lx",action,static_cast<unsigned long>(hr));
@@ -136,6 +181,7 @@ int tf_gs_direct_publish(uint32_t scale, uint32_t scene, uint32_t display_fbp, u
                 s.info.display_fbp=display_fbp;
                 s.info.sequence=++sequence;s.info.tick=tick;s.info.ready_value=ready;s.info.release_value=ready+1;
                 s.state=State::Ready;
+                frameTrace().record('p', s.info);
             }
             if(sequence%300==0)std::fprintf(stderr,"[hwgs:direct] submitted=%llu output=%ux%u full_frame_cpu_bytes=0\n",static_cast<unsigned long long>(sequence),width,height);
         } catch(const std::exception& e) {std::fprintf(stderr,"[hwgs:direct] %s\n",e.what());ok=false;}
@@ -153,13 +199,16 @@ int tf_gs_direct_acquire(TfGpuFrame* frame) {
     for(auto& s:slots)if(&s!=latest && s.state==State::Ready) {
         s.waitValue=0;s.state=State::Free;
     }
-    latest->state=State::Acquired;*frame=latest->info;return 1;
+    latest->state=State::Acquired;*frame=latest->info;
+    frameTrace().record('a', latest->info);
+    return 1;
 }
 void tf_gs_direct_release(uint32_t slot,uint32_t generation) {
     std::lock_guard<std::mutex> lock(mutex);
     if(slot>=slots.size())return;
     auto& s=slots[slot];
     if(s.state==State::Acquired && s.info.generation==generation) {
+        frameTrace().record('r', s.info);
         s.waitValue=s.info.release_value;s.state=State::Free;
     }
 }
@@ -169,5 +218,6 @@ void tf_gs_direct_close() {
         if(g_gs_device)GSDevice12::GetInstance()->WaitForGPUIdle();
         std::lock_guard<std::mutex> lock(mutex);
         for(auto& s:slots){destroy(s);s.state=State::Free;}
+        frameTrace().close();
     });
 }

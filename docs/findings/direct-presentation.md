@@ -18,6 +18,21 @@ Guest-requested VRAM transfers retain their existing behavior. The covered Amazo
 
 `PS2X_HWGS_PROFILE=1` should report `readback=0/0.0ms` during direct presentation. `[hwgs:direct]` records actual output dimensions and zero full-frame CPU bytes. The runtime also bypasses the legacy CPU mailbox and `UpdateTexture` upload. Display-buffer flip counters retain their original meaning; they are not proof of distinct 60 Hz scene images.
 
+`PS2X_TF_PRESENT_TRACE=<fresh-private.csv>` optionally records publish, acquire
+and release events, with host timestamps, frame sequence, guest presentation
+tick, active dimensions and scene metadata. It stores bounded metadata in memory
+and writes the CSV after producer shutdown; no frame pixels are read back.
+The close summary must report `capped=0 write_error=0`. Acquired-frame intervals
+measure delivery to the window, including skipped publications and dimension
+changes. They do not establish unique scene images or monitor scanout.
+
+The enhanced GPU-geometry level run recorded 2,273 acquisitions at 55.5695
+handoffs/s during its gameplay window, with no skipped publications between
+the first and last acquisition. Internal dimensions stayed at 2048x1788;
+there were no per-frame size changes in this window. Physics updated at
+55.7436 Hz. The trace closed uncapped and without write errors. These rates
+remain below 60 and measure different asynchronous boundaries.
+
 ## Qualification
 
 Tests use the private USA disc and Trainer hub seed, visible accelerated builds, and skip both opening and in-game cinematics. Raw logs, captures, saves and generated code remain outside the repository. Qualification so far covers the RTX 3080 Laptop on Windows, not other drivers, multi-GPU configurations or Proton.

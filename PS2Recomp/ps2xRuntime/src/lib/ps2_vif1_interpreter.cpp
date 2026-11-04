@@ -1329,8 +1329,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             auto unpackBody = [&]() {
                 if (!scan && tf_gpu_live::bypassEnabled && m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
                 {
-                    const bool complete = !maskEnable &&
-                        ((vl < 3 && (vn == 0 || vn == 3 || hwUnpack)) || (vn == 3 && vl == 3));
+                    // Deferred geometry owns XYZ only; W is already valid.
+                    // Hardware UNPACK supplies every lane for these formats.
+                    // ROW/COL selections also replace XYZ; only a protected
+                    // coordinate requires its old geometry to be resolved.
+                    const bool complete =
+                        ((vl < 3 && (vn == 0 || vn == 3 || hwUnpack)) || (vn == 3 && vl == 3)) &&
+                        (!maskEnable || (hwUnpack && !(vif1_regs.mask & (vif1_regs.mask >> 1) & 0x15151515u)));
                     tf_gpu_live::unpackMemory(this, m_vu1Data, vuAddr, writeVectorCount, cl, wl, complete);
                 }
                 if (ps2x_vifunpack::vif1UnpackFast(m_vu1Data,data,sizeBytes,pos,totalBytes,vif1_regs,

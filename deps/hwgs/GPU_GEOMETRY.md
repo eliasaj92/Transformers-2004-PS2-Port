@@ -395,6 +395,18 @@ draws and cases already requiring CPU vertices do not dispatch compute.
 Both fields share one output batch. A device preflight checks draw eligibility
 before compute changes graphics state, preserving the fallback contract.
 
+The output pool now resumes its search after the last reused page, instead of
+rescanning the same in-flight prefix for every packet. `page_probes` reports
+the actual candidate visits. Upload pages stay mapped for their lifetime;
+only released pages with completed GPU fences can receive new CPU writes.
+This uses D3D12's [persistent mapping contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12resource-map#advanced-usage-models).
+Source uploads and draw ordering retain the existing ownership rules.
+The revised pool passes the 224-group retained/in-flight/budget/reuse diagnostic
+with 898 native draws and zero differing pixels. The textured frontend check
+also passes all four modes with 1,216 GPU draws and zero differences across
+14,680,064 full-resolution comparisons. These are correctness checks, not
+frame-time measurements.
+
 `[gpu-dual]` reports runtime selection/attachment counts, and `[gpu-dual:gs]`
 reports GPU draws, CPU materializations, source reuse, uploads and capacity
 declines. A route passing without nonzero `gpu_draws` does not qualify this path.
@@ -437,10 +449,16 @@ An unproved case takes the ordinary accelerated path.
 
 Unresolved STQ/XYZ lanes retain immutable source geometry through a bounded
 VU-memory ownership map. Full VIF/EE writes explicitly discard ownership, even
-when they write an equal value. Partial/masked writes resolve the affected
-quadwords first. Subsequent admitted calls resolve their input/constant/padding
+when they write an equal value. Hardware UNPACK can also discard ownership when
+all XYZ coordinates are replaced and only W is protected: W is already valid.
+A protected coordinate, partial byte write or unproved format still resolves
+the affected quadwords first. Reads of unowned ranges avoid entering the strict
+floating-point scope. Subsequent admitted calls resolve their input/constant/padding
 reads; other VU programs and public EE reads resolve deferred memory before
-access. New packet headers/colors also discard old geometry ownership where
+access. Two authenticated setup programs read only qword 4.x (manager) or
+matrix qwords 0..3 (context loader), so the remaining deferred data survives
+their ordinary accelerated execution. New packet headers/colors also discard
+old geometry ownership where
 the layouts overlap. Scratch work never replaces unrelated deferred owners.
 
 Version 2 GIF companions distinguish incomplete geometry from ordinary packets.
@@ -465,11 +483,51 @@ cmake -S testing/vu1_replay -B $private/tail-check -G Ninja `
   -DCMAKE_BUILD_TYPE=Release -DPACKAGE_DIR=$private/vu1-static-package `
   -DTF_REPLAY_DUAL_TAIL=ON
 cmake --build $private/tail-check --parallel 4
-& $private/tail-check/tf_dual_tail.exe $private/qualified-captures.txt
+& $private/tail-check/tf_dual_tail.exe $private/qualified-captures.txt $private/all-captures.txt
 ```
 
+The optional second list checks both setup programs' complete read footprints.
+Every data word outside the declared inputs is poisoned before accelerated
+execution; all 1,784 captured calls (863 manager, 921 context) produce the exact
+full semantic state, without memory writes, packets or fallback. Changed code,
+entry points and continuation calls are rejected by these exceptions.
+
+A separate private test of the actual accelerated UNPACK kernels checks 106,496
+format/mask/mode combinations with poisoned old XYZ and preserved W. All 24,155
+admitted complete-XYZ writes match full output memory and ROW state. Protected
+coordinates expose the poison in 77,507 declined cases. The deferred-memory
+fixture check also verifies XYZ-only replacement with W retained.
+
 Runtime output distinguishes `VU bypass`, `tail_vertices`, `skipped_vertices`,
-and deferred-memory materializations from actual GS `gpu_draws`. Capture or
+and deferred-memory materializations from actual GS `gpu_draws`.
+`[gpu-dual:reads]` splits CPU reconstruction into EE, input, unpack and ordinary
+program reads, and counts admitted setup calls. Capture or
 hash diagnostics can force deferred reads and are unsuitable for performance
 measurements. These offline checks alone do not establish a live frame-rate
 improvement or distinct rendered 60 fps.
+
+The first mode-2 enhanced level route passed at 48.0763 physics updates/s,
+median 20.006 ms and p95 29.398 ms, with cinematics skipped and 4x internal
+rendering to 1920x1080 direct output. Across the whole session, 576,735 calls
+bypassed bulk CPU transforms, skipping 12,215,474 source vertices; the renderer
+submitted 1,188,563 native GPU draws. Deferred CPU readers still reconstructed
+20,554,663 vertex/field outputs, about 84.1% of those skipped outputs. That run
+predates the setup exception above and establishes no net performance gain.
+
+With the setup/UNPACK exceptions and revised GPU buffer pool, the next enhanced
+Amazon run passed at **55.7436 physics updates/s**, median 17.1415 ms and p95
+23.330 ms. The 2,280-interval gameplay window took 40.901536 seconds with the
+same 0.0166833512-second timestep. Direct presentation acquired 2,273 frames
+at 55.5695 handoffs/s, with no skipped publications between the first and last
+acquisition. All measured images were 2048x1788 internally, presented at
+1920x1080; there were no dimension changes in that window.
+
+Whole-session counters recorded 577,765 shortened VU calls, 12,237,294 skipped
+source vertices and 1,190,787 GPU draws. CPU readers reconstructed 3,930,994
+vertex/field outputs (**16.06%** of the skipped two-field outputs), comprising
+3,528,598 ordinary-program reads and 402,396 input reads. EE and UNPACK reads
+reconstructed none. The pool performed 920,285 page probes for 595,482
+dispatches, including initial allocations; source/output capacity declines
+remained zero. These observations cover one desktop run, with a final frame
+inspection. They do not isolate each change's speedup, qualify the whole game,
+or establish distinct rendered 60 fps.

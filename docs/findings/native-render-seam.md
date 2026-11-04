@@ -386,9 +386,40 @@ The accelerated capture check passes all 776 selected calls, comparing every
 semantic VU-state field, all memory after materialization and both fields'
 geometry. It also checks FP restoration and deferred-memory overwrite behavior.
 Its 18,568 source vertices require 3,088 static-tail vertices, plus native
-register bookkeeping. This is a reduction in the static transform pass; its
-frame-time effect must be measured in the enhanced level route. Other VU
+register bookkeeping. This is a reduction in the static transform pass. Other VU
 programs, small batches, special 17/18-vertex tails and unproved arithmetic
 remain on the complete accelerated path.
+
+The enhanced Amazon route passed with mode 2, 16:9, 4x internal rendering,
+1920x1080 direct output and cinematics skipped. Its gameplay window measured
+48.0763 physics updates/s, median 20.006 ms and p95 29.398 ms. Whole-session
+counters recorded 576,735 shortened VU calls, 12,215,474 skipped source vertices
+and 1,188,563 native GPU draws. However, later CPU reads reconstructed 20,554,663
+vertex/field outputs: 84.1% of the skipped two-field output. No net performance
+improvement or distinct rendered 60 fps was established.
+
+The next change retains deferred geometry across two complete setup programs:
+the manager reads qword 4.x, and the context loader reads matrix qwords 0..3.
+Complete program fingerprints identify these read footprints; accelerated
+execution still updates the registers and halts normally. All 1,784 captured
+setup calls (863 manager, 921 context) match their full expected state with
+every other data word poisoned, without data/code writes, GIF output or fallback. Runtime
+read-reason counters distinguish EE, input, unpack and ordinary-program
+materializations.
+
+Hardware UNPACK now discards old deferred geometry when its mask replaces all
+three owned coordinates, even if W remains protected. Partial or protected
+coordinates retain materialization. Poisoning the old XYZ values in 106,496
+accelerated unpack cases leaves every admitted write's output memory and ROW
+state exact. Reads that touch no deferred words also avoid FP-mode setup.
+
+The subsequent enhanced Amazon run passed at 55.7436 physics updates/s and
+55.5695 GPU-frame handoffs/s, with 16:9, 4x internal rendering, 1920x1080 direct
+output and cinematics skipped. Deferred CPU reconstruction fell to 16.06% of
+skipped two-field outputs (3,930,994 outputs); ordinary-program reads account
+for 3,528,598 and input reads for 402,396. EE and UNPACK reconstruction were
+zero. The final frame was inspected. This single run remains below the target
+and does not prove distinct rendered 60 fps; the remaining work needs a new
+in-level profile rather than an assumption that the old bottleneck persists.
 
 See [mode 2's admission rules and test command](../../deps/hwgs/GPU_GEOMETRY.md#guarded-cpu-tail-and-deferred-vu-memory).

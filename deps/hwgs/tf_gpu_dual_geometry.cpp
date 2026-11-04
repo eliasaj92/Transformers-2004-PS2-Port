@@ -99,6 +99,7 @@ struct DualGeometry::Page
     wil::com_ptr_nothrow<ID3D12Resource> upload, output;
     uint32_t uploadCapacity, outputCapacity;
     uint64_t fence = 0;
+    void *mappedUpload = nullptr;
     bool vertexState = false;
     Page(GSDevice12 &device, const DualGeometry *pool, uint32_t uploadBytes, uint32_t outputBytes)
         : gs(device), owner(pool), uploadCapacity(uploadBytes), outputCapacity(outputBytes)
@@ -107,9 +108,12 @@ struct DualGeometry::Page
                             D3D12_RESOURCE_FLAG_NONE);
         output = makeBuffer(gs, outputBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        const D3D12_RANGE noReads{0, 0};
+        check(upload->Map(0, &noReads, &mappedUpload), "Cannot map native geometry upload page");
     }
     ~Page()
     {
+        upload->Unmap(0, nullptr);
         // Retaining these through the current list also covers earlier lists.
         // Neither release nor pool exhaustion waits for GPU completion.
         if (fence > gs.GetCompletedFenceValue())
@@ -148,10 +152,17 @@ DualGeometry::~DualGeometry() = default;
 std::shared_ptr<DualGeometry::Page> DualGeometry::acquirePage(uint32_t uploadBytes, uint32_t outputBytes)
 {
     std::shared_ptr<Page> page;
-    for (const auto &candidate : m_pages)
+    const auto completed = m_device.GetCompletedFenceValue();
+    // Start after the last selected page instead of repeatedly scanning the
+    // same in-flight prefix. A full pass still checks every candidate once.
+    for (std::size_t visited = 0, count = m_pages.size(); visited < count; ++visited)
     {
-        if (candidate.use_count() == 1 && candidate->fence <= m_device.GetCompletedFenceValue() &&
-            candidate->uploadCapacity >= uploadBytes && candidate->outputCapacity >= outputBytes)
+        if (m_pageCursor >= count)
+            m_pageCursor = 0;
+        const auto &candidate = m_pages[m_pageCursor++];
+        ++m_stats.pageProbes;
+        if (candidate.use_count() == 1 && candidate->fence <= completed && candidate->uploadCapacity >= uploadBytes &&
+            candidate->outputCapacity >= outputBytes)
         {
             page = candidate;
             ++m_stats.reuses;
@@ -167,7 +178,7 @@ std::shared_ptr<DualGeometry::Page> DualGeometry::acquirePage(uint32_t uploadByt
         // completed allocations. Never evict a retained or in-flight batch.
         for (auto item = m_pages.begin(); m_stats.bytes > m_budget - bytes && item != m_pages.end();)
         {
-            if (item->use_count() == 1 && (*item)->fence <= m_device.GetCompletedFenceValue())
+            if (item->use_count() == 1 && (*item)->fence <= completed)
             {
                 m_stats.bytes -= uint64_t((*item)->uploadCapacity) + (*item)->outputCapacity;
                 item = m_pages.erase(item);
@@ -179,6 +190,7 @@ std::shared_ptr<DualGeometry::Page> DualGeometry::acquirePage(uint32_t uploadByt
             return {};
         page = std::make_shared<Page>(m_device, this, uploadBytes, outputBytes);
         m_pages.push_back(page);
+        m_pageCursor = m_pages.size();
         m_stats.bytes += bytes;
         ++m_stats.allocations;
     }
@@ -205,13 +217,10 @@ DualGeometry::Batch DualGeometry::prepare(const void *inputs, uint32_t vertices,
     auto page = acquirePage((constantsOffset + batches * 144 + 65535) & ~65535u, (vertices * 64 + 65535) & ~65535u);
     if (!page)
         return {};
-    void *mapped = nullptr;
-    const D3D12_RANGE empty{0, 0};
-    check(page->upload->Map(0, &empty, &mapped), "Cannot map dual geometry source upload");
-    std::memcpy(mapped, source, size_t(vertices) * 32);
-    std::memcpy(static_cast<uint8_t *>(mapped) + constantsOffset, transforms, size_t(batches) * 144);
-    const D3D12_RANGE written{0, constantsOffset + size_t(batches) * 144};
-    page->upload->Unmap(0, &written);
+    // acquirePage admits only unretained pages whose previous GPU use ended.
+    // These CPU writes finish before dispatch/command-list submission.
+    std::memcpy(page->mappedUpload, source, size_t(vertices) * 32);
+    std::memcpy(static_cast<uint8_t *>(page->mappedUpload) + constantsOffset, transforms, size_t(batches) * 144);
     m_stats.sourceUploadBytes += uint64_t(vertices) * 32;
     m_stats.constantUploadBytes += uint64_t(batches) * 144;
     const auto sourceAddress = page->upload->GetGPUVirtualAddress();
@@ -301,12 +310,8 @@ DualGeometry::Batch DualGeometry::prepare(const Mesh &mesh, const void *constant
     auto page = acquirePage((batches * 144 + 65535) & ~65535u, (vertices * 64 + 65535) & ~65535u);
     if (!page)
         return {};
-    void *mapped = nullptr;
-    const D3D12_RANGE empty{0, 0}, written{0, size_t(batches) * 144};
-    check(page->upload->Map(0, &empty, &mapped), "Cannot map native mesh transform upload");
-    std::memcpy(mapped, constants, written.End);
-    page->upload->Unmap(0, &written);
-    m_stats.constantUploadBytes += written.End;
+    std::memcpy(page->mappedUpload, constants, size_t(batches) * 144);
+    m_stats.constantUploadBytes += uint64_t(batches) * 144;
     auto result = dispatch(std::move(page), mesh.source->buffer->GetGPUVirtualAddress(), vertices, 0);
     mesh.source->fence = m_device.GetCurrentFenceValue();
     return result;

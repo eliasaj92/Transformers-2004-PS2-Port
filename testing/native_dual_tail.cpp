@@ -58,8 +58,9 @@ int main(int argc, char **argv)
 {
     try
     {
-        if (argc != 2)
-            throw std::runtime_error("usage: native_dual_tail <private-selected-capture-list>");
+        if (argc != 2 && argc != 3)
+            throw std::runtime_error(
+                "usage: native_dual_tail <private-selected-capture-list> [private-broad-capture-list]");
         _putenv_s("PS2X_VU1_FAST", "1");
         _putenv_s("PS2X_VU1_RUN_TO_END", "0");
         std::ifstream list(argv[1]);
@@ -128,7 +129,7 @@ int main(int argc, char **argv)
                 std::memcpy(packet.inputs.data() + i * 32 + 16, source, 12);
             }
             const auto source = std::make_shared<gsnative::DualPacket>(packet);
-            for (unsigned scenario = 0; scenario < 3; ++scenario)
+            for (unsigned scenario = 0; scenario < 4; ++scenario)
             {
                 auto deferredData = data, wanted = expected.data;
                 tf_native::DualDeferredMemory deferred;
@@ -147,6 +148,14 @@ int main(int argc, char **argv)
                     {
                         deferred.read(deferredData.data(), qword, 1);
                         deferredData[qword * 16 + 5] = wanted[qword * 16 + 5] = 0x5a;
+                    }
+                    else if (scenario == 3)
+                    {
+                        // A masked UNPACK can replace XYZ while preserving W.
+                        // Only XYZ has deferred ownership; leave W untouched.
+                        deferred.overwrite(qword, 1);
+                        std::memset(deferredData.data() + qword * 16, 0x71, 12);
+                        std::memset(wanted.data() + qword * 16, 0x71, 12);
                     }
                 }
                 deferred.read(deferredData.data());
@@ -187,6 +196,73 @@ int main(int argc, char **argv)
         std::printf("DUAL_TAIL fixtures=%u failures=%u full_vertices=%u cpu_tail_vertices=%u; full semantic state, "
                     "memory, fallback geometry, FP environment\n",
                     total, failures, vertices, tailVertices);
+        if (argc == 3)
+        {
+            std::ifstream setups(argv[2]);
+            if (!setups)
+                throw std::runtime_error("Cannot open broad fixture list");
+            unsigned setupCount = 0, contextCount = 0;
+            while (std::getline(setups, name))
+            {
+                if (!name.empty() && name.back() == '\r')
+                    name.pop_back();
+                if (name.empty())
+                    continue;
+                Dump before(name);
+                const uint32_t entry = before.header[0] & 0x7fffffffu;
+                if (!tf_native::isDualSetup(before.code.data(), entry, (before.header[0] & 0x80000000u) != 0))
+                    continue;
+                Dump expected(name.substr(0, name.size() - 7) + "post.bin");
+                auto changedCode = before.code;
+                changedCode[entry] ^= 1;
+                if (tf_native::isDualSetup(changedCode.data(), entry, false) ||
+                    tf_native::isDualSetup(before.code.data(), 8, false) ||
+                    tf_native::isDualSetup(before.code.data(), entry, true))
+                    throw std::runtime_error("Setup admission accepted a changed program/entry");
+                if (resident != before.code)
+                {
+                    resident = before.code;
+                    ++memory.gen1;
+                }
+                if (!ps2Vu1StaticPrepare(resident.data(), resident.size(), &memory, memory.gen1, entry))
+                    throw std::runtime_error("Static package declined setup");
+                // Poison every unclaimed data word. The full accelerated call
+                // must still produce its captured state and leave memory alone.
+                std::array<uint8_t, 16384> poisoned;
+                poisoned.fill(0xa5);
+                if (entry)
+                    std::memcpy(poisoned.data(), before.data.data(), 64);
+                else
+                    std::memcpy(poisoned.data() + 64, before.data.data() + 64, 4);
+                const auto originalPoison = poisoned;
+                auto state = before.state;
+                const auto fallback = ps2Vu1StaticFallbackCalls();
+                emitted = 0;
+                const bool pending =
+                    ps2Vu1StaticRun(0, &state, false, resident.data(), poisoned.data(), gs, &memory, entry,
+                                    before.header[1], before.header[2], 40000000, transfer.data());
+                if (pending || emitted || ps2Vu1StaticFallbackCalls() != fallback || poisoned != originalPoison ||
+                    before.data != expected.data || resident != before.code)
+                    throw std::runtime_error("Setup touched undeclared state/memory/packets");
+                const auto *actualBytes = reinterpret_cast<const uint8_t *>(&state);
+                const auto *expectedBytes = reinterpret_cast<const uint8_t *>(&expected.state);
+                for (unsigned offset = 0; offset < 660; ++offset)
+                {
+                    if (offset == 638 || offset == 639 || (offset >= 649 && offset <= 651))
+                        continue;
+                    if (actualBytes[offset] != expectedBytes[offset])
+                        throw std::runtime_error("Setup read outside its declared data footprint");
+                }
+                ++setupCount;
+                contextCount += entry != 0;
+            }
+            if (!setupCount)
+                throw std::runtime_error("No setup fixtures admitted");
+            std::printf("DUAL_SETUP fixtures=%u context=%u failures=0; all data outside setup inputs poisoned, full "
+                        "state exact, no "
+                        "data/code/GIF writes\n",
+                        setupCount, contextCount);
+        }
         return !total || failures ? 1 : 0;
     }
     catch (const std::exception &e)

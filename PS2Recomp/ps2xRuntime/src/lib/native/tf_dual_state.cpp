@@ -11,6 +11,19 @@
 
 namespace tf_native
 {
+bool isDualSetup(const uint8_t *code, uint32_t entry, bool continuing)
+{
+    if (!code || continuing || (entry != 0 && entry != 0x450))
+        return false;
+    const unsigned bytes = entry ? 40 : 16;
+    uint64_t hash = 14695981039346656037ull;
+    for (unsigned i = 0; i < bytes; ++i)
+    {
+        hash ^= code[entry + i];
+        hash *= 1099511628211ull;
+    }
+    return hash == (entry ? 0x4d78a232585bc171ull : 0x0c5e649e33b016a8ull);
+}
 namespace
 {
 struct FloatEnvironment

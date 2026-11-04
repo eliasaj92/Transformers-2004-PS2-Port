@@ -7,6 +7,10 @@ struct VU1State;
 
 namespace tf_native
 {
+// Complete straight-line setup programs: entry 0 reads qword 4.x into VI13;
+// entry 0x450 loads qwords 0..3 into VF1..4. Neither writes data or emits GIF.
+// Requires the ordinary 16 KiB VU code image; continuing calls are excluded.
+bool isDualSetup(const uint8_t *code, uint32_t entry, bool continuing);
 // Candidate preservation effects for an already identified, unclipped
 // DualTransform continuation. This is not a complete VU-state replacement.
 // GPU-only XYZ/STQ words remain unresolved until overwritten or materialized.

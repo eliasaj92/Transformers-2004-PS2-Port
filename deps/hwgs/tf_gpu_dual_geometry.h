@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "tf_gpu_dual_bounds.h"
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -45,7 +46,7 @@ class DualGeometry
     };
     struct Stats
     {
-        uint64_t allocations = 0, reuses = 0, dispatches = 0, draws = 0, bytes = 0;
+        uint64_t allocations = 0, reuses = 0, dispatches = 0, draws = 0, bytes = 0, pageProbes = 0;
         uint64_t meshUploads = 0, meshBytes = 0, sourceUploadBytes = 0, constantUploadBytes = 0;
     };
 
@@ -89,6 +90,7 @@ class DualGeometry
     GSDevice12 &m_device;
     std::unique_ptr<Pipeline> m_pipeline;
     std::vector<std::shared_ptr<Page>> m_pages;
+    std::size_t m_pageCursor = 0;
     std::vector<std::shared_ptr<Source>> m_sources;
     uint64_t m_budget, m_meshBudget;
     Stats m_stats;
