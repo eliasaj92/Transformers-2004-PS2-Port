@@ -242,3 +242,31 @@ private GPU capture and replay workflow. The diagnostic reads back GPU results
 for comparison; production drawing must keep them on the GPU. GS state,
 textures, bounds, actual strip indices, ordered submission and buffer lifetime
 remain integration work. No live offload or FPS gain is claimed from this replay.
+
+## Resident GPU submission and observed draw states
+
+The next component keeps the actual dual-transform shader output on the GPU
+through drawing. Pooled upload/output allocations are protected by both retained
+batch handles and the final draw fence. The D3D12 device's native handler can
+consume this buffer with an existing `GSHWDrawConfig`, then suppress the normal
+CPU vertex upload. Captured-mesh diagnostic rendering passed 3,106 native draw
+substitutions and 3,106 ordinary comparison draws with zero pixel differences;
+it also exercised pool exhaustion, completed-buffer reuse and allocation growth.
+This uses fitted, untextured diagnostic viewports, not the game's live scene.
+
+An enhanced PGO Amazon run with a read-only native handler passed the level-only
+route with cinematics skipped, direct presentation, 4x internal rendering and
+1920x1080 output. It recorded **67,546 draws over fields 3000..3010**, uncapped.
+Of 36,254 ordinary triangle draws, 36,107 use textures, 35,792 depth, 30,908
+automatic LOD, 1,222 manual LOD and 3,735 palettes. There are 44 shader/depth/mask
+groups; the two largest account for 25,450 draws. Both software and hardware
+blending occur frequently. No feedback/barrier, DATE, second-alpha-pass or
+blend-multipass cases occur in this triangle subset. These observations do not
+attribute particular draws to a VU family or cover other camera/level states.
+
+The count supports grouping native mesh work before compute submission; it is
+not itself a cost profile. The next integration boundary must preserve texture
+selection/LOD, target/depth ownership and blend state while supplying bounds
+without requiring bulk CPU geometry. The pool and device handler now support
+that submission once the upstream boundary is identified. No live VU bypass
+or new game performance result is claimed. See [commands and scope](../../deps/hwgs/GPU_GEOMETRY.md).

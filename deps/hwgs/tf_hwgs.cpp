@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Transformers adapter to drakolordx7's kzgs and PCSX2. See NOTICE/THIRD_PARTY.md.
 #include "tf_hwgs.h"
+#ifdef TF_HWGS_GPU_GEOMETRY
+#include "tf_gpu_draw_trace.h"
+#endif
 #include "kzgs.h"
 #include "kzgs_internal.h"
 #include "GS/GS.h"
@@ -100,10 +103,16 @@ int tf_gs_open(int scale, int fxaa, const char* resources, char* error, uint32_t
     frame.clear(); frameWidth = frameHeight = 0;
     std::string message;
     const bool ok = kzgsOpen(nullptr, config, registers.data(), &message);
+#ifdef TF_HWGS_GPU_GEOMETRY
+    if (ok) tfGpuDrawTraceOpen();
+#endif
     if (!ok && error && capacity) std::snprintf(error, capacity, "%s", message.c_str());
     return ok ? 1 : 0;
 }
 void tf_gs_close() {
+#ifdef TF_HWGS_GPU_GEOMETRY
+    tfGpuDrawTraceClose();
+#endif
     if(kzgsIsOpen() && tf_gs_direct_enabled())tf_gs_direct_close();
     kzgsClose(); frame.clear(); frameWidth = frameHeight = 0;
 }
@@ -120,6 +129,9 @@ void tf_gs_gif(uint32_t path, const uint8_t* data, uint32_t bytes) {
 }
 void tf_gs_vsync(const uint8_t* priv) {
     if (!priv || !kzgsIsOpen()) return;
+#ifdef TF_HWGS_GPU_GEOMETRY
+    tfGpuDrawTraceField();
+#endif
     std::memcpy(registers.data(), priv, registers.size());
     // Reserved runtime metadata is not a GS register.
     std::memset(registers.data() + 0xf00, 0, 8);

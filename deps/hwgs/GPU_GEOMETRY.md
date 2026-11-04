@@ -113,6 +113,68 @@ reader. Replay timing excludes GPU submission and cannot establish a speedup.
 
 Before game integration, the remaining work includes complete mesh ownership,
 GS state/texture/bounds preparation, ordered native commands alongside GIF,
-buffer reuse protected by fences, and VU state consumed by uncovered batches.
+and VU state consumed by uncovered batches.
 Clipped geometry, expanded sprites, alpha/feedback cases and live rendering
 still require qualification. See [the investigation](../../docs/findings/native-render-seam.md).
+
+## GPU-resident batches and native draw submission
+
+`tf_gpu_dual_geometry.cpp` provides the reusable compute/draw component. A
+dispatch transforms many mesh chunks into one GPU vertex buffer. Each pooled
+allocation contains a combined source/constant upload buffer and a GPU output
+buffer, within a default 128 MiB budget. A batch handle prevents reuse while a caller retains it; after release,
+the last draw's fence must complete before reuse. Completed smaller allocations
+can be retired when a larger batch needs the budget. Capacity exhaustion returns
+an empty handle instead of forcing a GPU wait. Destruction defers resources
+still referenced by queued commands.
+
+The pool does not map, download, or copy transformed vertices back to the CPU.
+It adds no forced command-list execution or wait per batch. The underlying GS
+renderer can still submit its normal command lists while drawing. All pool and
+handle operations belong to the GS thread; the device must outlive them.
+
+The device patch also exposes `SetNativeDrawHandler`. A handler can submit a
+qualified GPU batch using the already prepared `GSHWDrawConfig`, then return
+true to suppress the ordinary upload/draw. Returning false retains ordinary
+submission and must leave configuration and state unchanged. `RenderHWFromGPU`
+bypasses the handler to prevent recursion. This interface still requires a
+way to prepare the game's configuration without CPU-transformed geometry.
+
+```powershell
+python -B testing/test_gpu_dual_transform.py draw --prepared <private-prepared-directory> --dll <private-gpu-build>/tf_hwgs.dll --report <fresh-private-draw-report.json>
+```
+
+The diagnostic draws the 776 captured chunks through this handler using
+GPU-resident output. A second outstanding batch changes colors, and a third
+dispatch reuses a completed allocation. Both fields, restart masks, return to
+ordinary GS drawing, pool exhaustion, in-flight retention and growth are
+checked. **3,106 native draws and 3,106 ordinary comparison draws produced zero
+differing pixels, with 1,628,705 painted pixels.** Two allocations and one reuse
+served the main image comparison. Only final diagnostic images are downloaded;
+GPU vertices are never read back. The comparison uses untextured diagnostic
+state and fitted tile viewports, so it does not establish live scene equivalence.
+
+## In-level draw-state trace
+
+`PS2X_TF_GPU_DRAW_TRACE=<fresh private CSV path>` installs a read-only handler.
+`PS2X_TF_GPU_DRAW_RANGE=3000:3010` selects hardware presentation fields; the
+default is the same and the maximum span is 120. The trace has a 100,000-row cap
+and reports completion/capping on shutdown. It records draw sizes, shader keys,
+target/texture dimensions and depth/blend/LOD features, without changing draws.
+It introduces diagnostic overhead and is not a performance measurement.
+
+```powershell
+python -B testing/summarize_gpu_draw_trace.py <private-enhanced-level-run-directory>
+```
+
+The first enhanced PGO run with this backend passed the cutscene-skipping
+Amazon route at field 4977 (3,989 pad reads; 1,194 CD events). The 11-field
+in-level trace contains 67,546 draws with no cap: 36,254 ordinary triangle draws,
+36,107 textured, 35,792 with depth, 30,908 using automatic LOD and 1,222 using
+manual LOD. The two most common triangle shader groups contain 25,450 draws.
+No feedback barriers, DATE, second alpha pass or blend multipass were observed
+among these ordinary triangles; that does not establish their absence in other
+levels or identify which calls belong to the dual-transform family. Palettes
+and software/hardware blending remain relevant. Full engine-batch attribution,
+texture/bounds preparation and unresolved VU-state handling are still required
+before enabling live geometry offload.

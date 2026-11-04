@@ -1,8 +1,19 @@
 diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
-index cf918b3..58ba681 100644
+index cf918b3..04b1b14 100644
 --- a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
 +++ b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
-@@ -4859,9 +4859,46 @@ void GSDevice12::UpdateHWPipelineSelector(GSHWDrawConfig& config)
+@@ -4406,6 +4406,10 @@ void GSDevice12::FeedbackBarrier(const GSTexture12* texture)
+ 
+ void GSDevice12::RenderHW(GSHWDrawConfig& config)
+ {
++	if (!m_native_geometry_vertices.BufferLocation && m_native_draw_handler &&
++		m_native_draw_handler(m_native_draw_context, config))
++		return;
++
+ 	GSTexture12* colclip_rt = static_cast<GSTexture12*>(g_gs_device->GetColorClipTexture());
+ 	GSTexture12* draw_rt = config.ps.HasColorROV() ? nullptr : static_cast<GSTexture12*>(config.rt);
+ 	GSTexture12* draw_ds = config.ps.HasDepthROV() ? nullptr : static_cast<GSTexture12*>(config.ds);
+@@ -4859,9 +4863,46 @@ void GSDevice12::UpdateHWPipelineSelector(GSHWDrawConfig& config)
  	m_pipeline_selector.ds_as_rt = m_ds_as_rt != nullptr && !config.ps.HasDepthROV();
  }
  
@@ -51,10 +62,10 @@ index cf918b3..58ba681 100644
  	if (config.vs.UseFixedExpandIndexBuffer())
  	{
 diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.h b/pcsx2/GS/Renderers/DX12/GSDevice12.h
-index 3eeab02..61b9b3e 100644
+index 3eeab02..95d4fc1 100644
 --- a/pcsx2/GS/Renderers/DX12/GSDevice12.h
 +++ b/pcsx2/GS/Renderers/DX12/GSDevice12.h
-@@ -603,6 +603,14 @@ public:
+@@ -603,6 +603,23 @@ public:
  	void UploadHWDrawVerticesAndIndices(GSHWDrawConfig& config);
  
  public:
@@ -65,15 +76,26 @@ index 3eeab02..61b9b3e 100644
 +	/// modes return false before changing draw state; the caller retains its fallback.
 +	/// Complex alpha/feedback configurations still need game-level testing.
 +	bool RenderHWFromGPU(GSHWDrawConfig& config, const D3D12_VERTEX_BUFFER_VIEW& vertices);
++	// GS-thread native submission hook. Return true only after completing the
++	// replacement submission; false must leave configuration/state unchanged.
++	// GPU-buffer draws bypass the hook to permit calling RenderHWFromGPU here.
++	using NativeDrawHandler = bool (*)(void*, GSHWDrawConfig&);
++	void SetNativeDrawHandler(void* context, NativeDrawHandler handler)
++	{
++		m_native_draw_context = context;
++		m_native_draw_handler = handler;
++	}
 +
  	/// Ends any render pass, executes the command buffer, and invalidates cached state.
  	void ExecuteCommandList(bool wait_for_completion);
  	void ExecuteCommandList(bool wait_for_completion, const char* reason, ...);
-@@ -710,6 +718,7 @@ private:
+@@ -710,6 +727,9 @@ private:
  	u32 m_dirty_flags = 0;
  
  	// input assembly
 +	D3D12_VERTEX_BUFFER_VIEW m_native_geometry_vertices = {};
++	void* m_native_draw_context = nullptr;
++	NativeDrawHandler m_native_draw_handler = nullptr;
  	D3D12_VERTEX_BUFFER_VIEW m_vertex_buffer = {};
  	D3D12_INDEX_BUFFER_VIEW m_index_buffer = {};
  	D3D12_PRIMITIVE_TOPOLOGY m_primitive_topology = {};

@@ -254,6 +254,54 @@ def replay(directory, capture_path, gpu_report_path, fixtures, runner, report_pa
     return result.returncode
 
 
+def draw(directory, dll, report_path):
+    """Render captured meshes from GPU buffers; compare final diagnostic images."""
+    directory, dll, report_path = private(directory), private(dll), private(report_path)
+    if report_path.exists():
+        raise FileExistsError("Use a fresh private draw report path")
+    meta = json.loads((directory / "manifest.json").read_text())
+    inputs, batches, expected = ((directory / name).read_bytes() for name in ("inputs.bin", "batches.bin", "expected.bin"))
+    for name, value in (("inputs.bin", inputs), ("batches.bin", batches), ("expected.bin", expected)):
+        if digest(value) != meta["sha256"][name]:
+            raise ValueError("Prepared private fixture hash mismatch")
+    count, batch_count = meta["vertices"], meta["batches"]
+    if (meta["version"] != 2 or not 3 <= count <= 32768 or not 0 < batch_count <= 1024 or
+            len(inputs) != count * 32 or len(batches) != batch_count * 144 or len(expected) != count * 64):
+        raise ValueError("Invalid prepared draw layout")
+    os.environ["PS2X_HWGS_API"] = "d3d12"
+    os.environ["PS2X_HWGS_DIRECT"] = "0"
+    os.chdir(dll.parent)
+    with os.add_dll_directory(str(dll.parent)):
+        gs = c.CDLL(str(dll))
+        gs.tf_gs_open.argtypes = [c.c_int, c.c_int, c.c_char_p, c.c_void_p, c.c_uint32]
+        gs.tf_gs_open.restype = c.c_int
+        gs.tf_gs_close.argtypes = []
+        gs.tf_gs_close.restype = None
+        probe = gs.tf_gs_gpu_dual_draw_probe
+        probe.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32, c.c_void_p,
+                          c.POINTER(c.c_uint64), c.c_void_p, c.c_uint32]
+        probe.restype = c.c_int
+        error, stats = c.create_string_buffer(4096), (c.c_uint64 * 8)()
+        source, constants, reference = (c.create_string_buffer(value) for value in (inputs, batches, expected))
+        if not gs.tf_gs_open(1, 0, str(dll.parent / "resources").encode(), error, len(error)):
+            raise RuntimeError(error.value.decode(errors="replace"))
+        try:
+            passed = bool(probe(source, count, constants, batch_count, reference, stats, error, len(error)))
+        finally:
+            gs.tf_gs_close()
+    report = {"passed": passed, "batches": batch_count, "source_vertices": count,
+              "allocations": stats[0], "reuses": stats[1], "dispatches": stats[2], "native_draws": stats[3],
+              "painted_pixels": stats[4], "differing_pixels": stats[5],
+              "handler_replacements": stats[6], "ordinary_draws": stats[7],
+              "dll_sha256": digest(dll.read_bytes()), "fixture_sha256": meta["sha256"],
+              "scope": "GPU-resident captured-mesh draws with diagnostic GS state; not live game integration or FPS"}
+    if error.value:
+        report["error"] = error.value.decode(errors="replace")
+    report_path.write_text(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2))
+    return 0 if passed else 1
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -273,11 +321,17 @@ if __name__ == "__main__":
     bypass.add_argument("--fixtures", type=Path, required=True)
     bypass.add_argument("--runner", type=Path, required=True)
     bypass.add_argument("--report", type=Path, required=True)
+    resident = commands.add_parser("draw")
+    resident.add_argument("--prepared", type=Path, required=True)
+    resident.add_argument("--dll", type=Path, required=True)
+    resident.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.fixtures, args.program_manifest, args.output)
     elif args.command == "run":
         raise SystemExit(run(args.prepared, args.dll, args.report, args.gpu_capture))
-    else:
+    elif args.command == "replay":
         raise SystemExit(replay(args.prepared, args.gpu_capture, args.gpu_report,
                                args.fixtures, args.runner, args.report))
+    else:
+        raise SystemExit(draw(args.prepared, args.dll, args.report))

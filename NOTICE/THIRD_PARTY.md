@@ -16,7 +16,7 @@ which selects the pinned PCSX2 GameIndex's SLUS-20668 graphics fixes.
 
 The opt-in `deps/hwgs/pcsx2-gpu-vertices.patch` modifies that pinned revision's
 `pcsx2/GS/Renderers/DX12/GSDevice12.h` and `.cpp`. It adds a GPU vertex-buffer
-entry point to the existing draw path; the PCSX2 Developers' original notices
+entry point and an opt-in native submission handler to the existing draw path; the PCSX2 Developers' original notices
 and GPL-3.0-or-later license remain applicable. The patch does not replace
 PCSX2's render-state, shader, target or texture implementations. The new
 compute shaders and diagnostic drivers in `deps/hwgs` are independently
