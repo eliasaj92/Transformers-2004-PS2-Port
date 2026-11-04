@@ -31,6 +31,7 @@ PS2Runtime::RecompiledFunction originalVisibleMesh = nullptr;
 // total output as well as call count; fail visibly rather than accept truncation.
 std::string capturePrefix;
 uint32_t captureLimit = 256;
+bool captureGrassOnly = false;
 std::atomic<uint32_t> captureCount{0};
 std::atomic<uint64_t> captureBytes{0};
 constexpr uint64_t kMaxCaptureBytes = 512ull * 1024 * 1024;
@@ -238,6 +239,11 @@ void install(PS2Runtime& runtime, uint32_t crc) {
     if (const char* prefix = std::getenv("PS2X_TF_SEAM_CAPTURE")) {
         if (!*prefix) throw std::runtime_error("PS2X_TF_SEAM_CAPTURE requires a fresh private filename prefix");
         capturePrefix = prefix;
+        if (const char* family = std::getenv("PS2X_TF_SEAM_FAMILY")) {
+            if (std::strcmp(family, "grass") == 0) captureGrassOnly = true;
+            else if (std::strcmp(family, "all") != 0)
+                throw std::runtime_error("PS2X_TF_SEAM_FAMILY requires all or grass");
+        }
         if (const char* count = std::getenv("PS2X_TF_SEAM_CALLS")) {
             unsigned value = 0;
             char extra = 0;
@@ -301,6 +307,17 @@ void upload(uint32_t destination, const uint8_t* payload, uint32_t bytes) {
 uint32_t vuBegin(uint32_t pc, bool continuing, uint32_t top, uint32_t itop,
                  const uint8_t* code, const uint8_t* data, const VU1State& state) {
     if (!captureEnabled || !trace.inRange() || captureCount.load(std::memory_order_relaxed) >= captureLimit) return 0;
+    if (captureGrassOnly) {
+        // Read owned VU memory on the execution thread, not VIF's producer.
+        // Select a complete known grass stage, independent of its code address.
+        uint32_t stages = 0, entry = 0;
+        std::memcpy(&stages, data + 4*16, 4);
+        std::memcpy(&entry, data + 5*16, 4);
+        const uint32_t start = (entry & 0xffffu) * 8;
+        if (!continuing || (pc != 0x10 && pc != 0xf8) || stages != 1 || start > 16384 - 3872 ||
+            fingerprint(code + start, 64) != 0x2ad8a73a9581a552ull ||
+            fingerprint(code + start, 3872) != 0xbbe99809fbf7361eull) return 0;
+    }
     if (vuCapture.ticket) throw std::runtime_error("Nested native-seam VU capture");
     const uint32_t ticket = captureCount.fetch_add(1, std::memory_order_relaxed) + 1;
     if (ticket > captureLimit) return 0;

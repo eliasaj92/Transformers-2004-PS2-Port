@@ -3,6 +3,7 @@ extern "C" const bool iopIdleStatsEnabled; // TEMP(transformers): cached process
 extern "C" void iopIdleStatsTimerWalk() noexcept;
 #include "ps2_drain.h"
 #include "ps2_native_seam_probe.h"
+#include "native/tf_grass_oracle.h"
 #include "runtime/ps2_eeopt.h"
 // checkpoint fast path adapted from brad-richardson/PS2Recomp (GPL-3.0); budget design after snuri00/ps2-web-recomp (MIT)
 #include "ps2_vu1new.h" // TEMP(transformers)
@@ -2978,6 +2979,7 @@ done:
 
 void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
 {
+    if (tf_grass_oracle::enabled) tf_grass_oracle::gif(static_cast<uint32_t>(pathId), data, sizeBytes);
     // Capture before worker buffering. Its later EE replay has no active VU
     // ticket, so each emitted packet is recorded once in original call order.
     if (ps2_native_seam_probe::captureEnabled)

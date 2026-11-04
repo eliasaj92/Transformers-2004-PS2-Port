@@ -49,4 +49,6 @@ The useful GPU route is to identify complete mesh batches and their constants, v
 
 The concrete Transformers investigation and observation probe are documented in [Native render seam](native-render-seam.md).
 
+That investigation now includes a handwritten grass geometry model. Offline comparisons match 442 captured calls and 17,096 sprite groups exactly for XYZ, clipping and color. Opt-in live comparison also passed the accelerated route in deterministic and threaded modes without changing game-state checks. It still executes both the native calculation and the reference VU code; the measured diagnostic timings are not a performance improvement. Complete packet state, persistent VU effects and a native hardware draw interface remain prerequisites for replacing the grass path.
+
 A private SIMD experiment also matched a simplified saturating float-to-integer conversion against the current helper on 40,388,608 normalized float inputs, all four VU scale factors, and nearest/toward-zero rounding. That arithmetic candidate is not integrated into the game build and carries no gameplay performance claim.

@@ -1,6 +1,6 @@
 # Transformers native render seam investigation
 
-Status: whole-list capture and first exact mesh-input import, November 2026. No geometry is replaced or executed on the GPU by this probe. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Normal play retains the accelerated VU path.
+Status: whole-list capture, exact mesh-input import and a handwritten grass geometry model, November 2026. The model can be compared with accelerated VU output offline or during gameplay. It does not replace VU execution or execute geometry on the GPU. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Normal play retains the accelerated VU path.
 
 ## Why this boundary
 
@@ -29,12 +29,12 @@ The filled grass payload is 0x380 bytes:
 
 | Qwords | Observed writer inputs |
 |---|---|
-| 0..2 | Values derived from scratchpad view parameters and the game's field/interpolation values. Semantic names still need an output oracle. |
+| 0..2 | Clip scale, clip offset and billboard offset, derived from scratchpad view parameters and the game's field/interpolation values. |
 | 3..6 | Matrix product from scratchpad `0x700006a0` and `0x70000d40`, with an additional adjustment in the last vector. |
 | 7..10 | Matrix copied through the pointer at scratchpad `0x7000067c`, with a corresponding adjustment. |
 | 11..22 | Shader constants copied or constructed by the writer. |
-| 23 | Four game-global float parameters. |
-| 24..55 | 512 bytes from the table at `0x713850`, initialized by the grass constructor. |
+| 23 | Depth bias in x, density in z and distance scale in w. The model does not use y. |
+| 24..55 | 32 scatter vectors from the table at `0x713850`, initialized by the grass constructor. |
 
 The existing VIF field-2 repair can alter an invalid second matrix after upload. An oracle must capture effective VU input after that repair and any VIF mode operation, rather than assuming the raw EE payload is always the final input.
 
@@ -76,6 +76,8 @@ The ordinary threaded run also matched the route's six terminal counters and eig
 
 In addition to `PS2X_TF_SEAM_TRACE`, set `PS2X_TF_SEAM_CAPTURE=<fresh private filename prefix>`. `PS2X_TF_SEAM_CALLS` bounds the number of accelerated invocations, default 256, maximum 6,000. Total binary output has a separate 512 MiB hard limit. Use a very short range; the measured capture used 3000:3002 and 5,000 calls. Existing files are never overwritten. Truncated captures, write errors, missing begin/end pairs and fingerprint mismatches must not be accepted as fixtures.
 
+`PS2X_TF_SEAM_FAMILY=grass` restricts binary VU captures to manager continuations selecting the complete known grass program. It checks the full code fingerprint at the stage table's dynamic address on the VU execution thread. The default, `all`, preserves the broader capture. This filter does not restrict trace events or the first EE snapshot. It makes a wider camera-motion window practical without collecting unrelated VU programs.
+
 The observer produces:
 
 - `<prefix>-ee.bin`: the first validated grass submission's EE RAM, scratchpad, low GPR words and boundary metadata. The generic renderer is wrapped across continuation aliases. A newly completed grass context from inside that invocation, restored stack/return PC, and the exact emitted CALL tag are required. Culled objects are not reported as submitted meshes. This snapshot is not globally atomic across other emulated devices.
@@ -98,22 +100,52 @@ The ordinary threaded capture also passed the route, matching the six counters a
 
 `python -B testing/import_grass_seam.py <prefix> --trace <private.csv>` imports the observed single-RET list into word patches and raw position triples per geometry chunk. It admits only the captured absolute-address layouts, 1/1 or 3/1 cycles, and required unpack/mask/row operations. It handles signed packed inputs and the V2/V3 lane behavior, including the real DMA quadword phase. It rejects unsupported layouts. Matching requires the exact grass microprogram fingerprint and the observed manager stage table.
 
-The first captured root has one RET tag with 183 payload qwords: 2,936 VIF bytes including TTE. It contains five chunks, 31 UNPACK commands and five MSCNT continuations. ITOP cycles through qwords 180, 452 and 724. Descriptor counts are 28, 28, 28, 28 and 25. Static shader analysis identifies the first two positions in each chunk as bounds, followed by instances: 127 instances across the list.
+The first captured root has one RET tag with 183 payload qwords: 2,936 VIF bytes including TTE. It contains five chunks, 31 UNPACK commands and five MSCNT continuations. ITOP cycles through qwords 180, 452 and 724. Descriptor counts are 28, 28, 28, 28 and 25. The first two vertices seed a triangle strip; each later vertex completes a source triangle, subject to restart and clipping decisions. There are 127 candidate source triangles across the list. The earlier bounds/instance interpretation was incorrect: the grass shader generates many billboards within each source triangle.
 
 The imported patches match **every written 32-bit word** in all five chunks against accelerated pre-execution fixtures: 352, 344, 344, 344 and 308 words respectively. Each chunk matched twice in the bounded capture, demonstrating reuse across submissions. The importer does not compare unwritten/preserved lanes or prove a unique submission identity. The matching bytes establish the input format; they do not qualify transformed output, persistent VU registers/memory, or a runtime bypass.
 
-Grass emits multiple GS sprite passes, not merely one triangle mesh. The next transform must reproduce clipping, density/instance selection, both field transforms, packet state changes and persistent VU outputs. Native GPU work should consume these imported instance inputs and retain the existing ordered renderer dependencies. No speedup from this observation/import work is claimed.
+Grass emits multiple GS sprite passes, not merely one triangle mesh. A replacement must reproduce clipping, density selection, both field transforms, packet state changes and persistent VU outputs. Native GPU work should consume these imported source triangles and retain the existing ordered renderer dependencies. No speedup from this observation/import work is claimed.
+
+## Handwritten grass geometry and output comparison
+
+`PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_geometry.cpp` implements the observed algorithm using typed source vertices, colors, two matrices and grass constants. It transforms the triangle strip, applies restart and coarse clipping decisions, derives density from triangle area, vertex alpha and depth, generates scatter groups, and recursively subdivides dense triangles. It produces eight sprites in each of two fields per group, preserving the alternating endpoint order. Output contains exact XYZ fixed-point words, clipping words and colors; texture coordinates, GIF templates and GS state are deliberately outside this model's output.
+
+The arithmetic uses separate multiply/add steps, rounding toward zero, and x86 flush-to-zero/denormals-are-zero behavior. The model restores the caller's floating environment. Compile it with `/fp:strict` on MSVC; do not enable contraction or reassociation. Recursion, group count, finite inputs and supported formats are bounded. Unsupported input declines comparison rather than suppressing reference execution. Non-x86 floating behavior is not qualified.
+
+The first 68 accelerated fixtures matched **all 2,558 nonempty sprite groups**, bit for bit for geometry, clip words and colors, including count and order. The separate moving-camera capture at presenter labels 3140..3150 added **374 fixtures and 14,538 exact groups**. Its observer run also matched all 59 cumulative VU hashes, six terminal counters and eight player position/mode probes. Empty reference packets are counted separately, because they contain no geometry. These comparisons do not establish complete GIF or persistent VU-state equivalence.
+
+Reproduce the offline check using private captures and a build/output directory outside the checkout:
+
+```powershell
+python -B testing/inspect_native_seam_capture.py <prefix> --trace <trace.csv> --program-manifest <manifest.json>
+python -B testing/qualify_grass_geometry.py <prefix> --trace <trace.csv> --write-list <fresh-fixtures.txt>
+# In an x64 Visual Studio developer shell, with the working directory outside the checkout:
+cl /nologo /std:c++20 /O2 /EHsc /fp:strict /W4 <repo>/testing/native_grass_geometry.cpp <repo>/PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_geometry.cpp /Fe:native_grass_geometry.exe
+./native_grass_geometry.exe --self-test
+./native_grass_geometry.exe <fixtures.txt> <fresh-private-output-directory> 1
+python -B <repo>/testing/qualify_grass_geometry.py <prefix> --trace <trace.csv> --native-directory <private-output-directory>
+```
+
+The C++ driver checks floating-environment preservation and repeatability and writes private output for the independent captured-GIF comparison. Its optional repetition count measures thread cycles, not whole-game performance. Synthetic tests exercise strip restarts, signaling-NaN rejection, rounding restoration, unsupported packet layouts, field-dependent color rejection and deliberate geometry corruption. No captured game bytes are included in those tests.
+
+`PS2X_TF_GRASS_VERIFY=1` enables an opt-in live comparison for the supported USA executable. Before each recognized grass continuation it calculates native geometry; the accelerated VU code then runs unchanged. Its PATH1 packets are compared before worker buffering, and a mismatch stops the run visibly. The check supports the dynamic stage address and constant base, reports matched/declined calls and group counts, and retains accelerated execution for every unsupported case. Timing output includes diagnostic overhead and must not be interpreted as a gameplay speedup. Leave raw seam capture off when collecting these timings.
+
+Build 28 passed the complete accelerated route with live comparison in both deterministic and ordinary threaded modes. Each run recorded at least 37,888 matched calls and 1,482,439 exact sprite groups with zero declines and no mismatches. These are lower bounds from periodic progress lines: the runner uses `_Exit`, so an initial destructor-based final report was skipped. The deterministic run retained all 59 cumulative VU state hashes; both runs retained all six terminal counters and all eight player position/mode probes. This covers the private hub-to-Amazon route, walking and transformation, not all levels or a campaign playthrough.
+
+Build 29 reports explicitly after worker shutdown. Its threaded route passed with **38,071 matched grass calls, 1,490,434 exact sprite groups, 17,894 empty reference packets, zero declines and zero mismatches**. All six route counters and eight player position/mode probes remained unchanged. The math and packet comparison are unchanged from build 28. The normal launcher continues to use the previous accelerated build with comparison disabled.
 
 ## Implementation sequence
 
 1. Extend the observed grass boundary and exact first-list importer to more visible lists and static mesh families. Measure coverage instead of assuming every launch belongs to the last grass upload.
 2. Complete the output oracle with surrounding GS state and explicit submission identities. The existing fixtures contain mesh input, effective constants, VU entry/exit state and ordered VU GIF output. Add a runtime mesh cache keyed by content and source generation, invalidating it on guest writes or level unload.
-3. Implement a host transform for one family, preferably a simple static mesh if its dependency map is smaller than grass. Compare geometry packets and persistent VU state against the accelerated reference, including clipping, strip restarts, two-field transforms and transitions into uncovered programs. Keep fallback for every unqualified case.
+3. Extend the grass host model's geometry comparison to complete packet state and persistent VU state, including transitions into uncovered programs. Investigate a simpler static mesh family in parallel with this dependency analysis when useful. Keep fallback for every unqualified case.
 4. Replace only qualified whole batches with that host transform, still producing ordered GS primitives. This separates mesh/transform correctness from graphics backend work and can already remove interpreted VIF/VU overhead.
 5. Add native vertex buffers, constants and a vertex shader to the hardware renderer. Extend the ordered GS command stream with native draw packets and preserve current texture/CLUT, target/depth, alpha, scissor, multipass and VRAM dependency handling. Keep transformed vertices on the GPU; reuse the existing direct presentation path.
 
 `deps/hwgs/tf_hwgs.h` currently accepts GIF and VRAM operations plus presentation surfaces, not mesh draws. The PCSX2 integration is therefore a backend extension, not an existing API that merely needs enabling. Compare extending its draw/texture-cache path against a dedicated renderer only after the measured GS feature set is known. BT3's eventual separate renderer implements its own game's post-processing; importing it wholesale would not implement Transformers' shadows, foliage or reflections.
 
 In the pinned PCSX2 source, `GSRendererHW::Draw`/`DrawPrims` prepare texture-cache targets and a `GSHWDrawConfig` for `GSDevice::RenderHW`. That structure takes CPU `GSVertex` arrays containing already transformed GS XYZ/ST/RGBAQ values. GPU mesh transforms therefore need an explicit native vertex-buffer/constant path, plus a conservative way to supply bounds and texture dependencies to the existing renderer. Merely invoking `RenderHW` with the original mesh cannot provide that.
+
+GPU arithmetic is a separate qualification gate. Vulkan exposes device properties for [32-bit rounding and denormal controls](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceFloatControlsProperties.html), and SPIR-V provides [entry-point rounding modes](https://github.khronos.org/SPIRV-Registry/extensions/KHR/SPV_KHR_float_controls.html). A local `vulkaninfo` query on the RTX 3080 Laptop GPU with NVIDIA driver 617.42 reports `shaderRoundingModeRTZFloat32=true` but `shaderDenormFlushToZeroFloat32=false`. Toward-zero arithmetic is therefore a promising Vulkan prototype route; explicit handling or exclusion of denormal cases still needs measurement. These capabilities do not establish exact division/square-root behavior or a working shader. Direct3D's [floating-point rules](https://learn.microsoft.com/en-us/windows/win32/direct3d11/floating-point-rules) likewise are not evidence that translating the CPU model to HLSL will reproduce every intermediate bit. Keep the captured attribute oracle when testing any GPU implementation.
 
 Exit gates remain distinct: measured CPU savings, picture equivalence at base scale, actual high-resolution scene detail, preserved mixed native/emulated ordering and readbacks, and real-time gameplay equivalence at 60 Hz. Native geometry alone does not fix the outstanding simulation-timing differences.

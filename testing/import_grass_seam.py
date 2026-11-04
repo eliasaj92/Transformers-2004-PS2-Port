@@ -99,7 +99,8 @@ def import_list(snapshot):
             count = writes[itop * 4] & 0x7fff
             if writes[itop * 4 + 1] != 3 or not 2 <= count <= 28:
                 raise ValueError("Unqualified grass descriptor format or count")
-            # The shader consumes two bound positions, then count-2 instances.
+            # The first two vertices seed a triangle strip; each subsequent
+            # vertex completes a source triangle (subject to restart/cull bits).
             # Keep raw bits: an importer must not silently round asset floats.
             positions = [tuple(writes[(itop + 3 + n * 3) * 4 + lane] for lane in range(3))
                          for n in range(count)]
@@ -143,7 +144,7 @@ def qualify(prefix, trace_path):
                 matches[index].append(ticket)
     report = {"root": f"{snapshot.root:08x}", "stream_sha256": stream_hash,
               "chunks": [{"index": index, "itop": chunk["itop"],
-                          "descriptor_count": chunk["count"], "instances": chunk["count"] - 2,
+                          "descriptor_count": chunk["count"], "source_triangles": chunk["count"] - 2,
                           "compared_words": len(chunk["writes"]), "matching_vu_tickets": matches[index]}
                          for index, chunk in enumerate(chunks)],
               "all_chunks_have_exact_input_match": all(matches),

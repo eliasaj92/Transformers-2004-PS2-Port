@@ -63,6 +63,7 @@ void ps2PadStopHostRumble();        // ps2_pad.cpp, TEMP(transformers): playtest
 #include "ps2_playtest.h"           // TEMP(transformers): F12 problem marks, F11 fps overlay
 #include "ps2_objectives.h"
 #include "ps2_native_seam_probe.h"
+#include "native/tf_grass_oracle.h"
 #include "ps2_crash_reporter.h"     // crash report + minidump (generic, ported from SSX3)
 #include "ps2_sprint_probe.h"       // TEMP(transformers): qualification - PS2X_SPRINT_LOG=1 robot walk/run telemetry
 #include <sstream>
@@ -3391,6 +3392,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2x::trainer::install(*this, elfCrc32);
     if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2_objectives::install(*this, elfCrc32);
     if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2_native_seam_probe::install(*this, elfCrc32);
+    if (module.name == "SLUS_206.68" && elfCrc32Valid) tf_grass_oracle::install(elfCrc32);
     {
         // Profile selection follows executable validation and precedes guest execution.
         // configureIoPathsFromElf runs before the CRC and initially resolves the normal card.
@@ -6054,6 +6056,7 @@ void PS2Runtime::run()
         m_gs.setRasterBackend(nullptr);
     }
     PS2IopTransport::finishAudioCapture(this); // TEMP(transformers): joined producer; flush before _Exit
+    tf_grass_oracle::finish();
     ps2_perfscope::stop();                                // TEMP(transformers) qualification: final TOTAL line
     ps2_perfscope::setAudioStatsProvider(nullptr, nullptr); // before hostAudio is destroyed
 

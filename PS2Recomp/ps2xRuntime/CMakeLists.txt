@@ -399,6 +399,8 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_trainer.cpp
     src/lib/ps2_objectives.cpp
     src/lib/ps2_native_seam_probe.cpp
+    src/lib/native/tf_grass_geometry.cpp
+    src/lib/native/tf_grass_oracle.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
@@ -420,6 +422,14 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu1_lower.cpp
     src/lib/games_database.cpp
 )
+
+# Native grass geometry is compared against VU output, not a runtime bypass.
+# Preserve independently rounded operations and the caller's float environment.
+if(MSVC)
+    set_source_files_properties(src/lib/native/tf_grass_geometry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
+else()
+    set_source_files_properties(src/lib/native/tf_grass_geometry.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math;-frounding-math")
+endif()
 
 # GAME(transformers): isolated SIMD translation units; no runner/PCH changes.
 target_sources(ps2_runtime PRIVATE
