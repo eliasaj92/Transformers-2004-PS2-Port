@@ -1,6 +1,6 @@
 # Transformers native render seam investigation
 
-Status: whole-list capture, exact mesh-input import, complete native grass packet generation and accelerated state replay, November 2026. The model can be compared with accelerated VU output offline or during gameplay. It does not replace VU execution or execute geometry on the GPU. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Normal play retains the accelerated VU path.
+Status: whole-list capture, exact mesh-input import, complete native grass packet generation, accelerated state replay and an experimental GPU compute-to-draw interface, November 2026. The grass model can be compared with accelerated VU output offline or during gameplay. The opt-in GPU component has a synthetic ordered-draw check; live game batches still use accelerated VU execution. Direct GPU presentation and hardware resolution scaling are separate, already implemented features.
 
 ## Why this boundary
 
@@ -177,3 +177,36 @@ In the pinned PCSX2 source, `GSRendererHW::Draw`/`DrawPrims` prepare texture-cac
 GPU arithmetic is a separate qualification gate. Vulkan exposes device properties for [32-bit rounding and denormal controls](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceFloatControlsProperties.html), and SPIR-V provides [entry-point rounding modes](https://github.khronos.org/SPIRV-Registry/extensions/KHR/SPV_KHR_float_controls.html). A local `vulkaninfo` query on the RTX 3080 Laptop GPU with NVIDIA driver 617.42 reports `shaderRoundingModeRTZFloat32=true` but `shaderDenormFlushToZeroFloat32=false`. Toward-zero arithmetic is therefore a promising Vulkan prototype route; explicit handling or exclusion of denormal cases still needs measurement. These capabilities do not establish exact division/square-root behavior or a working shader. Direct3D's [floating-point rules](https://learn.microsoft.com/en-us/windows/win32/direct3d11/floating-point-rules) likewise are not evidence that translating the CPU model to HLSL will reproduce every intermediate bit. Keep the captured attribute oracle when testing any GPU implementation.
 
 Exit gates remain distinct: measured CPU savings, picture equivalence at base scale, actual high-resolution scene detail, preserved mixed native/emulated ordering and readbacks, and real-time gameplay equivalence at 60 Hz. Native geometry alone does not fix the outstanding simulation-timing differences.
+
+## D3D12 compute-to-draw component
+
+The opt-in [GPU geometry build](../../deps/hwgs/GPU_GEOMETRY.md) patches the
+pinned PCSX2 D3D12 device with `RenderHWFromGPU`. A compute shader can now
+write the renderer's vertex format and pass that buffer directly to its
+existing draw pipeline. Synthetic overlapping draws passed on the RTX 3080
+Laptop GPU, including return to the ordinary vertex upload path. The generated
+vertices remain on the GPU; a final image download is only a diagnostic check.
+
+This resolves the first backend interface question, not the full engine seam.
+Real batch inputs, exact transform arithmetic, GS draw configuration, texture
+dependencies and persistent VU state remain separate qualification steps.
+The experimental dual-transform shader consumes captured mesh inputs in an
+offline GPU diagnostic. No live VU work is suppressed by these components.
+
+The first real shader qualification covers the two-stage
+`DualTransform -> TransformClip_PCT` chain when the captured clip-state block
+is zero and the manager input layout is the supported three-qword format.
+Of 916 captured continuations with that program chain, 776 qualify; clipped
+and alternate-layout inputs remain outside the implementation. They contain
+18,568 source vertices, each transformed twice. All 37,136 resulting 32-byte
+`GSVertex` records match captured accelerated output exactly on the RTX 3080
+Laptop GPU. Ordinary shader arithmetic initially changed 850 packed XY words
+by at most one GS subpixel, plus STQ and depth values; explicit toward-zero
+arithmetic removed every mismatch in this set.
+
+This is a GPU arithmetic and output-format gate. The comparison packs captured
+GIF attributes into `GSVertex`; it does not compare surrounding GS state,
+strip restart indices, VU scratch/register results or cycles. The test uses a
+diagnostic GPU readback; production drawing must retain the output buffer on
+the GPU through submission and completion. No live offload or performance
+improvement is claimed from this offline result.

@@ -72,7 +72,19 @@ The first level-only experiments each covered 2,281 physics samples over fields 
 | Equal transforms plus existing fast EE checkpoints | BelowNormal | 41.72 | 23.15 / 31.73 ms |
 | Combined FMAC arithmetic checks in grass/reflection | BelowNormal | 42.41 | 22.82 / 30.06 ms |
 | Combined FMAC arithmetic checks in grass/reflection | Normal | 41.22 | 23.27 / 31.81 ms |
+| Full static-VU profile-guided optimization | Normal | 47.18 | 20.10 / 30.20 ms |
 
 These are unpaired desktop measurements, affected by other activity and power/thermal conditions. None demonstrates a speed improvement, so the arithmetic candidates and fast checkpoint setting remain experimental. The combined-check candidate matched 5,374 recorded accelerated calls exactly (registers, data, code, cycles and ordered packets), with no interpreter fallback or pending transfer. Its synthetic boundary check also passed 50,000 vector inputs across 72 operation, lane-mask and normalization cases. Correctness alone did not make it faster.
 
 A separate profile of the enhanced matrix build attributed 89.4% of VU worker time to VU execution and 8.5% to VIF work; the VU thread consumed approximately 97% of one CPU core. Grass and reflection remained the largest sampled regions. The GS submission thread mostly waited, which does not measure GPU utilization. That profile's final wait exceeded its script timeout; the valid 20-second sample preceded that test-script failure, and the extended wait now has an explicit longer timeout. No original build was launched to investigate it.
+
+The final CPU experiment compiled all 580 verified static-VU translation units
+with MSVC `/GL`, trained `/FASTGENPROFILE:COUNTER64` on the enhanced level route,
+merged the completed profile, then linked `/LTCG /USEPROFILE`. Other runtime
+objects and precise AVX2 arithmetic remained unchanged. The instrumented run
+passed but supplies no speed measurement. The optimized run also passed,
+including one physics sample at every field 2697..4977: 48.323659 seconds for
+2,280 intervals, or 47.181858 updates/s. Compiler/linker jobs had finished before
+the run. This single desktop result is not a paired speedup claim, a distinct
+rendered-frame count, or 60 fps. The private prototype has not replaced the
+normal launcher. Subsequent performance work focuses on GPU geometry batches.

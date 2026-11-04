@@ -14,6 +14,14 @@ The vendored `shim/EmuShims.cpp` identifies Transformers/SLUS-20668 instead of K
 The additional transfer/readback and presentation adapter lives in `deps/hwgs`,
 which selects the pinned PCSX2 GameIndex's SLUS-20668 graphics fixes.
 
+The opt-in `deps/hwgs/pcsx2-gpu-vertices.patch` modifies that pinned revision's
+`pcsx2/GS/Renderers/DX12/GSDevice12.h` and `.cpp`. It adds a GPU vertex-buffer
+entry point to the existing draw path; the PCSX2 Developers' original notices
+and GPL-3.0-or-later license remain applicable. The patch does not replace
+PCSX2's render-state, shader, target or texture implementations. The new
+compute shaders and diagnostic drivers in `deps/hwgs` are independently
+authored GPL-3.0-or-later code, with private captured data excluded.
+
 Release-preparation research credits include rac1-native-game (MIT) and ps2-port-engine (MIT); see CREDITS.md. This task independently authored documentation and orchestration, rather than copying their source. If future changes import MIT source, retain the exact upstream copyright and permission notice for the imported revision. A research acknowledgement is not a substitute for a copied-source license notice.
 
 Their unmodified license texts are preserved as reference snapshots in `NOTICE/licenses/rac1_native/LICENSE` (Copyright 2026 Daino Selvatico) and `NOTICE/licenses/ps2_port_engine/LICENSE` (Copyright 2026 Daniel Gomes Vieira), copied from the existing offline research checkouts. These snapshots do not imply their implementations are bundled. License applicability for imported files still requires file-level review.

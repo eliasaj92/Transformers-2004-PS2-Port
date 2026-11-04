@@ -1,0 +1,79 @@
+diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
+index cf918b3..58ba681 100644
+--- a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
++++ b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
+@@ -4859,9 +4859,46 @@ void GSDevice12::UpdateHWPipelineSelector(GSHWDrawConfig& config)
+ 	m_pipeline_selector.ds_as_rt = m_ds_as_rt != nullptr && !config.ps.HasDepthROV();
+ }
+ 
++bool GSDevice12::RenderHWFromGPU(GSHWDrawConfig& config, const D3D12_VERTEX_BUFFER_VIEW& vertices)
++{
++	// Expanded primitives read a different vertex stream in the vertex shader.
++	// Start with ordinary indexed triangles; do not silently bind the CPU stream.
++	if (m_native_geometry_vertices.BufferLocation || !vertices.BufferLocation ||
++		(vertices.BufferLocation & 31u) || vertices.StrideInBytes != sizeof(GSVertex) ||
++		!config.nverts || config.nverts > vertices.SizeInBytes / sizeof(GSVertex) ||
++		!config.indices || !config.nindices || config.nindices % 3u ||
++		config.topology != GSHWDrawConfig::Topology::Triangle ||
++		config.vs.expand != GSHWDrawConfig::VSExpand::None || config.line_expand)
++		return false;
++	for (u32 i = 0; i < config.nindices; i++)
++	{
++		if (config.indices[i] >= config.nverts)
++			return false;
++	}
++
++	struct ResetNativeInput
++	{
++		D3D12_VERTEX_BUFFER_VIEW& view;
++		~ResetNativeInput() { view = {}; }
++	} reset{m_native_geometry_vertices};
++	m_native_geometry_vertices = vertices;
++	RenderHW(config);
++	return true;
++}
++
+ void GSDevice12::UploadHWDrawVerticesAndIndices(GSHWDrawConfig& config)
+ {
+-	IASetVertexBuffer(config.verts, sizeof(GSVertex), config.nverts);
++	if (m_native_geometry_vertices.BufferLocation)
++	{
++		m_vertex.start = 0;
++		m_vertex.count = config.nverts;
++		SetVertexBuffer(m_native_geometry_vertices.BufferLocation,
++			m_native_geometry_vertices.SizeInBytes, m_native_geometry_vertices.StrideInBytes);
++	}
++	else
++	{
++		IASetVertexBuffer(config.verts, sizeof(GSVertex), config.nverts);
++	}
+ 	
+ 	if (config.vs.UseFixedExpandIndexBuffer())
+ 	{
+diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.h b/pcsx2/GS/Renderers/DX12/GSDevice12.h
+index 3eeab02..61b9b3e 100644
+--- a/pcsx2/GS/Renderers/DX12/GSDevice12.h
++++ b/pcsx2/GS/Renderers/DX12/GSDevice12.h
+@@ -603,6 +603,14 @@ public:
+ 	void UploadHWDrawVerticesAndIndices(GSHWDrawConfig& config);
+ 
+ public:
++	/// Transformers native geometry: consume GPU-produced GSVertex records without
++	/// uploading CPU vertices. Call on the GS thread after a UAV/vertex-input barrier.
++	/// The caller owns the buffer through the last command-list fence used by this draw.
++	/// True means accepted for submission, not GPU completion. Unsupported expansion
++	/// modes return false before changing draw state; the caller retains its fallback.
++	/// Complex alpha/feedback configurations still need game-level testing.
++	bool RenderHWFromGPU(GSHWDrawConfig& config, const D3D12_VERTEX_BUFFER_VIEW& vertices);
++
+ 	/// Ends any render pass, executes the command buffer, and invalidates cached state.
+ 	void ExecuteCommandList(bool wait_for_completion);
+ 	void ExecuteCommandList(bool wait_for_completion, const char* reason, ...);
+@@ -710,6 +718,7 @@ private:
+ 	u32 m_dirty_flags = 0;
+ 
+ 	// input assembly
++	D3D12_VERTEX_BUFFER_VIEW m_native_geometry_vertices = {};
+ 	D3D12_VERTEX_BUFFER_VIEW m_vertex_buffer = {};
+ 	D3D12_INDEX_BUFFER_VIEW m_index_buffer = {};
+ 	D3D12_PRIMITIVE_TOPOLOGY m_primitive_topology = {};

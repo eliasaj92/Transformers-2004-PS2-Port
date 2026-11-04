@@ -1,0 +1,2 @@
+# Unified patch context deliberately prefixes upstream tabs and blank lines with a space.
+deps/hwgs/pcsx2-gpu-vertices.patch whitespace=-space-before-tab,-blank-at-eol

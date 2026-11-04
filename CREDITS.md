@@ -4,6 +4,12 @@
   revision `aa5d3ae6ab5bf57c85794fe728a36b1d9882ba25`). PCSX2 contributors:
   hardware renderers and GS memory implementation used by the optional HWGS backend.
   See `NOTICE/THIRD_PARTY.md` for licenses and pinned external inputs.
+- PCSX2 Developers: the experimental GPU vertex-buffer patch adapts
+  `GSDevice12.h/.cpp` at revision `646df006a4688063e56c0826e7ea4b8bb0c112c4`.
+  Original copyright and GPL-3.0-or-later notices remain in the external source.
+- z3xox / BT3-Recomp: the [native render seam investigation](https://github.com/z3xox/BT3-Recomp/blob/main/docs/NATIVE-RENDER-SEAM.md)
+  informed the whole-batch boundary and captured-output comparison strategy.
+  This is research attribution; its game-specific shaders and data were not copied.
 
 ## Release-preparation research acknowledgements
 

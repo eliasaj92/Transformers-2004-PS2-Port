@@ -45,7 +45,7 @@ def scan(root, policy_root=None):
         screenshot = (len(rel.parts) == 3 and rel.parts[:2] == ('docs', 'images')
                       and p.suffix == '.png' and rel.as_posix() in approved_images)
         source_manifest=rel.as_posix()=='MANIFEST.sha256'
-        special=name.startswith(('license','copying','notice','authors','changelog','readme','cmakelists','makefile')) or name in {'.gitignore','.gitmodules','.clang-format','.editorconfig'} or rel.as_posix() == 'tools/git-hooks/pre-commit' or source_manifest
+        special=name.startswith(('license','copying','notice','authors','changelog','readme','cmakelists','makefile')) or name in {'.gitignore','.gitmodules','.gitattributes','.clang-format','.editorconfig'} or rel.as_posix() == 'tools/git-hooks/pre-commit' or source_manifest
         if p.suffix not in ALLOWED and not special and not screenshot: errors.append(f'{rel}: unreviewed file type {p.suffix}')
         data=p.read_bytes()
         if source_manifest and not re.fullmatch(rb'(?:[0-9a-f]{64}  [^\r\n\x00]+\r?\n)+',data):
