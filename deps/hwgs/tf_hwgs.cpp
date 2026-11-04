@@ -87,6 +87,8 @@ int tf_gs_open(int scale, int fxaa, const char* resources, char* error, uint32_t
         }
         config.renderer=KzgsRenderer::D3D12;
     }
+    if (const char* adapter = std::getenv("PS2X_HWGS_ADAPTER"); adapter && *adapter)
+        config.adapter = adapter;
     config.upscale = std::clamp(scale, 1, 8);
     config.fxaa = fxaa != 0;
     config.vsync = false; // The existing Transformers presenter owns pacing and the window.

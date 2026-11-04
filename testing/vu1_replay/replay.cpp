@@ -20,6 +20,11 @@
 bool ps2Vu1StaticPrepare(const uint8_t*, uint32_t, const PS2Memory*, uint64_t, uint32_t);
 bool ps2Vu1StaticRun(int, void*, bool, uint8_t*, uint8_t*, GS&, PS2Memory*, uint32_t, uint32_t, uint32_t, uint32_t, void*);
 uint64_t ps2Vu1StaticFallbackCalls();
+#ifdef TF_REPLAY_GRASS_TAIL
+void grassReplayInitialize();
+void grassReplayFinish();
+bool grassTailCapture(uint32_t, const uint8_t*, uint32_t, bool, bool);
+#endif
 namespace fs = std::filesystem;
 namespace {
 std::vector<uint8_t> packets;
@@ -104,6 +109,9 @@ void GS::processGIFPacket(const uint8_t*, uint32_t) {
     throw std::runtime_error("Unexpected unframed GS output");
 }
 void PS2Memory::submitGifPacket(GifPathId path, const uint8_t* bytes, uint32_t count, bool drain, bool direct) {
+#ifdef TF_REPLAY_GRASS_TAIL
+    if (grassTailCapture(uint32_t(path), bytes, count, drain, direct)) return;
+#endif
     if (packets.size()+count+16 > 64*1024*1024) throw std::runtime_error("Captured replay exceeds 64 MiB");
     const uint32_t metadata[] = {uint32_t(path), count, uint32_t(drain), uint32_t(direct)};
     const auto* prefix = reinterpret_cast<const uint8_t*>(metadata);
@@ -115,6 +123,9 @@ void PS2Memory::submitGifPacket(GifPathId path, const uint8_t* bytes, uint32_t c
 
 int main(int argc, char** argv) {
     try {
+#ifdef TF_REPLAY_GRASS_TAIL
+        grassReplayInitialize();
+#endif
         if (argc != 3 && argc != 4 && argc != 8) throw std::runtime_error("usage: tf_vu1_replay <private-pre-file-list> <fresh-report.csv> [restore-grass-vf-mask-hex | --gpu-dual selection inputs batches capture]");
         std::unique_ptr<DualReplay> dual;
         if (argc == 8) {
@@ -249,6 +260,9 @@ int main(int argc, char** argv) {
         }
         if (!total) throw std::runtime_error("Empty fixture list");
         if (dual && !failures) dual->finish();
+#ifdef TF_REPLAY_GRASS_TAIL
+        if (!failures) grassReplayFinish();
+#endif
         std::printf("REPLAY final mode=%s fixtures=%zu failures=%zu packet_bytes=%llu fallback=0 pending=0 restore_mask=%08x restored_calls=%zu differing_states=%zu gpu_dual_calls=%zu\n",
                     dual ? "gpu-dual-bypass" : restoreMask ? "register-experiment" : "exact", total, failures,
                     static_cast<unsigned long long>(bytes), restoreMask, restored, differentState, dual ? dual->replaced() : 0);

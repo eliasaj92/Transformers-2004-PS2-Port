@@ -443,3 +443,24 @@ regions, making grass a concrete next GPU geometry target. Its persistent
 VU-state dependencies remain a required part of that replacement.
 
 See [the grouped GPU contract and diagnostics](../../deps/hwgs/GPU_GEOMETRY.md#ordered-gpu-dispatch-groups).
+
+## Grass emission boundary
+
+The grass candidate now offloads billboard endpoint projection, perspective
+division, clipping flags and color interpolation in an offline GPU shader.
+All 17,096 captured packets match exactly. An accelerated replay then skips
+two middle emission iterations, executes the last iteration to retain VU
+state, and uses the actual GPU geometry instead of running the full CPU loop.
+Both capture sets pass complete state, memory and ordered packet checks,
+including 14,448 overlapping graphics transfers.
+
+The surviving state dependency is the preceding pair's second-field clipping
+flags, retained in VF7.w. A small calculation preserves those flags while the
+existing pipeline calendar progresses the earlier transfer. This is narrower
+than replacing the whole grass program and avoids assuming its registers are
+dead. It is still an offline experiment with diagnostic GPU readback. The
+existing native renderer accepts indexed triangles; grass also requires direct
+GPU sprite consumption and deferred memory/fallback handling before this
+shortcut can be enabled live.
+
+See the [grass contract and reproducible diagnostics](../../deps/hwgs/GPU_GEOMETRY.md#grass-gpu-emission-and-retained-state).

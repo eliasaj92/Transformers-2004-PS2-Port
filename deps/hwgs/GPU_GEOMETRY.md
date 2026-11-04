@@ -581,3 +581,71 @@ these desktop runs are not a controlled estimate of the frame-time improvement.
 Runtime selection, CPU-tail and deferred-memory counters match that preceding
 run exactly. This remains below the target and does not establish distinct
 rendered 60 fps or whole-game reliability.
+
+## Grass GPU emission and retained state
+
+`shaders/grass_emit.hlsl` computes eight grass sprites for both fields from a
+256-byte emitter record: clip scale/offset, billboard offset, two base/edge
+triples, a color base/edge triple and four scatter weights. Strip traversal,
+subdivision and packet allocation remain accelerated CPU work. The shader
+emits 640 bytes of raw XYZF2 endpoints and colors per packet. It shares the
+terrain shader's RTZ/denormal/reciprocal helpers in `vu_math.hlsl`; separate
+multiply/add operations preserve the PS2 order.
+
+The RTX 3080 diagnostic matches **17,096 packets, 136,768 sprites and 547,072
+endpoints**, including raw colors and clipping flags, with zero differing
+words. The existing 776-batch dual-transform arithmetic check still matches
+all 37,136 native vertices and raw GIF attributes after sharing the helpers.
+`PS2X_HWGS_ADAPTER` optionally selects an adapter by name for these surfaceless
+checks; it does not change the default adapter choice.
+
+The accelerated grass loop computes three pairs after a first-pair prologue.
+A qualified boundary experiment skips the two middle iterations (118 guest
+cycles) and executes the last iteration and epilogue normally. It reconstructs
+only the previous pair's second-field clipping flags, which survive in VF7.w.
+Advancing the existing pipeline calendar preserves an earlier XGKICK; merely
+incrementing a cycle counter would not suffice. The experiment checks the
+whole resident grass program fingerprint, saturated arithmetic sticky flags,
+loop counter, control state and cycle budget.
+
+State-only replay first compares the shortened path with the complete
+accelerated loop, including packets emitted during an overlapping transfer.
+GPU replay then removes that complete-loop reference: the two skipped
+iterations never execute, and actual GPU output fills their packet geometry
+before XGKICK. Each emitter input must match the original GPU upload exactly.
+The driver binds that output to its input and diagnostic report with SHA-256.
+
+Both the 5,000-call broad capture and the 374-call moving-camera capture pass
+with complete semantic VU state, memory, code, guest cycles and ordered GIF
+bytes intact: **17,096 shortened loops, 34,192 skipped iterations, 14,448
+overlapping transfers and 29,915,408 packet bytes**. No interpreter oracle or
+original game build is used. This is offline qualification: GPU results are
+downloaded for replay and are not yet a live grass rendering path or an FPS
+improvement. Direct GPU sprite consumption, retained guest-memory ownership
+and renderer fallback must be completed before enabling the shortcut in-game.
+
+Build the diagnostic with the authenticated private package. The chain wrapper
+is generated only in the private build directory; game-derived C++ is never
+copied into this checkout. It instruments only the qualified ordinary grass
+program, not another shader with a similar loop layout.
+
+```powershell
+cmake -S testing/vu1_replay -B $private/grass-check -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release -DPACKAGE_DIR=$private/vu1-static-package `
+  -DTF_REPLAY_GRASS_TAIL=ON
+cmake --build $private/grass-check --parallel 2
+$env:PS2X_GRASS_CAPTURE = "$private/grass-capture"
+& $private/grass-check/tf_grass_tail.exe $private/all-captures.txt $private/grass-state.csv
+Remove-Item Env:PS2X_GRASS_CAPTURE
+$env:PS2X_HWGS_ADAPTER = 'NVIDIA GeForce RTX 3080 Laptop GPU'
+python -B testing/test_gpu_grass_emit.py --prefix $private/grass-capture `
+  --dll $private/gpu-build/tf_hwgs.dll --report $private/grass-gpu.json --capture $private/grass-gpu.bin
+python -B testing/replay_gpu_grass.py --prefix $private/grass-capture `
+  --gpu-report $private/grass-gpu.json --gpu-capture $private/grass-gpu.bin `
+  --fixtures $private/all-captures.txt --runner $private/grass-check/tf_grass_tail.exe `
+  --report $private/grass-replay.json
+```
+
+Use fresh private report/capture paths. The last driver writes the detailed
+CSV and log next to its JSON report, and fails if any GPU result remains unused
+or any state, memory, control or packet comparison differs.

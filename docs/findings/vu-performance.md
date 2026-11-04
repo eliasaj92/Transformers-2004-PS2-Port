@@ -126,3 +126,14 @@ route at 57.3835 physics updates/s and 57.1753 direct-frame handoffs/s. It issue
 [GPU group contract](../../deps/hwgs/GPU_GEOMETRY.md#ordered-gpu-dispatch-groups)
 for correctness checks and limitations. Grass remains the next geometry lead;
 distinct rendered 60 fps is not yet established.
+
+The following grass investigation now has an exact GPU emitter and a qualified
+shortened CPU loop in accelerated offline replay. It removes two of sr729's
+three iterations while retaining the last iteration, the prior pair's live
+clipping flags and pending graphics transfers. Across the broad and moving
+captures, 17,096 loops skip 34,192 iterations and consume actual GPU geometry
+with complete state/memory/packet equality. The shader checks 547,072 endpoints
+plus colors and clipping flags exactly. These results do not update the live
+frame-rate measurement above: direct GPU sprite drawing and guest-memory
+ownership are still required. See the
+[grass emission contract](../../deps/hwgs/GPU_GEOMETRY.md#grass-gpu-emission-and-retained-state).
