@@ -186,3 +186,41 @@ GIF handling for 3.31%, and texture-cache invalidation plus its helper for 5.70%
 Driver and D3D12 functions are also prominent. The next optimization should
 reduce grass draw preparation/submission work while preserving state and order.
 Adding further VU shortcuts alone does not address this measured bottleneck.
+
+## Profile after eight-packet merged draws
+
+Merging the actual sprite draws raises the measured level rate to 48.7675
+physics updates/s. A separate 20-second instrumented run collects 10,094
+samples per selected thread, with renderer symbols again matched to the loaded
+DLL's exact code bytes. It is not used for frame-rate claims.
+
+VU waiting drops to 14.42% and EE waiting to 11.37%. The active renderer spends
+6.95% in `GSRendererHW::Draw`, 9.69% in grass bounds and its principal helper,
+3.24% in packed grass GIF handling, and 1.86% in grass framing checks. Single
+object waits account for 11.53% of that thread. The runtime GS submission
+thread still mostly waits (90.41%).
+
+A bounded bounds cache hits 50.67% of queries in the following level experiment,
+but measures 48.6903 updates/s, so no speed gain is established. Wider grass
+batches subsequently reduce dispatch and draw counts enough to reach 57.6059
+updates/s and 56.7831 direct handoffs/s. These results remain below sustained
+true 60 fps. Full timings and correctness evidence are recorded in the
+[merged grass contract](../../deps/hwgs/GPU_GEOMETRY.md#merged-grass-draws-and-wider-batches).
+
+## Profile after wide grass batches
+
+The final 64-packet configuration passes another instrumented Amazon run,
+collecting 10,083 samples per selected thread over 20 seconds. Its map again
+matches the loaded renderer's exact code section. Hardware-renderer waiting is
+now 18.83%, while VU waiting is 6.10%; the runtime GS submission thread waits
+94.98%. The renderer samples include `Draw` at 7.54%, bounds plus its principal
+helper at 6.09%, and the cache lookup at 1.83%.
+
+The busiest EE symbols include `sub_0025DE90` (7.34%), full scheduler checkpoints
+(6.05%) and `memmove` (5.92%). The first is the already-identified game frame-wait
+routine, not a newly discovered geometry calculation. VU samples include
+`sr729` at 4.71%, `sr752` at 4.15%, pending-pipeline commits at 3.35%, `sr799` at
+3.25% and `aotFast` at 3.14%. These are the next timing/remaining-VU candidates;
+the profile does not prove that moving another individual operation to the GPU
+will improve frame rate. Enabling the existing scheduler fast path separately
+measures 56.8230 updates/s and provides no demonstrated improvement.

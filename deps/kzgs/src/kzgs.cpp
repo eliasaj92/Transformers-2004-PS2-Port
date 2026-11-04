@@ -805,7 +805,8 @@ namespace
 					const u64 published = s_write_pos.load(std::memory_order_acquire);
 					u64 next = r;
 					uint32_t count = 0;
-					while (count < views.size() && next < published)
+					const uint32_t maximum = std::clamp(hdr.b, 1u, kzgs::MaxPacketGroup);
+					while (count < maximum && next < published)
 					{
 						const auto* header = reinterpret_cast<const CmdHeader*>(s_ring + next % RING_SIZE);
 						if (header->cmd != Cmd::PacketGroupCommand)
@@ -813,7 +814,7 @@ namespace
 						const auto* data = reinterpret_cast<const u8*>(header) + sizeof(CmdHeader);
 						kzgs::PacketGroupCommand candidate;
 						std::memcpy(&candidate, data, sizeof(candidate));
-						if (candidate != command)
+						if (candidate != command || header->b != hdr.b)
 							break;
 						views[count++] = {data + 16, header->a};
 						next += sizeof(CmdHeader) + header->size;
@@ -1118,16 +1119,17 @@ bool kzgs::QueuePacketCommand(PacketCommand command, const void* payload, uint32
 	return true;
 }
 
-bool kzgs::QueuePacketGroupCommand(PacketGroupCommand command, const void* payload, uint32_t bytes)
+bool kzgs::QueuePacketGroupCommand(PacketGroupCommand command, const void* payload, uint32_t bytes, uint32_t maximum)
 {
-	if (!command || !payload || !bytes || bytes > MAX_TRANSFER_CHUNK || !s_open.load(std::memory_order_relaxed))
+	if (!command || !payload || !bytes || bytes > MAX_TRANSFER_CHUNK || !maximum || maximum > MaxPacketGroup ||
+		!s_open.load(std::memory_order_relaxed))
 		return false;
 	std::lock_guard lock(s_produce_lock);
 	u8* slot = Reserve(16 + bytes);
 	std::memset(slot + sizeof(CmdHeader), 0, 16);
 	std::memcpy(slot + sizeof(CmdHeader), &command, sizeof(command));
 	std::memcpy(slot + sizeof(CmdHeader) + 16, payload, bytes);
-	Publish(slot, Cmd::PacketGroupCommand, 16 + bytes, bytes, 0);
+	Publish(slot, Cmd::PacketGroupCommand, 16 + bytes, bytes, maximum);
 	return true;
 }
 

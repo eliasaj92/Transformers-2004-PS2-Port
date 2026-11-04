@@ -77,7 +77,7 @@ struct DualGeometry::Pipeline
         }
         parameters[srvs].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
         parameters[srvs + 1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        parameters[srvs + 1].Constants.Num32BitValues = 1;
+        parameters[srvs + 1].Constants.Num32BitValues = grass ? 2 : 1;
         D3D12_ROOT_SIGNATURE_DESC root{};
         root.NumParameters = srvs + 2;
         root.pParameters = parameters;
@@ -359,7 +359,8 @@ DualGeometry::Batch DualGeometry::prepareGroup(const Mesh *meshes, const void *c
     return result;
 }
 
-DualGeometry::Batch DualGeometry::prepareGrass(const void *inputs, uint32_t count, const GrassRasterState *raster)
+DualGeometry::Batch DualGeometry::prepareGrass(const void *inputs, uint32_t count, const GrassRasterState *raster,
+                                               bool fieldMajor)
 {
     if (!inputs || !count || count > 65536)
         return {};
@@ -382,7 +383,7 @@ DualGeometry::Batch DualGeometry::prepareGrass(const void *inputs, uint32_t coun
     }
     m_stats.constantUploadBytes += uint64_t(count) * 384;
     const auto address = page->upload->GetGPUVirtualAddress();
-    return dispatch(std::move(page), address, count * 16, 0, nullptr, 0, true);
+    return dispatch(std::move(page), address, count * 16, 0, nullptr, 0, true, fieldMajor);
 }
 
 bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batches, uint32_t firstChunk,
@@ -413,7 +414,7 @@ bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batc
 
 DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices,
                                            uint32_t constantsOffset, const uint64_t *groupSources, uint32_t groups,
-                                           bool grass)
+                                           bool grass, bool fieldMajor)
 {
     m_device.EndRenderPass();
     auto *command = m_device.GetCommandList().list4.get();
@@ -440,6 +441,8 @@ DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t 
     const uint32_t count = grass ? vertices / 16 : (groups ? groups : vertices);
     command->SetComputeRootUnorderedAccessView(outputSlot, page->output->GetGPUVirtualAddress());
     command->SetComputeRoot32BitConstant(outputSlot + 1, count, 0);
+    if (grass)
+        command->SetComputeRoot32BitConstant(outputSlot + 1, fieldMajor, 1);
     command->Dispatch(((grass ? count * 8 : (groups ? groups * 32 : vertices)) + 63) / 64, 1, 1);
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     barrier.Transition.StateAfter =

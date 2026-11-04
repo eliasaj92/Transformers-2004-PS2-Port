@@ -504,3 +504,25 @@ grass draw submissions; sharing compute alone leaves millions of GS draws.
 The grouped image comparisons and a bounded 32-image camera-turn capture pass,
 but do not establish true 60 fps. See the [grouping contract, live measurements
 and capture procedure](../../deps/hwgs/GPU_GEOMETRY.md#grouped-grass-dispatches-and-live-results).
+
+## Merged grass draws
+
+Grass now has a guarded field-major GPU layout and larger native sprite draws.
+Matching state, disjoint field pixels and texture/depth/CLUT/mipmap nonaliasing
+permit combining the draws while preserving per-field primitive order. Up to
+64 already-queued grass packets can share a dispatch; rejected groups split in
+order, and other command types remain boundaries. Source-derived bounds may be
+cached with full input-byte comparison.
+
+The accelerated Amazon route improves from the saved 38.9721 updates/s with
+compute-only grouping to 48.7675 with eight-packet merged draws and 57.6059 with
+wide batches. Direct handoffs in the wide run are 56.7831/s; 33 published frames
+are skipped by host acquisition. This is not sustained true 60 fps and is
+roughly equal to the saved mesh-only enhanced result. Cache alone showed no
+measurable improvement. Grass remains opt-in.
+
+The final wide path passes queue ownership/order, 36,267 address-range layouts,
+negative feedback/state guards, textured native/fallback comparisons and the
+triangle regression. All 117,178,368 pixels in a 32-image live capture match the
+saved enhanced camera-turn output exactly. No original or older game build is
+run. See [the contract, measurements and commands](../../deps/hwgs/GPU_GEOMETRY.md#merged-grass-draws-and-wider-batches).

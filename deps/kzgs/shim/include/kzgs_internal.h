@@ -22,12 +22,13 @@ namespace kzgs
 	using PacketCommand = void (*)(const uint8_t*, uint32_t);
 	bool QueuePacketCommand(PacketCommand command, const void* payload, uint32_t bytes);
 	struct PacketView { const uint8_t* data; uint32_t bytes; };
-	inline constexpr uint32_t MaxPacketGroup = 8;
+	inline constexpr uint32_t MaxPacketGroup = 64;
 	using PacketGroupCommand = void (*)(const PacketView*, uint32_t);
-	// Groups only already-published adjacent commands with the same callback.
+	// Groups only already-published adjacent commands with the same callback and
+	// maximum (1..MaxPacketGroup). Existing callers retain the eight-packet cap.
 	// No waiting for a larger group, no reordering across another command, and
 	// payloads remain owned by the ring until the whole callback returns.
-	bool QueuePacketGroupCommand(PacketGroupCommand command, const void* payload, uint32_t bytes);
+	bool QueuePacketGroupCommand(PacketGroupCommand command, const void* payload, uint32_t bytes, uint32_t maximum = 8);
 	// Only for a callback already executing on the GS thread.
 	void ExecuteGIFOnGSThread(uint32_t path, const uint8_t* data, uint32_t bytes);
 

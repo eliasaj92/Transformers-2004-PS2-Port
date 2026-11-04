@@ -129,10 +129,16 @@ struct Live
         std::fprintf(stderr,
                      "[gpu-grass:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
                      "declined_fields=%llu bounds_declined=%llu output_declined=%llu dispatches=%llu batches=%llu "
-                     "grouped_dispatches=%llu grouped_packets=%llu grouped_draws=%llu group_declined=%llu\n",
+                     "grouped_dispatches=%llu grouped_packets=%llu grouped_draws=%llu group_declined=%llu "
+                     "merged_groups=%llu merged_packets=%llu merged_draws=%llu merge_declined=%llu "
+                     "merge_state_declined=%llu merge_feedback_declined=%llu merge_bounds_declined=%llu "
+                     "bounds_queries=%llu bounds_cache_hits=%llu bounds_cache_rejected_hits=%llu largest_merge=%llu\n",
                      grass.packets, grass.gpuDraws, grass.materializations, grass.declinedFields, grass.boundsDeclined,
                      grass.outputDeclined, s.grassDispatches, s.grassBatches, grass.groupedDispatches,
-                     grass.groupedPackets, grass.groupedDraws, grass.groupDeclined);
+                     grass.groupedPackets, grass.groupedDraws, grass.groupDeclined, grass.mergedGroups,
+                     grass.mergedPackets, grass.mergedDraws, grass.mergeDeclined, grass.mergeStateDeclined,
+                     grass.mergeFeedbackDeclined, grass.mergeBoundsDeclined, grass.boundsQueries, grass.boundsCacheHits,
+                     grass.boundsCacheRejectedHits, grass.largestMerge);
     }
 };
 // Accessed/destroyed only on the owning GS thread, before device shutdown.
@@ -363,7 +369,8 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
         for (unsigned i = 0; i < count; ++i)
             execute(views[i].data, views[i].bytes);
     };
-    if (count < 2 || count > kzgs::MaxPacketGroup || !g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12 ||
+    constexpr unsigned maxComputeGroup = 8;
+    if (count < 2 || count > maxComputeGroup || !g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12 ||
         g_gs_renderer->m_path[0].nloop)
     {
         ordinary();
@@ -397,14 +404,19 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
         live = std::make_unique<Live>(*GSDevice12::GetInstance());
     if (grass)
     {
-        static_assert(kzgs::MaxPacketGroup <= 8);
-        std::array<tf_gpu::GrassPacketView, kzgs::MaxPacketGroup> packets;
-        std::array<tf_gpu::PreparedGrass, kzgs::MaxPacketGroup> prepared;
+        std::array<tf_gpu::GrassPacketView, maxComputeGroup> packets;
+        std::array<tf_gpu::PreparedGrass, maxComputeGroup> prepared;
         for (unsigned i = 0; i < count; ++i)
         {
             const auto &payload = *reinterpret_cast<const Payload *>(views[i].data);
             packets[i] = {&payload.geometry, views[i].data + sizeof(Payload), payload.bytes};
         }
+        static const bool merge = [] {
+            const char *option = std::getenv("PS2X_TF_GPU_GRASS_MERGE");
+            return option && !std::strcmp(option, "1");
+        }();
+        if (merge && tf_gpu::drawGrassGroup(live->pool, packets.data(), count, live->grass))
+            return;
         if (!tf_gpu::prepareGrassGroup(live->pool, packets.data(), count, prepared.data(), live->grass))
         {
             ordinary();
@@ -416,9 +428,9 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
     }
     ++live->packetGroups;
     live->groupPackets += count;
-    std::array<Prepared, kzgs::MaxPacketGroup> prepared;
-    std::array<tf_gpu::DualGeometry::Mesh, kzgs::MaxPacketGroup> meshes;
-    std::array<uint8_t, kzgs::MaxPacketGroup * 144> constants;
+    std::array<Prepared, maxComputeGroup> prepared;
+    std::array<tf_gpu::DualGeometry::Mesh, maxComputeGroup> meshes;
+    std::array<uint8_t, maxComputeGroup * 144> constants;
     uint32_t first = 0;
     for (unsigned i = 0; i < count; ++i)
     {
@@ -445,6 +457,44 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
         executePacket(views[i].data, views[i].bytes, &prepared[i]);
     }
 }
+void executeGrassWide(const kzgs::PacketView *views, uint32_t count)
+{
+    static_assert(tf_gpu::MaxMergedGrassPackets <= kzgs::MaxPacketGroup);
+    if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12)
+    {
+        for (unsigned i = 0; i < count; ++i)
+            execute(views[i].data, views[i].bytes);
+        return;
+    }
+    if (count <= 8)
+    {
+        executeGroup(views, count);
+        return;
+    }
+    if (!live)
+        live = std::make_unique<Live>(*GSDevice12::GetInstance());
+    std::array<tf_gpu::GrassPacketView, tf_gpu::MaxMergedGrassPackets> packets;
+    bool valid = count <= packets.size();
+    for (unsigned i = 0; valid && i < count; ++i)
+    {
+        if (views[i].bytes < sizeof(Payload))
+        {
+            valid = false;
+            break;
+        }
+        const auto &payload = *reinterpret_cast<const Payload *>(views[i].data);
+        valid = payload.path == 1 && payload.bytes == views[i].bytes - sizeof(Payload) &&
+                payload.geometry.kind == gsnative::GeometryKind::GrassSprites;
+        packets[i] = {&payload.geometry, views[i].data + sizeof(Payload), payload.bytes};
+    }
+    if (valid && tf_gpu::drawGrassGroup(live->pool, packets.data(), count, live->grass))
+        return;
+    // Rejected groups have consumed no state. Split in order until smaller
+    // admissible runs or the established eight-packet fallback are reached.
+    const unsigned first = count / 2;
+    executeGrassWide(views, first);
+    executeGrassWide(views + first, count - first);
+}
 } // namespace
 
 extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_t bytes,
@@ -462,7 +512,19 @@ extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_
         return p && !std::strcmp(p, "8");
     }();
     if (grouped)
+    {
+        static const bool wideGrass = [] {
+            const char *size = std::getenv("PS2X_TF_GPU_GRASS_GROUPS");
+            const char *merge = std::getenv("PS2X_TF_GPU_GRASS_MERGE");
+            return size && !std::strcmp(size, "64") && merge && !std::strcmp(merge, "1");
+        }();
+        if (wideGrass && geometry->kind == gsnative::GeometryKind::GrassSprites)
+            return kzgs::QueuePacketGroupCommand(executeGrassWide, storage.data(), uint32_t(sizeof(payload) + bytes),
+                                                 tf_gpu::MaxMergedGrassPackets)
+                       ? 1
+                       : 0;
         return kzgs::QueuePacketGroupCommand(executeGroup, storage.data(), uint32_t(sizeof(payload) + bytes)) ? 1 : 0;
+    }
     return kzgs::QueuePacketCommand(execute, storage.data(), uint32_t(sizeof(payload) + bytes)) ? 1 : 0;
 }
 void tfGpuLiveDrawReset()

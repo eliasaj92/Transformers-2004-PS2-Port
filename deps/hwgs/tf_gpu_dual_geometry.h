@@ -89,7 +89,11 @@ class DualGeometry
     // initial STQ qwords and two initial RGBA qwords. Each 320-byte record emits
     // 16 contiguous GSVertex records per field. Draw field f of packet p with
     // firstSource=p*16+f*8, sourceCount=8. No geometry readback or forced wait.
-    Batch prepareGrass(const void *inputs, uint32_t count, const GrassRasterState *raster = nullptr);
+    // Field-major output concatenates all packet vertices for each field:
+    // firstSource=f*count*8, sourceCount=count*8. The caller must prove that
+    // reordering those fields preserves GS rendering and texture dependencies.
+    Batch prepareGrass(const void *inputs, uint32_t count, const GrassRasterState *raster = nullptr,
+                       bool fieldMajor = false);
     // Whole-mesh metadata from cached source bounds and the two transforms.
     // Chunks in this range must share matrices/bias. Does not map GPU output
     // or transform the mesh's vertices on the CPU.
@@ -117,6 +121,7 @@ class DualGeometry
     Stats m_stats;
     std::shared_ptr<Page> acquirePage(uint32_t uploadBytes, uint32_t outputBytes);
     Batch dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices, uint32_t constantsOffset,
-                   const uint64_t *groupSources = nullptr, uint32_t groups = 0, bool grass = false);
+                   const uint64_t *groupSources = nullptr, uint32_t groups = 0, bool grass = false,
+                   bool fieldMajor = false);
 };
 } // namespace tf_gpu

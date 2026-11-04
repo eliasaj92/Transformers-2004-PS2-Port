@@ -116,7 +116,8 @@ void materialize(void *context, GSVertex *vertices, uint32_t count)
 }
 void packetScene(const void *inputs, const void *packets, unsigned count, unsigned side, unsigned mode, GIFRegPRIM prim,
                  GIFRegXYOFFSET xy, GIFRegSCISSOR scissor, tf_gpu::DualGeometry &pool,
-                 tf_gpu::GrassLiveStats &packetStats, std::vector<GSVertex> &latches, uint64_t *stats)
+                 tf_gpu::GrassLiveStats &packetStats, std::vector<GSVertex> &latches, std::vector<bool> &latchEnds,
+                 uint64_t *stats, bool merge)
 {
     auto *renderer = GSRendererHW::GetInstance();
     const char *option = std::getenv("PS2X_TF_GPU_GROUPS");
@@ -184,39 +185,108 @@ void packetScene(const void *inputs, const void *packets, unsigned count, unsign
                     !std::memcmp(&latch, &renderer->GetNativeVertexLatch(), sizeof(latch)),
                 "Declined grass group changed GPU output or GS state");
         stats[16] += 3;
+        if (merge)
+        {
+            const auto unchangedDecline = [&](const tf_gpu::GrassPacketView *v, unsigned n) {
+                const auto before = renderer->m_env;
+                require(!tf_gpu::drawGrassGroup(pool, v, n, packetStats), "Unsafe merged grass was accepted");
+                require(pool.stats().dispatches == dispatches &&
+                            !std::memcmp(&latch, &renderer->GetNativeVertexLatch(), sizeof(latch)) &&
+                            !std::memcmp(&before, &renderer->m_env, sizeof(before)),
+                        "Declined merge changed GPU output or GS state");
+                ++stats[16];
+            };
+            unchangedDecline(invalidViews, 2);
+            unchangedDecline(views.data(), 0);
+            unchangedDecline(views.data(), tf_gpu::MaxMergedGrassPackets + 1);
+            const auto saved0 = raw[0], saved1 = raw[1];
+            // Equal scissors overlap; their draws must remain in packet order.
+            for (unsigned i = 0; i < 2; ++i)
+                std::memcpy(raw[i].bytes.data() + 624, raw[i].bytes.data() + 16, 8);
+            unchangedDecline(views.data(), 2);
+            raw[0] = saved0;
+            raw[1] = saved1;
+            raw[1].bytes[16] ^= 1; // Same field with different scissor state.
+            unchangedDecline(views.data(), 2);
+            raw[1] = saved1;
+            auto &context = renderer->m_env.CTXT[prim.CTXT];
+            const auto saved = context;
+            context.TEX0.TBP0 = context.FRAME.Block();
+            unchangedDecline(views.data(), 2);
+            context = saved;
+            context.TEX0.TBP0 = context.ZBUF.Block();
+            unchangedDecline(views.data(), 2);
+            context = saved;
+            context.TEX0.PSM = PSMT8;
+            context.TEX0.CBP = context.FRAME.Block();
+            unchangedDecline(views.data(), 2);
+            context = saved;
+            context.TEX1.MXL = 1;
+            context.MIPTBP1.TBP1 = context.FRAME.Block();
+            context.MIPTBP1.TBW1 = 1;
+            unchangedDecline(views.data(), 2);
+            context = saved;
+        }
     }
-    bool preparedGroup = false;
-    for (unsigned packet = 0; packet < count; ++packet)
+    if (!side)
     {
-        if (!side && grouped && packet % 8 == 0)
-        {
-            prepared = {};
-            const unsigned length = std::min(8u, count - packet);
-            preparedGroup = length > 1 && tf_gpu::prepareGrassGroup(pool, views.data() + packet, length,
-                                                                    prepared.data(), packetStats);
-        }
-        auto *data = raw[packet].bytes.data();
-        if (!side)
-        {
-            if (!tf_gpu::drawGrassPacket(pool, sources[packet], data, 1216, packetStats, mode == 3,
-                                         preparedGroup ? &prepared[packet % 8] : nullptr))
+        std::fill(latchEnds.begin(), latchEnds.end(), false);
+        const char *wide = std::getenv("PS2X_TF_GPU_GRASS_GROUPS");
+        const unsigned maximum = merge && wide && !std::strcmp(wide, "64") ? tf_gpu::MaxMergedGrassPackets : 8;
+        const auto drawRange = [&](auto &&self, unsigned begin, unsigned length) -> void {
+            if (merge && length > 1 &&
+                tf_gpu::drawGrassGroup(pool, views.data() + begin, length, packetStats, mode == 3))
             {
-                ++stats[17];
-                gsnative::materializePacket(sources[packet], data, 1216);
-                kzgs::ExecuteGIFOnGSThread(1, data, 1216);
+                const unsigned end = begin + length - 1;
+                latchEnds[end] = true;
+                latches[end] = renderer->GetNativeVertexLatch();
+                require(renderer->m_path[0].nloop == 0, "Merged grass left an unfinished GIF transfer");
+                return;
             }
-            latches[packet] = renderer->GetNativeVertexLatch();
-        }
-        else
-        {
-            kzgs::ExecuteGIFOnGSThread(1, data, 1216);
-            require(!std::memcmp(&latches[packet], &renderer->GetNativeVertexLatch(), sizeof(GSVertex)),
-                    "Native grass changed the final GS vertex latch");
-            ++stats[6];
-        }
-        require(renderer->m_path[0].nloop == 0, "Grass packet left an unfinished GIF transfer");
+            if (length > 8)
+            {
+                self(self, begin, length / 2);
+                self(self, begin + length / 2, length - length / 2);
+                return;
+            }
+            std::array<tf_gpu::PreparedGrass, 8> local;
+            const bool preparedGroup =
+                grouped && length > 1 &&
+                tf_gpu::prepareGrassGroup(pool, views.data() + begin, length, local.data(), packetStats);
+            for (unsigned packet = begin; packet < begin + length; ++packet)
+            {
+                auto *data = raw[packet].bytes.data();
+                if (!tf_gpu::drawGrassPacket(pool, sources[packet], data, 1216, packetStats, mode == 3,
+                                             preparedGroup ? &local[packet - begin] : nullptr))
+                {
+                    ++stats[17];
+                    gsnative::materializePacket(sources[packet], data, 1216);
+                    kzgs::ExecuteGIFOnGSThread(1, data, 1216);
+                }
+                latches[packet] = renderer->GetNativeVertexLatch();
+                latchEnds[packet] = true;
+                require(renderer->m_path[0].nloop == 0, "Grass packet left an unfinished GIF transfer");
+            }
+        };
+        for (unsigned packet = 0; packet < count; packet += maximum)
+            drawRange(drawRange, packet, std::min(maximum, count - packet));
     }
-    if (grouped && !side)
+    else
+        for (unsigned packet = 0; packet < count; ++packet)
+        {
+            kzgs::ExecuteGIFOnGSThread(1, raw[packet].bytes.data(), 1216);
+            if (latchEnds[packet])
+            {
+                require(!std::memcmp(&latches[packet], &renderer->GetNativeVertexLatch(), sizeof(GSVertex)),
+                        "Native grass changed the final GS vertex latch");
+                ++stats[6];
+            }
+            require(renderer->m_path[0].nloop == 0, "Reference grass left an unfinished GIF transfer");
+        }
+    if (merge && !side)
+        require(packetStats.mergedGroups && packetStats.mergedDraws,
+                "Grass diagnostic did not merge native draw submissions");
+    else if (grouped && !side)
         require(packetStats.groupedDispatches > 0 && packetStats.groupedPackets > packetStats.groupedDispatches &&
                     packetStats.groupedDraws > 0,
                 "Grass packet diagnostic did not group compute dispatches");
@@ -224,7 +294,7 @@ void packetScene(const void *inputs, const void *packets, unsigned count, unsign
 } // namespace
 
 static int grassFrontendProbe(const void *inputs, uint32_t count, const void *expected, const void *packets,
-                              uint64_t *stats, char *error, uint32_t capacity)
+                              uint64_t *stats, char *error, uint32_t capacity, bool merge = false)
 {
     if (!inputs || !expected || !stats || !count || count > 1024)
         return 0;
@@ -235,11 +305,14 @@ static int grassFrontendProbe(const void *inputs, uint32_t count, const void *ex
             require(g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::D3D12, "Frontend probe requires D3D12");
             auto *renderer = GSRendererHW::GetInstance();
             auto *device = GSDevice12::GetInstance();
+            if (merge)
+                require(tf_gpu::probeGrassMergeRanges(stats[25]), "Grass merge range omits GS swizzle pages");
             std::vector<GSVertex> reference(count * 32);
             std::memcpy(reference.data(), expected, size_t(count) * 1024);
             tf_gpu::DualGeometry pool(*device);
             tf_gpu::GrassLiveStats packetStats;
             std::vector<GSVertex> packetLatches(count);
+            std::vector<bool> packetLatchEnds(count);
             std::vector<tf_gpu::GrassRasterState> raster(count);
             for (auto &state : raster)
                 for (unsigned field = 0; field < 2; ++field)
@@ -386,7 +459,7 @@ static int grassFrontendProbe(const void *inputs, uint32_t count, const void *ex
                         if (packets)
                         {
                             packetScene(inputs, packets, count, side, mode, prim, xy, scissor, pool, packetStats,
-                                        packetLatches, stats);
+                                        packetLatches, packetLatchEnds, stats, merge);
                             continue;
                         }
                         for (unsigned packet = 0; packet < count; ++packet)
@@ -512,12 +585,29 @@ static int grassFrontendProbe(const void *inputs, uint32_t count, const void *ex
                 stats[4] = packetStats.boundsDeclined;
                 stats[5] = packetStats.outputDeclined;
                 stats[13] = packetStats.groupedDraws;
+                if (merge)
+                {
+                    stats[18] = packetStats.mergedGroups;
+                    stats[19] = packetStats.mergedPackets;
+                    stats[20] = packetStats.mergedDraws;
+                    stats[21] = packetStats.mergeDeclined;
+                    stats[22] = packetStats.mergeStateDeclined;
+                    stats[23] = packetStats.mergeFeedbackDeclined;
+                    stats[24] = packetStats.mergeBoundsDeclined;
+                    stats[26] = packetStats.boundsQueries;
+                    stats[27] = packetStats.boundsCacheHits;
+                    stats[28] = packetStats.boundsCacheRejectedHits;
+                    stats[29] = packetStats.largestMerge;
+                }
                 std::fprintf(stderr,
                              "[gpu:grass-packets] grouped_dispatches=%llu grouped_packets=%llu grouped_draws=%llu "
                              "group_declined=%llu\n",
                              packetStats.groupedDispatches, packetStats.groupedPackets, packetStats.groupedDraws,
                              packetStats.groupDeclined);
-                require(stats[0] > 100 && stats[1] > 100 && stats[2] > 0 && stats[6] == count * 4,
+                require(stats[0] > 100 && stats[1] > (merge ? 10u : 100u) && stats[2] > 0 &&
+                            (merge ? stats[6] >= 4 * ((count + tf_gpu::MaxMergedGrassPackets - 1) /
+                                                      tf_gpu::MaxMergedGrassPackets)
+                                   : stats[6] == count * 4),
                         "Packet diagnostic did not exercise GPU draws, fallback and latches");
             }
             else
@@ -545,4 +635,12 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_packet_probe(const void *inputs, uint
                                                         uint32_t capacity)
 {
     return packets ? grassFrontendProbe(inputs, count, expected, packets, stats, error, capacity) : 0;
+}
+// Separate entry point preserves the existing diagnostic's 18-counter ABI.
+// This probe requires 30 counters and compares latches at whole-group boundaries.
+extern "C" TF_HWGS_API int tf_gs_gpu_grass_merged_probe(const void *inputs, uint32_t count, const void *expected,
+                                                        const void *packets, uint64_t *stats, char *error,
+                                                        uint32_t capacity)
+{
+    return packets ? grassFrontendProbe(inputs, count, expected, packets, stats, error, capacity, true) : 0;
 }

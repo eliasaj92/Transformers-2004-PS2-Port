@@ -826,6 +826,89 @@ To exercise grouped packets, set `PS2X_TF_GPU_GROUPS=8` before the existing
 `test_gpu_grass_packets.py` command. Reports distinguish actual grouped GPU
 draws from batches merely prepared by a compute dispatch.
 
+## Merged grass draws and wider batches
+
+`PS2X_TF_GPU_GRASS_MERGE=1` enables a guarded field-major output layout. Instead
+of drawing each emitter's two fields separately, it concatenates the GPU
+vertices and submits one sprite draw per field. Primitive order within each
+field is unchanged. Admission requires matching primitive/context, scissor and
+offset state, disjoint field scissors, nonaliasing color/depth targets, and no
+texture, mipmap or palette feedback from either target. Unsupported state is
+rejected before dispatch or GS state consumption. Ordinary and native CPU
+fallbacks preserve incoming attributes and final latches without GPU readback.
+
+The VRAM check covers page-aligned ranges, texture base misalignment and wrap.
+An independent GS swizzle-page enumeration checks 36,267 admitted layouts,
+including indexed and depth formats. This caught an unaligned texture spilling
+into an extra page; the guard now includes that page. Negative checks cover
+overlapping fields, changed state, invalid framing, and color/depth/CLUT/mipmap
+feedback.
+
+`PS2X_TF_GPU_GRASS_GROUPS=64` additionally permits up to 64 already-published
+adjacent grass packets. It never waits to fill a batch. Callback and batch-limit
+changes, ordinary GIF, sync/readback and ring-wrap commands end a group. Other
+callers retain the eight-packet limit. A rejected wide batch splits in order
+until smaller admissible groups or the established fallback are reached.
+Queue diagnostics verify ownership, ordering, wrap and these boundaries across
+181 packets. Scratch initialization scales with the attempted group size.
+
+`PS2X_TF_GPU_GRASS_BOUNDS_CACHE=1` adds an 8,192-entry fixed cache of source-based
+bounds, including rejection results. CRC selects a slot; comparison of all
+288 relevant input bytes is required for a hit. Incoming RGBA and raster state
+are not inputs to the projection calculation. A cache-only experiment hit
+2,665,014 of 5,259,619 queries but did not demonstrate a frame-rate improvement;
+the wider-batch experiment also uses it to avoid repeated projection when
+splitting a rejected group.
+
+All following runs use the same accelerated executable, saved Amazon route,
+native60 mode 3, 16:9, 2048x1788 internal output and 1920x1080 direct presentation.
+Cinematics are skipped and navigation is excluded from timing.
+
+| Enhanced grass configuration | Physics updates/s | Direct handoffs/s | Median / p95 interval |
+|---|---:|---:|---:|
+| Compute grouping, separate draws (saved result) | 38.9721 | 38.9582 | 24.586 / 48.993 ms |
+| Merged draws, up to 8 packets | 48.7675 | 48.6520 | 19.315 / 34.620 ms |
+| Up to 8, with bounds cache | 48.6903 | 48.5454 | 18.740 / 38.769 ms |
+| Up to 64, with bounds cache | 57.6059 | 56.7831 | 16.804 / 21.670 ms |
+
+Enabling the existing EE scheduler fast path on the wide build gives 56.8230
+updates/s and 56.5073 handoffs/s (17.104 / 21.793 ms), with no demonstrated
+improvement. That option remains disabled for the selected configuration.
+
+The wide run executes 175,465 grass dispatches and 334,894 grass GPU draws,
+versus 596,121 and 6,434,941 in the saved compute-only grouping run. Its largest
+accepted group is 64 packets; 4,124,902 packets use merged draws. There are no
+output-capacity declines or native-draw materializations. Ordinary fallback
+still handles 410,316 field declines and 190,089 bounds declines. Runtime
+ownership finishes with no dirty deferred grass memory. Thirty-three published
+frames are skipped by host acquisition, so simulation rate must not be reported
+as presentation rate. This is roughly level with the saved mesh-only enhanced
+result, and does not establish sustained true 60 fps. Grass remains opt-in.
+
+The wide enhanced-capture frontend checks perform 504 GPU draws, including
+132 merged draws, with 536 group/individual boundary latch comparisons. All
+29,360,128 pixels at 2048x1792 match, including texture, depth, blending, mipmaps
+and deliberate CPU fallback. The triangle/queue regression also passes.
+Separately, both the eight-packet and final wide live camera-turn captures match
+the saved enhanced output exactly: 32 complete images, fields 3027..3058,
+117,178,368 RGBA pixels per comparison. No older executable is rerun. Image
+capture is disabled for all performance measurements.
+
+```powershell
+$env:PS2X_TF_GPU_GROUPS = '8'
+$env:PS2X_TF_GPU_GRASS_MERGE = '1'
+$env:PS2X_TF_GPU_GRASS_GROUPS = '64'
+$env:PS2X_TF_GPU_GRASS_BOUNDS_CACHE = '1'
+python -B testing/test_gpu_grass_packets.py --merge `
+  --prepared $private/grass-native --prefix $private/grass-capture `
+  --dll $private/gpu-build/tf_hwgs.dll --report $private/grass-merged-result.json
+```
+
+Live use also requires the existing `PS2X_TF_GPU_DUAL=2`, `PS2X_TF_GPU_GRASS=1`,
+accelerated static VU and D3D12 hardware-renderer prerequisites. The diagnostic
+reports actual merged GPU draws, largest accepted group, cache hits, guard
+checks and full-resolution pixel differences.
+
 ## Bounded output-image cadence capture
 
 `PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;

@@ -7,7 +7,12 @@
 // records) and emits two contiguous 16-vertex GSVertex arrays (1024 bytes).
 ByteAddressBuffer inputs : register(t0);
 RWByteAddressBuffer geometry : register(u0);
-cbuffer Dispatch : register(b0) { uint count; };
+cbuffer Dispatch : register(b0) {
+    uint count;
+#ifdef TF_GPU_GRASS_CULL
+    uint fieldMajor;
+#endif
+};
 
 #include "vu_math.hlsl"
 
@@ -117,7 +122,11 @@ void main(uint3 id : SV_DispatchThreadID)
         const uint4 a = endpoint(origin, q, flags);
         const uint4 b = endpoint(corner, q, flags);
 #ifdef TF_GPU_GRASS_NATIVE
+#ifdef TF_GPU_GRASS_CULL
+        const uint address = (fieldMajor != 0 ? (field * count + batchIndex) * 512 : output + field * 512) + sprite * 64;
+#else
         const uint address = output + field * 512 + sprite * 64;
+#endif
         const uint previousSprite = max(sprite, 1u) - 1u;
         const uint4 stq = sprite == 0 ? inputs.Load4(batch + 256 + field * 16) : textureWords(previousSprite);
         const uint4 priorColor = sprite == 0 ? inputs.Load4(batch + 288 + field * 16) :

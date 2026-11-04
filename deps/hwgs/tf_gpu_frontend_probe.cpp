@@ -36,7 +36,7 @@ struct QueueCheck
     std::atomic<bool> ready{false};
     uint32_t next = 0;
     bool valid = true;
-    std::array<unsigned, 9> sizes{};
+    std::array<unsigned, kzgs::MaxPacketGroup + 1> sizes{};
 };
 struct QueueHeader
 {
@@ -75,14 +75,15 @@ bool checkPacketQueue()
             state->ready.wait(false, std::memory_order_acquire);
         },
         &address, sizeof(address));
-    const auto push = [&](unsigned serial, uint32_t bytes, unsigned kind) {
+    const auto push = [&](unsigned serial, uint32_t bytes, unsigned kind, unsigned maximum = 8) {
         const QueueHeader header{&check, serial, bytes};
         std::memcpy(storage.data(), &header, sizeof(header));
         const uint32_t guard = serial ^ 0xa53f9c17u;
         std::memcpy(storage.data() + bytes - 4, &guard, 4);
         if (!kind)
             return kzgs::QueuePacketCommand(checkQueuedPacket, storage.data(), bytes);
-        return kzgs::QueuePacketGroupCommand(kind == 1 ? checkQueuedGroup : checkOtherGroup, storage.data(), bytes);
+        return kzgs::QueuePacketGroupCommand(kind == 1 ? checkQueuedGroup : checkOtherGroup, storage.data(), bytes,
+                                             maximum);
     };
     // Publish everything before releasing the consumer: 8,8,4 / ordinary /
     // 3 / different callback 2 / original callback 1. Boundaries are observable.
@@ -97,7 +98,33 @@ bool checkPacketQueue()
     for (unsigned i = 27; i < 95; ++i)
         queued &= push(i, uint32_t(storage.size()), i % 7 ? 1 : 0);
     kzgs::RunOnGSThread([] {});
-    const bool passed = queued && first && check.valid && check.next == 95;
+    const bool wrapped = check.valid && check.next == 95;
+    check.ready.store(false, std::memory_order_relaxed);
+    check.sizes.fill(0);
+    queued &= kzgs::QueuePacketCommand(
+        [](const uint8_t *data, uint32_t) {
+            QueueCheck *state;
+            std::memcpy(&state, data, sizeof(state));
+            state->ready.wait(false, std::memory_order_acquire);
+        },
+        &address, sizeof(address));
+    // A wider group, then the same callback with a smaller limit, then back to
+    // wide, ordinary and foreign-callback boundaries. None may be crossed.
+    for (unsigned i = 95; i < 165; ++i)
+        queued &= push(i, 64, 1, 64);
+    for (unsigned i = 165; i < 175; ++i)
+        queued &= push(i, 64, 1, 8);
+    for (unsigned i = 175; i < 178; ++i)
+        queued &= push(i, 64, 1, 64);
+    queued &= push(178, 64, 0);
+    queued &= push(179, 64, 2, 64) && push(180, 64, 2, 64);
+    queued &= !push(181, 64, 1, 0) && !push(181, 64, 1, kzgs::MaxPacketGroup + 1);
+    check.ready.store(true, std::memory_order_release);
+    check.ready.notify_all();
+    kzgs::RunOnGSThread([] {});
+    const bool wide = check.valid && check.next == 181 && check.sizes[64] == 1 && check.sizes[6] == 1 &&
+                      check.sizes[8] == 1 && check.sizes[3] == 1 && check.sizes[2] == 2;
+    const bool passed = queued && first && wrapped && wide;
     std::fprintf(stderr, "[gpu:packet-groups] packets=%u order_wrap_boundaries=%s\n", check.next,
                  passed ? "PASS" : "FAIL");
     return passed;
