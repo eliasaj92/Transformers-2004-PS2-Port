@@ -421,24 +421,53 @@ namespace
 	// Copies the current output texture 1:1 through a CPU download texture. Unlike GSSaveSnapshotToMemory it neither
 	// creates nor recycles a render target, so taking a capture does not change the texture pool (and with it what later
 	// frames render when a pass reuses a pooled texture that was not fully overwritten).
-	static bool ReadbackCurrent(std::vector<u32>& pixels, u32& w, u32& h)
+	// Keep staging allocations across fields. Transformers alternates output sizes,
+	// so a single cached size would still allocate and destroy GPU memory per field.
+	// Only the GS thread accesses this bounded cache; drain before device changes.
+	static std::vector<std::unique_ptr<GSDownloadTexture>> s_readback_cache;
+	static bool ReadbackCurrent(std::vector<uint8_t>& pixels, u32& w, u32& h)
 	{
+		using Clock = std::chrono::steady_clock;
+		static const bool profile = [] { const char* p = std::getenv("PS2X_HWGS_PROFILE"); return p && *p == '1'; }();
+		const auto start = profile ? Clock::now() : Clock::time_point{};
 		GSTexture* const current = g_gs_device ? g_gs_device->GetCurrent() : nullptr;
 		if (!current || current->GetFormat() != GSTexture::Format::Color)
 			return false;
 		w = static_cast<u32>(current->GetWidth());
 		h = static_cast<u32>(current->GetHeight());
-		std::unique_ptr<GSDownloadTexture> dl(g_gs_device->CreateDownloadTexture(w, h, GSTexture::Format::Color));
+		GSDownloadTexture* dl = nullptr;
+		for (const auto& item : s_readback_cache)
+			if (item->GetWidth() == w && item->GetHeight() == h) { dl = item.get(); break; }
 		if (!dl)
-			return false;
+		{
+			if (s_readback_cache.size() >= 4) s_readback_cache.erase(s_readback_cache.begin());
+			auto item = std::unique_ptr<GSDownloadTexture>(g_gs_device->CreateDownloadTexture(w, h, GSTexture::Format::Color));
+			if (!item) return false;
+			dl = item.get(); s_readback_cache.push_back(std::move(item));
+		}
 		const GSVector4i rc(0, 0, static_cast<int>(w), static_cast<int>(h));
 		dl->CopyFromTexture(rc, current, rc, 0);
+		const auto copied = profile ? Clock::now() : Clock::time_point{};
 		dl->Flush();
+		const auto flushed = profile ? Clock::now() : Clock::time_point{};
 		if (!dl->Map(rc))
 			return false;
-		pixels.resize(static_cast<size_t>(w) * h);
+		pixels.resize(static_cast<size_t>(w) * h * sizeof(u32));
 		StringUtil::StrideMemCpy(pixels.data(), w * sizeof(u32), dl->GetMapPointer(), dl->GetMapPitch(), w * sizeof(u32), h);
 		dl->Unmap();
+		if (profile)
+		{
+			static unsigned count = 0;
+			static double setup_ms = 0, wait_ms = 0, copy_ms = 0;
+			setup_ms += std::chrono::duration<double, std::milli>(copied - start).count();
+			wait_ms += std::chrono::duration<double, std::milli>(flushed - copied).count();
+			copy_ms += std::chrono::duration<double, std::milli>(Clock::now() - flushed).count();
+			if (++count == 300)
+			{
+				std::fprintf(stderr, "[kzgs:readback] count=300 setup_ms=%.1f wait_ms=%.1f copy_ms=%.1f\n", setup_ms, wait_ms, copy_ms);
+				count = 0; setup_ms = wait_ms = copy_ms = 0;
+			}
+		}
 		return true;
 	}
 
@@ -449,11 +478,14 @@ namespace
 		if (req->present_w > 0 && req->present_h > 0)
 			req->ok = GSSaveSnapshotToMemory(static_cast<u32>(req->present_w), static_cast<u32>(req->present_h), true, false, &w, &h, &pixels) && w > 0 && h > 0;
 		else
-			req->ok = ReadbackCurrent(pixels, w, h) && w > 0 && h > 0;
+			req->ok = ReadbackCurrent(*req->rgba, w, h) && w > 0 && h > 0;
 		if (req->ok)
 		{
-			req->rgba->resize(static_cast<size_t>(w) * h * 4);
-			std::memcpy(req->rgba->data(), pixels.data(), req->rgba->size());
+			if (req->present_w > 0 && req->present_h > 0)
+			{
+				req->rgba->resize(static_cast<size_t>(w) * h * 4);
+				std::memcpy(req->rgba->data(), pixels.data(), req->rgba->size());
+			}
 			*req->width = static_cast<int>(w);
 			*req->height = static_cast<int>(h);
 		}
@@ -697,6 +729,7 @@ namespace
 					break;
 
 				case Cmd::Reset:
+					s_readback_cache.clear();
 					GSreset(true);
 					break;
 
@@ -713,6 +746,7 @@ namespace
 					const Pcsx2Config::GSOptions opts = MakeOptions(*cfg);
 					const bool vsync_changed = (opts.VsyncEnable != GSConfig.VsyncEnable);
 					ApplyGlobals(*cfg, opts);
+					s_readback_cache.clear();
 					GSUpdateConfig(opts);
 					kzgs::SmaaInstall();
 					if (vsync_changed)
@@ -804,6 +838,7 @@ namespace
 
 		GSThreadLoop();
 
+		s_readback_cache.clear();
 		GSclose();
 	}
 } // namespace

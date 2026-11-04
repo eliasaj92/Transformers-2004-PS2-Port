@@ -26,6 +26,7 @@ extern "C" void iopIdleStatsAdvance(unsigned long long) noexcept;
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_hw_backend.h"
+#include "gs/gs_hw_present.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
@@ -61,6 +62,7 @@ void ps2PadStopHostRumble();        // ps2_pad.cpp, TEMP(transformers): playtest
 #include "rlgl.h" // TEMP(transformers): own-framebuffer capture flush
 #include "ps2_playtest.h"           // TEMP(transformers): F12 problem marks, F11 fps overlay
 #include "ps2_objectives.h"
+#include "ps2_native_seam_probe.h"
 #include "ps2_crash_reporter.h"     // crash report + minidump (generic, ported from SSX3)
 #include "ps2_sprint_probe.h"       // TEMP(transformers): qualification - PS2X_SPRINT_LOG=1 robot walk/run telemetry
 #include <sstream>
@@ -518,6 +520,10 @@ static bool pdietCanSkipNative() {
 float ps2PgsNativeFrameWidth(float);
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
+    if(ps2HwgsDirectEnabled()) {
+        ps2HwgsDirectUpdate(tex,outWidth,outHeight);
+        return;
+    }
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
     static bool s_hasLatchedInitialFrame = false;
     static uint32_t s_lastDisplayFbp = std::numeric_limits<uint32_t>::max();
@@ -1590,6 +1596,7 @@ bool PS2Runtime::initialize(const char *title)
         // SPU2 is the sole playback source; keep legacy VAG/RPC HLE playback muted.
         m_audioBackend.setAudioReady(false);
 #endif
+        ps2HwgsDirectInitialize();
         SetTargetFPS(60);
         if (m_debugUiInitCallback)
         {
@@ -1653,6 +1660,53 @@ static PS2Runtime::RecompiledFunction g_tfFrameSyncOrig = nullptr;
 static bool g_tfFrameSyncSkip = false;
 static bool g_tfFrameSync60 = false; // PS2X_TF_NOFRAMEWAIT&4: force gp-0x40E0 = 0 so the wait is "next vsync" (60 fps cap) instead of the 2-vsync/field-parity path
 static bool g_tfFrameSyncLog = false;
+static bool g_tfNative60NextField = false;
+// Private qualification switch: use the game's full-rate governor branch, not
+// just a shorter frame wait. Physics equivalence must be qualified separately.
+static PS2Runtime::RecompiledFunction g_tfGovernorOrig = nullptr;
+static PS2Runtime::RecompiledFunction g_tfPhysicsOrig = nullptr;
+static PS2Runtime::RecompiledFunction g_tfTimeSlotOrig = nullptr;
+void tfFullSimulationRate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // 0x32e8a0 is the two-instruction half-rate setter. Both the fps getter
+    // 0x32e8b0 and timestep getter 0x32e910 consult this byte. Scene initialization
+    // caches the timestep in +0x5c; changing only render waits leaves physics at 30 Hz.
+    WRITE8(0x006CF654u,0);
+    ctx->pc=GPR_U32(ctx,31);
+}
+static void tfTimingRecord(const char* function, uint32_t slot, R5900Context* ctx, PS2Runtime* runtime)
+{
+    struct Trace {
+        FILE* file=nullptr;
+        Trace(){const char* p=std::getenv("PS2X_TF_TIMING_TRACE");if(p&&*p)file=std::fopen(p,"wb");
+            if(file)std::fprintf(file,"host_us,function,vs,pads,slot,delta,caller\n");}
+        ~Trace(){if(file)std::fclose(file);}
+    };
+    static Trace trace;
+    if(trace.file) {
+        const auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::fprintf(trace.file,"%lld,%s,%llu,%llu,%u,%.9g,%08x\n",static_cast<long long>(us),function,
+            static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()),static_cast<unsigned long long>(ps2dbg::padReads.load()),slot,ctx->f[12],GPR_U32(ctx,31));
+    }
+}
+void tfPhysicsTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if(ctx->pc==0x00230100u)tfTimingRecord("physics",0,ctx,runtime);
+    g_tfPhysicsOrig(rdram,ctx,runtime);
+}
+void tfTimeSlotTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if(ctx->pc==0x00203010u)tfTimingRecord("slot",GPR_U32(ctx,4),ctx,runtime);
+    g_tfTimeSlotOrig(rdram,ctx,runtime);
+}
+void tfNative60Governor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == 0x0025B670u) {
+        WRITE8(0x006CD984u, 0); // Native full-rate mode; tail sets interpolation and wait together.
+        WRITE32(0x006CD988u, 0x7FFFFFFFu); // Do not fall back based on emulated EE cycle costs.
+    }
+    g_tfGovernorOrig(rdram, ctx, runtime);
+}
 // TEMP(transformers): PS2X_TF_FRAMELOG=1 logs one line per call (= per game frame) with the guest vsync counter, pad reads, VU1 MSCALs.
 void tfFrameSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
@@ -1675,6 +1729,13 @@ void tfFrameSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     if (entry && g_tfFrameSync60)
         WRITE8(GPR_U32(ctx, 28) - 0x40E0u, 0);
+    if (entry && g_tfNative60NextField) {
+        // Qualification variant: do not admit a second zero-delta frame against
+        // the same last-frame counter in the game's adaptive full-rate branch.
+        WRITE8(GPR_U32(ctx, 28) - 0x40E0u, 0);
+        WRITE8(GPR_U32(ctx, 28) - 0x40DCu, 0);
+        WRITE8(GPR_U32(ctx, 28) - 0x40D0u, 0);
+    }
     if (g_tfFrameSyncSkip)
     {
         const uint8_t saved = READ8(0x6F8539u);
@@ -3329,6 +3390,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (module.name == "SLUS_206.68") { ps2_carstick::install(*this); ps2_menustick::enable(); }
     if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2x::trainer::install(*this, elfCrc32);
     if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2_objectives::install(*this, elfCrc32);
+    if (module.name == "SLUS_206.68" && elfCrc32Valid) ps2_native_seam_probe::install(*this, elfCrc32);
     {
         // Profile selection follows executable validation and precedes guest execution.
         // configureIoPathsFromElf runs before the CRC and initially resolves the normal card.
@@ -3370,8 +3432,25 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
 
     const auto selectedRenderer=ps2x::settings::get("renderer.backend");
+    const char* native60Option=std::getenv("PS2X_TF_NATIVE60");
+    const bool native60=elfCrc32Valid && elfCrc32==0x74c982c0u && native60Option && native60Option[0]>='1' && native60Option[0]<='3';
+    g_tfNative60NextField=native60 && native60Option[0]>='2';
+    if(native60 && native60Option[0]=='3' && hasFunction(0x0032E8A0u)) {
+        replaceFunction(0x0032E8A0u,&tfFullSimulationRate);
+        m_memory.getRDRAM()[0x006CF654u]=0;
+        std::cerr << "[transformers] native simulation half-rate disabled" << std::endl;
+    }
+    if(elfCrc32Valid && elfCrc32==0x74c982c0u && std::getenv("PS2X_TF_TIMING_TRACE") && hasFunction(0x00230100u) && hasFunction(0x00203010u)) {
+        g_tfPhysicsOrig=lookupFunction(0x00230100u);replaceFunction(0x00230100u,&tfPhysicsTrace);
+        g_tfTimeSlotOrig=lookupFunction(0x00203010u);replaceFunction(0x00203010u,&tfTimeSlotTrace);
+    }
+    if(native60 && hasFunction(0x0025B670u)) {
+        g_tfGovernorOrig=lookupFunction(0x0025B670u);
+        replaceFunction(0x0025B670u,&tfNative60Governor);
+        std::cerr << "[transformers] native 60 Hz governor qualification enabled" << std::endl;
+    }
     const bool hardwareOriginalSpeed=selectedRenderer=="hwgs" || selectedRenderer=="HWGS";
-    if ((ps2Field60Enabled() || hardwareOriginalSpeed) && elfPath.find("SLUS_206.68") != std::string::npos)
+    if (!native60 && (ps2Field60Enabled() || hardwareOriginalSpeed) && elfPath.find("SLUS_206.68") != std::string::npos)
     {
         // GAME(transformers) TEMP(transformers) qualification I1a: PS2X_FIELD60 needs the game's 30 Hz mode (gp-0x576C = 1:
         // field 2 = t - 0.5; in 60 Hz mode gp-0x5A00 = 1.0 and both fields are the same pose). The load-balancing
@@ -3410,7 +3489,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         g_tfFrameSyncLog = flog && flog[0] == '1';
         g_tfFrameSyncSkip = (nfwMode & 2) != 0;
         g_tfFrameSync60 = (nfwMode & 4) != 0;
-        if ((g_tfFrameSyncSkip || g_tfFrameSync60 || g_tfFrameSyncLog) && elfPath.find("SLUS_206.68") != std::string::npos && hasFunction(0x0025DE90u))
+        if ((g_tfFrameSyncSkip || g_tfFrameSync60 || g_tfFrameSyncLog || g_tfNative60NextField) && elfPath.find("SLUS_206.68") != std::string::npos && hasFunction(0x0025DE90u))
         {
             g_tfFrameSyncOrig = lookupFunction(0x0025DE90u);
             replaceFunction(0x0025DE90u, &tfFrameSync);
@@ -5961,8 +6040,9 @@ void PS2Runtime::run()
     {
         gameThread.join();
     }
-    if (ps2x::settings::get("renderer.backend") == "hwgs")
+    if (ps2HwgsDirectEnabled() || ps2x::settings::get("renderer.backend") == "hwgs")
     {
+        ps2HwgsDirectShutdown();
         // main uses _Exit: stop VU producers and drain/close the hardware backend
         // explicitly, before Windows unloads its DLL with driver threads gone.
         if (m_memory.m_vif1Instant) m_memory.m_vif1Instant->abandon();

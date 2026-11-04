@@ -3,7 +3,8 @@
 # Set game.objective_guidance=on in the test INI; game data and saves are not distributed.
 # Inspect host captures and [objective] transitions; script PASS alone is insufficient.
 # Expected: Training area -> Combat training during the walk, then hidden after toggling off.
-# Capture host vsyncs 9300,10300,10830 with PS2X_HIRES_CAPTURE_KEEP_SIZE=1.
+# Cinematic skipping changes counters; schedule host captures from this route's measured marks.
+# Preserve host size with PS2X_HIRES_CAPTURE_KEEP_SIZE=1.
 # Use PS2X_RESOPT2_HOST_SEQUENCE=0:1920x1080@60:1 to apply host resolution in the harness.
 
 budget 2300s
@@ -12,7 +13,7 @@ watchdog warn 30 600
 defaults hold=3 gap=6 timeout=3000vs
 dumpsteps on
 
-boot:     wait seen /FMV/NATTRACT.PSS timeout 4000vs           # notices + 2 logos, untouched
+boot:     press start until seen /FMV/NATTRACT.PSS every 10 max 300 hold=2 gap=3 timeout 4000vs
           wait pads 4
 title:    press start until pads 200 every 40 max 5            # START#1 skips the CG, a later one: title -> main menu
           mark main_menu                                       # NEW GAME highlighted
@@ -47,9 +48,9 @@ missions: press cross until cd /FMV/LEVELS/N01AMA.M2V every 60 max 2 timeout 150
           wait pads 30 timeout 9000vs
           mark warp_gate
           press cross until cd /TFA.ZIP@1940-44053 or cd /SOUND/MUSIC/AMAZON.MS every 30 max 3 timeout 3000vs
-          wait pads 200 timeout 9000vs
+          press start until player_ready every 10 max 300 hold=2 gap=3 timeout 9000vs
           mark level_ingame
-          wait vs 3800 timeout 40000vs
+          wait vs 60
           mark objective_spawn
           trainer_probe
           wait vs 600

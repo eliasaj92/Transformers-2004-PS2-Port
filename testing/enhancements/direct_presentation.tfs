@@ -1,0 +1,100 @@
+# Visible accelerated GPU presentation test; not a 60 fps acceptance test.
+# Requires the private Trainer hub seed with Aftershock and the first gate selected.
+# Skip opening movies and all arrival cinematics; inspect timing CSV and player probes.
+# Use PS2X_HWGS_DIRECT=1; check internal 4x/8x/4x changes, FXAA and guidance.
+# Optional menu/host capture flags are documented in docs/findings/direct-presentation.md.
+# Vehicle stick movement checks steering only; they do not qualify acceleration.
+
+budget 2300s
+stall 600 hard 3600
+watchdog warn 30 600
+defaults hold=3 gap=6 timeout=3000vs
+dumpsteps on
+
+boot:     press start until seen /FMV/NATTRACT.PSS every 10 max 300 hold=2 gap=3 timeout 4000vs # skip opening movies
+          wait pads 4
+title:    press start until pads 200 every 40 max 5            # START#1 skips the CG, a later one: title -> main menu
+          mark main_menu                                       # NEW GAME highlighted
+menu:     press down                                           # -> CONTINUE GAME
+          wait pads 20
+          mark main_continue_game
+          press cross                                          # -> "Saved Games" list, slot 1 = Amazon / Ruined Temple
+          wait pads 60 timeout 9000vs
+          mark saved_games
+loadsave: press cross until cd /SOUND/MUSIC/UI_MAIN.MS every 120 max 2 timeout 3000vs   # load slot 1 -> hub loads
+hubload:  wait pads 40 timeout 9000vs                          # hub camera settles; "View Mission Sites" preselected
+          mark hub_view_mission_sites
+          press left
+          wait pads 30
+          press cross
+          wait pads 60
+          press cross
+          wait pads 60
+          mark aftershock_selected
+          press cross
+          wait pads 60
+          mark aftershock_equipped
+          press triangle
+          wait pads 40
+          mark back_to_hub
+          press right
+          wait pads 30
+missions: press cross until cd /FMV/LEVELS/N01AMA.M2V every 60 max 2 timeout 1500vs
+          wait pads 4
+          mark globe
+          press cross hold=2 gap=4
+          wait pads 30 timeout 9000vs
+          mark warp_gate
+          press cross until cd /TFA.ZIP@1940-44053 or cd /SOUND/MUSIC/AMAZON.MS every 30 max 3 timeout 3000vs
+skip_level_intro: press start until player_ready every 10 max 300 hold=2 gap=3 timeout 9000vs
+          mark level_ingame
+          wait vs 60
+          mark timing_spawn
+          trainer_probe
+          dumpsteps off
+          wait vs 120
+          mark timing_walk_start
+          trainer_probe
+          stick 128 0 128 128
+          wait vs 60
+          mark timing_walk_1s
+          trainer_probe
+          wait vs 60
+          stick none
+          mark timing_walk_2s
+          trainer_probe
+          wait vs 120
+          press triangle
+          wait vs 120
+          mark timing_vehicle_ready
+          trainer_probe
+          stick 128 0 128 128
+          wait vs 30
+          mark timing_drive_half_second
+          trainer_probe
+          wait vs 30
+          stick none
+          mark timing_drive_1s
+          trainer_probe
+          wait vs 120
+          press triangle
+          wait vs 120
+          dumpsteps on
+          mark timing_return_robot
+          trainer_probe
+          setting game.objective_guidance=on
+          wait vs 90
+          mark direct_guidance
+          setting renderer.hw_scale=8
+          wait vs 90
+          mark direct_scale8
+          setting renderer.hw_fxaa=on
+          wait vs 90
+          mark direct_fxaa
+          setting renderer.hw_scale=4
+          wait vs 90
+          mark direct_scale4
+          setting renderer.hw_fxaa=off
+          wait vs 90
+          mark direct_restored
+          pass direct presentation resolution, FXAA and guidance checks complete

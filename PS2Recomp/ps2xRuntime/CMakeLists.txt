@@ -395,8 +395,10 @@ add_library(ps2_runtime STATIC
     src/lib/gs/gs_cpu_backend.cpp
     src/lib/gs/gs_pgs_backend.cpp
     src/lib/gs/gs_hw_backend.cpp
+    src/lib/gs/gs_hw_present.cpp
     src/lib/ps2_trainer.cpp
     src/lib/ps2_objectives.cpp
+    src/lib/ps2_native_seam_probe.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
@@ -786,6 +788,7 @@ endif()
 
 # Transformers port: opt-in static fragments coexist with the default whole-image package.
 option(PS2X_WITH_VU1_STATIC "Compile an external experimental static VU1 package" OFF)
+option(PS2X_VU1_STATIC_AVX2 "Require AVX2 for the locally generated static VU1 package" OFF)
 if(PS2X_WITH_VU1_STATIC)
     if(NOT PS2X_WITH_VU1_AOT)
         target_sources(ps2_runtime PRIVATE src/lib/vu/ps2_vu1_aot_bridge.cpp src/lib/vu/ps2_vu1_aot_stubs.cpp)
@@ -813,6 +816,22 @@ if(PS2X_WITH_VU1_STATIC)
         target_compile_options(ps2_vu1_static PRIVATE /O2 /Ob2 /fp:precise /GS-)
     else()
         target_compile_options(ps2_vu1_static PRIVATE -O2 -ffp-contract=off)
+    endif()
+    if(PS2X_VU1_STATIC_AVX2)
+        if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|x64)$")
+            message(FATAL_ERROR "PS2X_VU1_STATIC_AVX2 requires an x86-64 target")
+        endif()
+        if(MSVC)
+            # VS 2022 preserves separate multiply/add rounding under /fp:precise.
+            # Earlier MSVC versions may contract them when AVX2 is selected.
+            if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" OR MSVC_VERSION LESS 1930)
+                message(FATAL_ERROR "Static VU1 AVX2 requires Microsoft C++ from VS 2022 or newer (non-contracting /fp:precise)")
+            endif()
+            target_compile_options(ps2_vu1_static PRIVATE /arch:AVX2)
+        else()
+            target_compile_options(ps2_vu1_static PRIVATE -mavx2 -ffp-contract=off)
+        endif()
+        message(STATUS "Static VU1 requires AVX2; floating-point contraction remains disabled")
     endif()
     if(TARGET ps2EntryRunner)
         target_sources(ps2EntryRunner PRIVATE $<TARGET_OBJECTS:ps2_vu1_static>)

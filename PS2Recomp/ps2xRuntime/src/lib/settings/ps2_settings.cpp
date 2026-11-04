@@ -89,7 +89,7 @@ namespace
     const char *const pc1enum6[] = {"fsr1", "cas", "bilinear", "nearest", nullptr};
 #ifdef PS2X_WITH_HWGS
     const char *const pc1enum7[] = {"pgs", "cpu", "hwgs", nullptr};
-    const char *const backendLabels[] = {"parallel-gs (reference)","Software (reference)","Vulkan hardware (experimental)",nullptr};
+    const char *const backendLabels[] = {"parallel-gs (reference)","Software (reference)","Hardware graphics (experimental)",nullptr};
 #else
     const char *const pc1enum7[] = {"pgs", "cpu", nullptr};
     const char *const backendLabels[] = {"parallel-gs (reference)","Software (reference)",nullptr};

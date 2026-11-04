@@ -13,14 +13,16 @@ From PowerShell, with Python, CMake, Ninja, Git, 7-Zip and MSVC x64 Build Tools 
 
 The setup command pins PCSX2 and verifies the downloaded Windows dependency bundle against `deps/hwgs/dependencies.json`. Alternatively, pass existing `-Pcsx2Source` and `-Pcsx2Dependencies` directories. This build uses AVX2, supported by the target Ryzen 6900HX. Vulkan headers and shader compilation libraries come from the dependencies; a system Vulkan SDK is not required. A Vulkan-capable graphics driver is required.
 
-Open **F10** (or hold **Select + Start**) for the PC settings overlay. The launcher starts on parallel-gs for comparison. Under Presentation, choose **Vulkan hardware (experimental)**, save settings, and restart. A one-run override is `-Backend hwgs`, which locks the renderer selection for that run.
+Open **F10** (or hold **Select + Start**) for the PC settings overlay. The launcher starts on parallel-gs for comparison. Under Presentation, choose **Hardware graphics (experimental)**, save settings, and restart. A one-run override is `-Backend hwgs`, which locks the renderer selection for that run.
 
 - **Hardware internal scale:** scales the actual GS raster, independently of the window. At 4x, a 640x448 source renders at 2560x1792 before presentation; active scene dimensions can differ. This is distinct from enlarging the final image.
 - **Output resolution:** select 1920x1080 in Display. Choose the aspect ratio separately; original 4:3 content retains bars unless a widescreen option is selected.
 - **Hardware FXAA:** optional post-process antialiasing. Rendering above the output resolution also provides supersampling when downsampled. Bilinear presentation is suitable for this mode; FSR/CAS remain optional.
 - **VSync:** controls host presentation. The simulation retains its original speed. Field output and the host FPS counter do not establish 60 Hz gameplay.
 
-The hardware backend consumes ordered GIF packets and privileged-register snapshots through an isolated `tf_hwgs.dll`. Local-to-host transfers flush queued rendering and synchronize the relevant GS VRAM before CPU readback. The existing host window and overlay remain in use. The initial bridge copies frames through host memory; performance optimization follows correctness qualification.
+The hardware backend consumes ordered GIF packets and privileged-register snapshots through an isolated `tf_hwgs.dll`. Local-to-host transfers flush queued rendering and synchronize the relevant GS VRAM before CPU readback. The existing host window and overlay remain in use.
+
+On Windows, `launch/play.ps1 -GameFolder <private-game-folder> -Presentation direct` selects hardware D3D12 rendering and GPU-resident presentation. Shared textures and GPU fences replace the full-frame CPU download/upload. It requires OpenGL external-memory/fence support and the same GPU for rendering and presentation. Unsupported configurations fail with a diagnostic; `-Presentation readback` explicitly selects the original Vulkan readback path. Internal scale, output resolution, FXAA, aspect ratio, the overlay and objective guidance remain available. Direct presentation does not enable the experimental 60 Hz simulation. See [direct-presentation details and qualification](findings/direct-presentation.md).
 
 ## Trainer and saves
 
@@ -52,7 +54,7 @@ setting renderer.hw_fxaa=on
 
 Only implemented live trainer/hardware settings are accepted. Select a profile before boot using a private INI and `PS2X_SETTINGS`; scripts cannot switch profiles mid-session. Unlock requests fail the route outside the permitted hub/profile. `trainer_probe` emits read-only identity, resource, progression and hook-counter evidence. `PS2X_CAPTURE_INTERNAL=1` adds `.internal.png` captures alongside native script screenshots.
 
-Required game qualification remains the original fresh-save boot/hub/cinematic/level routes, hardware image comparisons (foliage, transparency, bloom, shadows, HUD and movies), all three Autobots and transformations, toggles, deaths, save/reload and progression navigation. Whole-campaign reliability requires a complete campaign run. True 60 Hz simulation is a separate later milestone; no such claim is made by this implementation.
+Current tests use visible accelerated builds and skip opening and in-game cinematics. Hardware image comparisons (foliage, transparency, bloom, shadows and HUD), all three Autobots and transformations, toggles, deaths, save/reload and progression navigation remain qualification requirements. Whole-campaign reliability requires a complete campaign run. True 60 Hz simulation is a separate milestone; no such claim is made by this implementation.
 
 ## Reverse-engineering notes
 
@@ -82,6 +84,8 @@ The preview follows the live training, combat, dropship, ruins, waterfall, mount
 
 The 16:9 Hor+ camera mode already exists as `display.aspect=16:9`, with `display.aspect_method=horplus`. It is separate from hardware rendering scale and host output resolution.
 
-True 60 fps is not implemented by this change. A private experiment using the existing frame-wait switches achieved one pad update per guest vsync and a 16.683 ms timing slot, but left the native governor in its 30 Hz render/interpolation mode. At 4x hardware rendering, it also ran below real-time speed. Do not interpret 60 guest updates per guest second as 60 rendered frames per wall second. The original gameplay mode remains the normal launch configuration.
+True 60 fps remains unfinished. The current private experiment selects the native full-rate governor and disables a separate half-rate simulation setter before scene initialization. Physics receives a 16.683 ms timestep, but movement equivalence and sustained real-time performance remain unqualified. Do not interpret 60 guest updates per guest second as 60 rendered frames per wall second. The original gameplay mode remains the normal launch configuration. See [the timing investigation](findings/native60-timing.md).
+
+The optional [AVX2 static VU build](findings/vu-performance.md) has passed the covered hash and route comparisons. The [native render seam investigation](findings/native-render-seam.md) begins mapping mesh batches for future GPU transforms; its opt-in probe observes the original accelerated path and does not replace geometry.
 
 For private reverse engineering, `PS2X_RESEARCH_RAM_DIR` optionally writes a 32 MiB RAM snapshot whenever a scripted `trainer_probe` runs. Create this directory outside the repository; snapshots contain private game data and must not be published. The option is unset in ordinary launches. Probe JSON also reports the governor's 30 Hz byte and the two-field frame-wait byte. `PS2X_HIRES_CAPTURE_KEEP_SIZE=1` preserves explicit window dimensions when using the existing host screenshot diagnostic.

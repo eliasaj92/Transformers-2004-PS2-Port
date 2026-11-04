@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "runtime/gs/gs_hw_backend.h"
+#include "gs_hw_present.h"
 #include "runtime/ps2_settings.h"
 #include <algorithm>
 #include <atomic>
@@ -103,13 +104,19 @@ public:
         tf_gs_vsync(regs.data());
         uint64_t hold = 0; std::memcpy(&hold, regs.data() + 0xff8, 8);
         if (hold == 0x504c4f4144484c44ull) return;
+        uint64_t display = 0; std::memcpy(&display, regs.data() + 0x70, 8);
+        if(tf_gs_direct_enabled()) {
+            const bool scene=lastSceneTick && ticks-std::min(ticks,lastSceneTick)<8;
+            if(!tf_gs_direct_publish(scale,scene?1:0,uint32_t(display & 511),ticks))
+                throw std::runtime_error("HWGS direct GPU presentation failed");
+            return;
+        }
         PresentationFrame f;
         const uint32_t size = tf_gs_frame(nullptr, 0, &f.width, &f.height);
         if (!size || !f.width || !f.height || size != uint64_t(f.width)*f.height*4) return;
         f.pixels.resize(size); tf_gs_frame(f.pixels.data(), size, nullptr, nullptr);
         // Keep the host's blending behavior consistent with the reference presenter.
         for (size_t i = 3; i < f.pixels.size(); i += 4) f.pixels[i] = 255;
-        uint64_t display = 0; std::memcpy(&display, regs.data() + 0x70, 8);
         f.displayFbp = f.sourceFbp = uint32_t(display & 511);
         if (f.width != loggedWidth || f.height != loggedHeight) {
             loggedWidth = f.width; loggedHeight = f.height;
@@ -205,3 +212,6 @@ bool ps2HwgsSharpTake(std::vector<uint8_t>& pixels,uint32_t& width,uint32_t& hei
 }
 uint32_t ps2HwgsNativeWidth() { return nativeWidth.load(); }
 int ps2HwgsPresentedScene() { return presentedScene.load(); }
+void ps2HwgsNoteDirectFrame(uint32_t width,uint32_t scale,bool scene) {
+    nativeWidth.store(width/std::max(1u,scale));presentedScene.store(scene?1:0);
+}

@@ -294,6 +294,11 @@ std::string diagnostics(const uint8_t* ram) {
        <<",\"movement_scale\":"<<(context?read<float>(ram,context+0x1fc):0)
        <<",\"governor_30hz\":"<<unsigned(read<uint8_t>(ram,0x6cd984))
        <<",\"frame_wait_two_fields\":"<<unsigned(read<uint8_t>(ram,0x6cf010))
+       <<",\"frame_delta\":"<<read<float>(ram,0x6f851c)
+       <<",\"render_interpolation\":"<<read<float>(ram,0x6cd6f0)
+       <<",\"position\":["<<(context?read<float>(ram,context+0xf0):0)<<','<<(context?read<float>(ram,context+0xf4):0)<<','<<(context?read<float>(ram,context+0xf8):0)<<']'
+       <<",\"heading\":"<<(context?read<float>(ram,context+0x90):0)
+       <<",\"speed\":"<<(context?read<float>(ram,context+0x44):0)
        <<",\"health_blocked\":"<<blockedHealth<<",\"energy_refills\":"<<refilledEnergy<<",\"damage_scaled\":"<<scaledDamage
        <<",\"minicons\":"<<read<uint64_t>(ram,0x7173c0)<<",\"levels_available\":"<<available<<",\"levels_completed\":"<<completed
        <<",\"weapons\":[";

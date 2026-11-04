@@ -14,6 +14,7 @@
 #include "runtime/ps2_settings.h"
 #include "runtime/ps2_trainer.h"
 #include "../ps2_trainer_diagnostics.h"
+#include "../ps2_carstick_state.h"
 #include "../debug_counters.h"
 
 #include <algorithm>
@@ -87,6 +88,7 @@ namespace ps2_test
             AtVs,        // absolute guest vsync >= n
             MovieCreate, // sceMpegCreate since the statement began
             MovieDelete, // sceMpegDelete since the statement began
+            PlayerReady, // Transformers: a controllable robot/vehicle for 60 consecutive guest fields
             Watchdog,    // 3 s-watchdog detector state == (n != 0)
         };
 
@@ -180,6 +182,8 @@ namespace ps2_test
             uint64_t sVs = 0, sPads = 0, sSerial = 0, sMovC = 0, sMovD = 0; // counters when the statement began
             uint64_t lastPressPads = 0;
             int presses = 0;
+            bool playerReady = false;
+            uint64_t playerReadySince = UINT64_MAX;
 
             // Press machine.
             PressPhase phase = PressPhase::Idle;
@@ -457,6 +461,32 @@ namespace ps2_test
 
         // ---- step machine (EE thread, E.mx held) -----------------------------------------------------------------
 
+        bool waitsForPlayer(const Stmt& s)
+        {
+            return std::any_of(s.cond.begin(), s.cond.end(), [](const Atom& a) { return a.kind == Kind::PlayerReady; });
+        }
+
+        void updatePlayerReady()
+        {
+            if (E.ip >= E.prog.size() || !waitsForPlayer(E.prog[E.ip])) return;
+            // Use guest ticks rather than snapshot()'s wall-clock expiry. Loading
+            // briefly exposes a robot before the opening level movie takes control.
+            std::lock_guard<std::mutex> lock(ps2_carstick::snapshotMutex);
+            const auto& player = ps2_carstick::latest;
+            E.playerReady = player.actor && E.vs >= player.vs && E.vs - player.vs <= 4 &&
+                (player.mode == ps2_carstick::Mode::Robot || player.mode == ps2_carstick::Mode::Vehicle);
+            if (!E.playerReady) E.playerReadySince = UINT64_MAX;
+            else {
+                if (E.playerReadySince == UINT64_MAX) E.playerReadySince = E.vs;
+                // Release a skip press immediately when control appears. Never
+                // press Start during the stability interval: it would pause play.
+                if (E.prog[E.ip].op == Op::PressUntil) {
+                    E.phase = PressPhase::Idle;
+                    E.pressMask = 0;
+                }
+            }
+        }
+
         bool eval(const Stmt &s)
         {
             for (const Atom &a : s.cond)
@@ -491,6 +521,10 @@ namespace ps2_test
                     if (E.movD > E.sMovD)
                         return true;
                     break;
+                case Kind::PlayerReady:
+                    if (E.playerReady && E.playerReadySince != UINT64_MAX && E.vs - E.playerReadySince >= 60)
+                        return true;
+                    break;
                 case Kind::Watchdog:
                     if (E.wdOn == (a.n != 0u))
                         return true;
@@ -516,6 +550,7 @@ namespace ps2_test
             E.sMovC = E.movC;
             E.sMovD = E.movD;
             E.presses = 0;
+            E.playerReadySince = UINT64_MAX;
             if (!s.label.empty())
                 E.curLabel = s.label;
             slog("[script] step %llu '%s' line=%d %s t=%.1fs :: %s", ull(E.ip), E.curLabel.c_str(), s.line,
@@ -555,6 +590,7 @@ namespace ps2_test
         // flight, so a 'press until' never presses again once its condition has become true.
         void step()
         {
+            updatePlayerReady();
             while (E.verdict.load() < 0 && E.phase == PressPhase::Idle)
             {
                 if (E.ip >= E.prog.size())
@@ -565,6 +601,7 @@ namespace ps2_test
                 const Stmt &s = E.prog[E.ip];
                 if (!E.started)
                     begin(s);
+                updatePlayerReady();
                 switch (s.op)
                 {
                 case Op::Wait:
@@ -598,6 +635,8 @@ namespace ps2_test
                         elseOrFail(s, "press-until timed out");
                         continue;
                     }
+                    if (waitsForPlayer(s) && E.playerReady)
+                        return;
                     if (E.presses < s.maxPresses &&
                         (E.presses == 0 || E.pads - E.lastPressPads >= static_cast<uint64_t>(s.everyReads)))
                     {
@@ -981,6 +1020,11 @@ namespace ps2_test
                 }
                 return true;
             }
+            if (kw == "player_ready")
+            {
+                a.kind = Kind::PlayerReady;
+                return true;
+            }
             if (kw == "watchdog")
             {
                 const std::string what = lower(p.next());
@@ -993,7 +1037,7 @@ namespace ps2_test
                 a.n = (what == "on") ? 1u : 0u;
                 return true;
             }
-            err = "unknown condition '" + kw + "' (cd seen lsn pads vs atvs movie watchdog)";
+            err = "unknown condition '" + kw + "' (cd seen lsn pads vs atvs movie player_ready watchdog)";
             return false;
         }
 
@@ -1467,6 +1511,9 @@ namespace ps2_test
                     break;
                 case Kind::MovieDelete:
                     out += "movie delete";
+                    break;
+                case Kind::PlayerReady:
+                    out += "player_ready";
                     break;
                 case Kind::Watchdog:
                     out += (a.n != 0u) ? "watchdog on" : "watchdog off";

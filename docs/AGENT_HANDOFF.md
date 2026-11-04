@@ -25,6 +25,8 @@ Read [Setup](SETUP.md), [Testing](TESTING.md), [accepted counters](../testing/RE
 
 ## Routes and pull requests
 
+Current enhancement tests must use visible windows, the accelerated build, and skip both opening movies and in-game cinematics. Use the updated routes under `testing/enhancements/` or `testing/make_enhancement_routes.py`; see `player_ready` in [Scripted routes](../testing/USAGE.md). Historical cinematic routes and their counters remain references, not instructions to replay cinematics in this session.
+
 Fresh-card `level_mvp.tfs` and `level_mvp_cine.tfs` cover boot/menu/arrival and cinematic gameplay. `level2_save.tfs` needs the private seed for the published reference. The old `l2x_forest.tfs` includes a death-menu tail and must not be timed as full gameplay. The survivable `l2x_forest_v2.tfs` uses an objective-speech survival check; its references remain provisional and are not currently a row in the staged accepted-reference table.  Do not distribute private player cards. With your own seed, establish new baseline counters and compare your change against those.
 
 Contributors bring repeatable testing, or maintainers run their scripted routes before merging.  Include the change's purpose, source scope, exact configuration, counter/timeline results, qualified timing where relevant, picture/audio observations and unresolved gates. Never label an untested lane or a preview as shipped.

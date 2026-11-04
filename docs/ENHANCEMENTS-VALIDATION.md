@@ -77,3 +77,15 @@ The build-09 `objective-marker-02` route passed (10,870 vsyncs, 4,833 pad reads,
 
 
 The final build-11 `objective-marker-04` route passed with the same 10,870 vsyncs, 4,833 pad reads and 3,460 CD operations (218.5 script seconds). The explicit host sequence applied and validated 1920x1080 at startup without reverting. At gameplay capture time the actual window was 2560x1369; all three host images were inspected at that size and the internal scene was 2048x1788. They show Training area, Combat training, then no marker after disabling the setting. This establishes above-1080p rendering and the first Amazon guidance transition, not campaign-wide objectives or sustained real-time performance. Gameplay intervals still showed GS saturation and roughly 16-20 pad updates per wall second. Build 11 was promoted to the private launcher; user trainer/input preferences were retained, with 16:9 Hor+, 1920x1080 requested output, 4x internal rendering and the Amazon preview enabled locally.
+
+## GPU-resident presentation
+
+Build 21 uses shared D3D12 textures and GPU fences to feed the existing OpenGL presenter without a full-frame CPU round trip. It is now selected by the private launcher. The six alternating native-timing comparison runs matched all six route counters and player probes; measured gameplay updates ranged from 36.7-41.1/s with direct presentation versus 24.6-25.3/s with CPU readback. These desktop measurements include background application activity and do not establish true 60 fps. The feature route passed internal 4x/8x/4x scaling, FXAA toggles, menu pause/resume, objective guidance and shutdown. See [methodology, dimensions and limits](findings/direct-presentation.md).
+
+## VU optimization and native mesh investigation
+
+The optional AVX2 static VU build matched 59 cumulative state hashes and every route counter/player probe against SSE. Three alternating threaded pairs increased mean gameplay update rate from 39.18 to 41.26/s (5.3%), with individual paired gains of 2.7-6.8%. This remains below the true-60 target. See [VU performance](findings/vu-performance.md) for flags and measurement limits.
+
+Build 24 also passed the original-speed direct-presentation route with all six original reference counters, all eight player probes and the 0.0333667025-second timestep. It is now selected by the private launcher, with direct presentation active, research probes off and original gameplay timing. Existing save/settings paths and trainer preferences were retained.
+
+An opt-in, CRC-gated [native render seam probe](findings/native-render-seam.md) identifies the grass constant writer, observes completed uploads and records VU launch fingerprints without replacing geometry. Its corrected deterministic run matched all 59 hashes and the route probes; the threaded run also matched counters and player probes. GPU mesh execution is not implemented by this diagnostic change.

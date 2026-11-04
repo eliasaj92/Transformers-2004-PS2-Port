@@ -6,4 +6,6 @@ After extracting your ELF, run the commands in [setup](SETUP.md). `tools/vu1/ind
 
 Static generation currently requires Windows with an MSVC x64 developer shell. Generated code uses the accepted VU scheduler, relocatable guarded multi-pair spans and interpreter fallback. Configure with `PS2X_WITH_VU1_STATIC=ON` and an external `PS2X_VU1_STATIC_DIR`. At runtime use `PS2X_VU1_AOT=1` and `PS2X_VU1_AOT_STATIC=1`. This is opt-in and needs fresh-disc route/hash/visual qualification. It is not the default setup path or a promise of released-package speed.
 
+For an AVX2-capable x86-64 machine, `PS2X_VU1_STATIC_AVX2=ON` selects AVX2 for this package while preserving the existing floating-point rules. This optional build requires VS 2022 or newer on MSVC and is off by default. See the [VU performance investigation](findings/vu-performance.md) for the measured bottleneck and qualification method.
+
 For separately generated recorded packages, `PS2X_WITH_VU1_AOT=ON` requires an external `PS2X_VU1_AOT_DIR`. No source-tree package is auto-discovered. An absent static package uses declining stubs. Never add generated tables, native code, captures or manifests containing game bytes to the repository.

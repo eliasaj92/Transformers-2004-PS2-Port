@@ -5,8 +5,16 @@ Trainer routes require a private settings.ini selecting the Trainer save profile
 """
 from pathlib import Path
 import argparse
+import re
 
 ROOT=Path(__file__).resolve().parents[1]
+
+def skip_opening_movies(route):
+    route,count=re.subn(r'^boot:\s+wait seen /FMV/NATTRACT\.PSS[^\n]*',
+        'boot:     press start until seen /FMV/NATTRACT.PSS every 10 max 300 hold=2 gap=3 timeout 4000vs',
+        route,flags=re.MULTILINE)
+    if count!=1:raise ValueError('Expected one opening-movie wait in the template')
+    return route
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--out',type=Path,required=True);args=parser.parse_args()
@@ -16,6 +24,16 @@ def main():
     cine=(ROOT/'testing/mvp/level_mvp_cine.tfs').read_text()
     end='          pass level running 300 pads after Enter Warp Gate'
     assert cine.count(end)==1
+    # Preserve the accepted reference script, but never wait through its movies in
+    # new enhancement tests. The updated runtime recognizes stable player control.
+    cine=skip_opening_movies(cine)
+    cine=cine[cine.index('budget '):]
+    cine='# Visible accelerated enhancement test; skip opening and in-game cinematics.\n'+cine
+    cine=cine[:cine.index('ingame:')]+'''ingame:   press start until player_ready every 10 max 300 hold=2 gap=3 timeout 9000vs
+          mark level_after_intro
+          wait pads 60
+          mark level_spawn
+'''+end+'\n'
     graphics='''          trainer_probe
           setting renderer.hw_scale=1
           wait pads 30
@@ -75,7 +93,7 @@ def main():
           pass trainer toggles and transformations route completed
 '''
     (out/'trainer_smoke.tfs').write_text(trainer.replace(end,exercise))
-    reload=(ROOT/'testing/mvp/level2_save.tfs').read_text()
+    reload=skip_opening_movies((ROOT/'testing/mvp/level2_save.tfs').read_text())
     reload=reload.split('missions:',1)[0]+'''          trainer_probe
           mark reloaded_hub
           pass saved profile reached hub; inspect trainer_probe for preserved unlocks

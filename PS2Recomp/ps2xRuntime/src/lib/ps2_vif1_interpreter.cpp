@@ -4,6 +4,7 @@
 #include "debug_counters.h" // TEMP(transformers)
 #include "ps2_intc_pending.h"
 #include "ps2_perfscope.h" // TEMP(transformers): qualification
+#include "ps2_native_seam_probe.h"
 extern bool g_path3ReleaseOnePacket; // ps2_memory.cpp (GENERIC, SSX-0042 port)
 #include <cstring>
 #include <cstdlib>
@@ -880,6 +881,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         submitVif1Instant(std::vector<uint8_t>(data,data+sizeBytes),{sizeBytes},false,{ps2x_vifunpack::currentChainTte()});return;
     }
     const bool scan=m_vif1Scanning==this;
+    const bool seamTrace = !scan && ps2_native_seam_probe::enabled;
     auto &parserState=scan ? m_vif1Scan : m_vif1Actual;
     auto &vif1_regs=m_vif1Instant ? parserState.regs : this->vif1_regs;
     auto &s_vif1DirectRemainQwc=m_vif1Instant ? parserState.directRemain : ::s_vif1DirectRemainQwc;
@@ -1081,7 +1083,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             else if (vif1StreamExecuting()) m_vif1Stream->emit([] { ps2dbg::vu1Mscal.fetch_add(1u, std::memory_order_relaxed); });
             else ps2dbg::vu1Mscal.fetch_add(1u, std::memory_order_relaxed); // TEMP(transformers)
             if (!scan && m_vu1MscalCallback)
+            {
+                if (seamTrace) ps2_native_seam_probe::launch(opcode, startPC, runTop, runItop, m_vu1Code);
                 m_vu1MscalCallback(startPC, runTop, runItop);
+            }
             continue;
         }
         else if (opcode == VIF_MSCNT)
@@ -1103,7 +1108,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             else if (vif1StreamExecuting()) m_vif1Stream->emit([] { ps2dbg::vu1Mscnt.fetch_add(1u, std::memory_order_relaxed); });
             else ps2dbg::vu1Mscnt.fetch_add(1u, std::memory_order_relaxed); // TEMP(transformers)
             if (!scan && m_vu1MscntCallback)
+            {
+                if (seamTrace) ps2_native_seam_probe::launch(opcode, 0xffffffffu, runTop, runItop, nullptr);
                 m_vu1MscntCallback(runTop, runItop);
+            }
             continue;
         }
         else if (opcode == VIF_STMASK)
@@ -1149,6 +1157,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     if (pos + mpgBytes <= sizeBytes) ps2_vu1new::mpg(data + pos, instructionCount, destAddr); // TEMP(transformers)
                     std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
                     markVU1CodeModified();
+                    if (seamTrace) ps2_native_seam_probe::upload(destAddr, data + pos, copyBytes);
                 }
             }
             };
@@ -1238,6 +1247,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint32_t vuAddr = (uint32_t)imm & 0x3FFu;
             if ((imm & 0x8000u) != 0u)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
+
+            if (seamTrace && vn == 3 && vl == 0 && writeVectorCount == 56 &&
+                cl == wl && !maskEnable && pos + totalBytes <= sizeBytes)
+                ps2_native_seam_probe::unpack(cmd, vuAddr, data + pos, totalBytes,
+                                            vif1_regs.cycle, vif1_regs.mode);
 
             if(scan && (vif1_regs.mode & 3u)==2u && (vn==1u || vn==2u))
                 throw Vif1ScanDependency{};

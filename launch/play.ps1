@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$GameFolder,
     [ValidateSet('normal','trainer')][string]$Profile,
-    [ValidateSet('pgs','hwgs','cpu')][string]$Backend
+    [ValidateSet('pgs','hwgs','cpu')][string]$Backend,
+    [ValidateSet('direct','readback')][string]$Presentation
 )
 $ErrorActionPreference='Stop'
 $folder=(Resolve-Path $GameFolder).Path
@@ -15,6 +16,12 @@ foreach($line in Get-Content "$PSScriptRoot/play_env.txt") {
     }
 }
 $env:PS2X_CD_IMAGE=$disc.iso
+if ($Presentation) {
+    if ($Backend -and $Backend -ne 'hwgs') { throw 'Presentation selection requires -Backend hwgs' }
+    $Backend='hwgs'
+    $env:PS2X_HWGS_DIRECT=if ($Presentation -eq 'direct') {'1'} else {'0'}
+    $env:PS2X_HWGS_API=if ($Presentation -eq 'direct') {'d3d12'} else {'vulkan'}
+}
 if ($disc.static_vu1) { $env:PS2X_VU1_AOT='1'; $env:PS2X_VU1_AOT_STATIC='1' }
 if (-not $env:PS2X_SCRIPT) {
     if (-not $disc.mc_root) { throw 'Rerun setup to configure a persistent memory card' }
