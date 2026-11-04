@@ -23,7 +23,8 @@ if(TF_HWGS_GPU_GEOMETRY)
     configure_file(tf_gpu_shaders_template.h tf_gpu_shaders.h @ONLY)
     target_include_directories(tf_hwgs PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_sources(tf_hwgs PRIVATE tf_gpu_geometry_probe.cpp tf_gpu_dual_probe.cpp
-        tf_gpu_dual_geometry.cpp tf_gpu_dual_draw_probe.cpp tf_gpu_draw_trace.cpp)
+        tf_gpu_dual_geometry.cpp tf_gpu_dual_draw_probe.cpp tf_gpu_draw_trace.cpp
+        tf_gpu_dual_frontend.cpp tf_gpu_frontend_probe.cpp)
     # Bounds must honor/restore the caller's floating-point environment. Keep
     # this object separate from kzgs_flags, whose /fp:contract conflicts with
     # /fp:strict under MSVC.

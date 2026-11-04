@@ -1,5 +1,229 @@
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index 9b048ee..57dd3d0 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -953,6 +953,7 @@ void GSState::DumpDrawInfo(bool dump_regs, bool dump_verts, bool dump_transfers)
+ 
+ void GSState::DumpVertices(const std::string& filename)
+ {
++	EnsureNativeVertices();
+ 	std::ofstream file(filename);
+ 
+ 	if (!file.is_open())
+@@ -2509,6 +2510,15 @@ void GSState::IncDraw()
+ 	s_n++;
+ }
+ 
++void GSState::EnsureNativeVertices()
++{
++	if (!m_native_vertices_pending)
++		return;
++	m_native_vertices_pending = false;
++	pxAssert(m_native_materialize);
++	m_native_materialize(m_native_geometry_context, m_vertex->buff, m_vertex->next);
++}
++
+ void GSState::FlushPrim()
+ {
+ 	if (m_index->tail > 0)
+@@ -2586,7 +2596,10 @@ void GSState::FlushPrim()
+ #endif
+ 		// Update scissor, it may have been modified by a previous draw
+ 		m_env.CTXT[PRIM->CTXT].UpdateScissor();
+-		m_vt.Update(vtx_buff.buff, idx_buff.buff, vtx_buff.tail, idx_buff.tail, GSUtil::GetPrimClass(PRIM->PRIM));
++		if (m_native_vertices_pending)
++			m_vt.UpdateFromBounds(m_native_min, m_native_max);
++		else
++			m_vt.Update(vtx_buff.buff, idx_buff.buff, vtx_buff.tail, idx_buff.tail, GSUtil::GetPrimClass(PRIM->PRIM));
+ 
+ 		// Texel coordinate rounding
+ 		// Helps Manhunt (lights shining through objects).
+@@ -4183,7 +4196,7 @@ bool GSState::TrianglesAreQuadsImpl()
+ 
+ 	constexpr GSVector4i offset = shuffle_check ? GSVector4i::cxpr(8 << 4, 0, 8 << 4, 0) : GSVector4i::cxpr(0);
+ 
+-	const GSVertex* RESTRICT v = m_vertex->buff;
++	const GSVertex* RESTRICT v = GetVertexBuffer();
+ 	const u16* RESTRICT index = m_index->buff;
+ 	const size_t count = m_index->tail;
+ 
+@@ -4247,6 +4260,8 @@ bool GSState::TrianglesAreQuadsImpl()
+ 
+ bool GSState::TrianglesAreQuads(bool shuffle_check)
+ {
++	if (m_native_vertices_pending)
++		return false;
+ 	return shuffle_check ? TrianglesAreQuadsImpl<true>() : TrianglesAreQuadsImpl<false>();
+ }
+ 
+@@ -4277,7 +4292,7 @@ GSState::PRIM_OVERLAP GSState::GetPrimitiveOverlapDrawlistImpl(bool save_drawlis
+ 	
+ 	pxAssert(!save_bbox || save_drawlist); // We should only save bboxes when saving drawlist.
+ 
+-	const GSVertex* RESTRICT v = m_vertex->buff;
++	const GSVertex* RESTRICT v = GetVertexBuffer();
+ 	const u16* RESTRICT index = m_index->buff;
+ 	const u32 count = m_index->tail;
+ 
+@@ -4769,6 +4784,8 @@ GSState::PRIM_OVERLAP GSState::GetPrimitiveOverlapDrawlist(bool save_drawlist, b
+ 
+ GSState::PRIM_OVERLAP GSState::PrimitiveOverlap(bool save_drawlist)
+ {
++	if (m_native_vertices_pending && !save_drawlist)
++		return PRIM_OVERLAP_YES;
+ 	// Assume that 1 triangle, 1 sprite, 1 line, or 3 points can't overlap.
+ 	// Not fully accurate for points but low probability that they overlap.
+ 	if (m_vertex->next < 4)
+@@ -4786,7 +4803,7 @@ bool GSState::SpriteDrawWithoutGaps()
+ {
+ 	// Check that the height matches. Xenosaga 3 draws a letterbox around
+ 	// the FMV with a sprite at the top and bottom of the framebuffer.
+-	const GSVertex* v = &m_vertex->buff[0];
++	const GSVertex* v = &GetVertexBuffer()[0];
+ 	const int first_dpY = v[1].XYZ.Y - v[0].XYZ.Y;
+ 	const int first_dpX = v[1].XYZ.X - v[0].XYZ.X;
+ 	const u32 next_count = m_vertex->next;
+@@ -4881,6 +4898,11 @@ bool GSState::SpriteDrawWithoutGaps()
+ 
+ void GSState::CalculatePrimitiveCoversWithoutGaps()
+ {
++	if (m_native_vertices_pending)
++	{
++		m_primitive_covers_without_gaps = GapsFound;
++		return;
++	}
+ 	m_primitive_covers_without_gaps = FullCover;
+ 
+ 	// Draw shouldn't be offset.
+@@ -6258,9 +6280,9 @@ GSState::TextureMinMaxResult GSState::GetTextureMinMax(GIFRegTEX0 TEX0, GIFRegCL
+ 			const GSVector4i scissored_rc(int_rc.rintersect(m_context->scissor.in));
+ 			if (!int_rc.eq(scissored_rc))
+ 			{
+-				const GSVertex* vert_first = &m_vertex->buff[m_index->buff[0]];
+-				const GSVertex* vert_second = &m_vertex->buff[m_index->buff[1]];
+-				const GSVertex* vert_third = &m_vertex->buff[m_index->buff[2]];
++				const GSVertex* vert_first = &GetVertexBuffer()[m_index->buff[0]];
++				const GSVertex* vert_second = &GetVertexBuffer()[m_index->buff[1]];
++				const GSVertex* vert_third = &GetVertexBuffer()[m_index->buff[2]];
+ 
+ 				GSVector4 new_st = st;
+ 				bool u_forward_check = PRIM->FST ? (vert_first->U < vert_second->U) : ((vert_first->ST.S / vert_first->RGBAQ.Q) < (vert_second->ST.S / vert_first->RGBAQ.Q));
+@@ -6886,7 +6908,7 @@ void GSState::RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool chec
+ 			while (m_max_vertex_count < m_index->tail)
+ 				GrowVertexBuffer();
+ 
+-			GSVertex* RESTRICT vertex = m_vertex->buff;
++			GSVertex* RESTRICT vertex = GetVertexBuffer();
+ 			GSVertex* RESTRICT vertex_copy = m_vertex->buff_copy;
+ 			u16* RESTRICT index = m_index->buff;
+ 			const int count = static_cast<int>(m_index->tail);
+@@ -6945,7 +6967,7 @@ void GSState::RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool chec
+ 			}
+ 
+ 			// Swap the buffers and fix the counts.
+-			std::swap(m_vertex->buff, m_vertex->buff_copy);
++			std::swap(GetVertexBuffer(), m_vertex->buff_copy);
+ 			m_vertex->head = m_vertex->next = m_vertex->tail = m_index->tail;
+ 
+ 			// Recalculate ST min/max/eq in the vertex trace.
+@@ -6955,8 +6977,8 @@ void GSState::RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool chec
+ 			{
+ 				for (int j = 0; j < n; j++)
+ 				{
+-					GSVector4 stcq = GSVector4::cast(GSVector4i(m_vertex->buff[i + j].m[0]));
+-					const float q = (primclass == GS_SPRITE_CLASS) ? m_vertex->buff[i + 1].RGBAQ.Q : stcq.w;
++					GSVector4 stcq = GSVector4::cast(GSVector4i(GetVertexBuffer()[i + j].m[0]));
++					const float q = (primclass == GS_SPRITE_CLASS) ? GetVertexBuffer()[i + 1].RGBAQ.Q : stcq.w;
+ 					stcq = (stcq / q).xyzw(stcq);
+ 
+ 					tmin = tmin.min(stcq);
+@@ -6978,6 +7000,7 @@ void GSState::RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool chec
+ 
+ void GSState::RewriteVerticesIfLargeST(const GSVector4& large_val, bool check_clamp_mode)
+ {
++	EnsureNativeVertices();
+ 	switch (m_vt.m_primclass)
+ 	{
+ 		case GS_POINT_CLASS:
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 3e0b354..0a396d6 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -195,6 +195,25 @@ protected:
+ 
+ 	// following functions need m_vt to be initialized
+ 
++	// Only active inside an explicitly submitted native triangle draw. Any
++	// CPU read/mutation materializes once and permanently selects CPU drawing
++	// for that submission. Callbacks are GS-thread-only and must not throw.
++	void* m_native_geometry_context = nullptr;
++	void (*m_native_materialize)(void*, GSVertex*, u32) = nullptr;
++	bool m_native_vertices_pending = false;
++	GSVertexTrace::Vertex m_native_min = {}, m_native_max = {};
++	void EnsureNativeVertices();
++	__fi GSVertex*& GetVertexBuffer()
++	{
++		if (m_native_vertices_pending)
++			EnsureNativeVertices();
++		return m_vertex->buff;
++	}
++	__fi const GSVertex* GetVertexBuffer() const
++	{
++		return const_cast<GSState*>(this)->GetVertexBuffer();
++	}
++
+ 	GSVertexTrace m_vt;
+ 	GSVertexTrace::VertexAlpha& GetAlphaMinMax()
+ 	{
+diff --git a/pcsx2/GS/Renderers/Common/GSVertexTrace.cpp b/pcsx2/GS/Renderers/Common/GSVertexTrace.cpp
+index 23bc8a5..6cad628 100644
+--- a/pcsx2/GS/Renderers/Common/GSVertexTrace.cpp
++++ b/pcsx2/GS/Renderers/Common/GSVertexTrace.cpp
+@@ -53,7 +53,25 @@ void GSVertexTrace::Update(const void* vertex, const u16* index, int v_count, in
+ 		CorrectDepthTrace(vertex, v_count);
+ 	}
+ 
+-	if (tme)
++	UpdateFiltering();
++}
++
++void GSVertexTrace::UpdateFromBounds(const Vertex& minimum, const Vertex& maximum)
++{
++	m_primclass = GS_TRIANGLE_CLASS;
++	m_min = minimum;
++	m_max = maximum;
++	m_accurate_stq = false;
++	nan.value = 0;
++	m_alpha.valid = false;
++	// Conservative boxes cannot prove geometry equality or complete coverage.
++	m_eq.value = (m_min.c == m_max.c).mask();
++	UpdateFiltering();
++}
++
++void GSVertexTrace::UpdateFiltering()
++{
++	if (m_state->PRIM->TME)
+ 	{
+ 		const GIFRegTEX1& TEX1 = m_state->m_context->TEX1;
+ 
+diff --git a/pcsx2/GS/Renderers/Common/GSVertexTrace.h b/pcsx2/GS/Renderers/Common/GSVertexTrace.h
+index c3499e8..b47f735 100644
+--- a/pcsx2/GS/Renderers/Common/GSVertexTrace.h
++++ b/pcsx2/GS/Renderers/Common/GSVertexTrace.h
+@@ -84,6 +84,11 @@ public:
+ 
+ 	void Update(const void* vertex, const u16* index, int v_count, int i_count, GS_PRIM_CLASS primclass);
+ 
++	// Bounds are in the same units as FindMinMax. The caller proves finite,
++	// positive Q and nonconstant depth; no per-vertex depth correction is used.
++	void UpdateFromBounds(const Vertex& minimum, const Vertex& maximum);
++	void UpdateFiltering();
++
+ 	bool IsLinear() const { return m_filter.opt_linear; }
+ 	bool IsRealLinear() const { return m_filter.linear; }
+ 
 diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
-index cf918b3..04b1b14 100644
+index cf918b3..8b8e094 100644
 --- a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
 +++ b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
 @@ -4406,6 +4406,10 @@ void GSDevice12::FeedbackBarrier(const GSTexture12* texture)
@@ -13,7 +237,7 @@ index cf918b3..04b1b14 100644
  	GSTexture12* colclip_rt = static_cast<GSTexture12*>(g_gs_device->GetColorClipTexture());
  	GSTexture12* draw_rt = config.ps.HasColorROV() ? nullptr : static_cast<GSTexture12*>(config.rt);
  	GSTexture12* draw_ds = config.ps.HasDepthROV() ? nullptr : static_cast<GSTexture12*>(config.ds);
-@@ -4859,9 +4863,46 @@ void GSDevice12::UpdateHWPipelineSelector(GSHWDrawConfig& config)
+@@ -4859,10 +4863,47 @@ void GSDevice12::UpdateHWPipelineSelector(GSHWDrawConfig& config)
  	m_pipeline_selector.ds_as_rt = m_ds_as_rt != nullptr && !config.ps.HasDepthROV();
  }
  
@@ -47,6 +271,7 @@ index cf918b3..04b1b14 100644
  void GSDevice12::UploadHWDrawVerticesAndIndices(GSHWDrawConfig& config)
  {
 -	IASetVertexBuffer(config.verts, sizeof(GSVertex), config.nverts);
+-	
 +	if (m_native_geometry_vertices.BufferLocation)
 +	{
 +		m_vertex.start = 0;
@@ -58,9 +283,10 @@ index cf918b3..04b1b14 100644
 +	{
 +		IASetVertexBuffer(config.verts, sizeof(GSVertex), config.nverts);
 +	}
- 	
++
  	if (config.vs.UseFixedExpandIndexBuffer())
  	{
+ 		m_index.start = 0;
 diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.h b/pcsx2/GS/Renderers/DX12/GSDevice12.h
 index 3eeab02..95d4fc1 100644
 --- a/pcsx2/GS/Renderers/DX12/GSDevice12.h
@@ -99,3 +325,670 @@ index 3eeab02..95d4fc1 100644
  	D3D12_VERTEX_BUFFER_VIEW m_vertex_buffer = {};
  	D3D12_INDEX_BUFFER_VIEW m_index_buffer = {};
  	D3D12_PRIMITIVE_TOPOLOGY m_primitive_topology = {};
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index 9ef9fec..f177093 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -10,6 +10,7 @@
+ #include "common/Console.h"
+ #include "common/BitUtils.h"
+ #include "common/StringUtil.h"
++#include "common/ScopedGuard.h"
+ #include <bit>
+ 
+ using PS_ATST  = GSShader::PS_ATST;
+@@ -235,8 +236,8 @@ void GSRendererHW::Lines2Sprites()
+ 		const u32 count = m_vertex->next;
+ 
+ 		int i = static_cast<int>(count) * 2 - 4;
+-		GSVertex* s = &m_vertex->buff[count - 2];
+-		GSVertex* q = &m_vertex->buff[count * 2 - 4];
++		GSVertex* s = &GetVertexBuffer()[count - 2];
++		GSVertex* q = &GetVertexBuffer()[count * 2 - 4];
+ 		u16* RESTRICT index = &m_index->buff[count * 3 - 6];
+ 
+ 		// Sprites are flat shaded, so the provoking vertex doesn't matter here.
+@@ -336,7 +337,6 @@ GSRendererHW::TextureShuffleInfo GSRendererHW::DetectTextureShuffleImpl()
+ 	const GIFRegCLAMP& clamp = m_context->CLAMP;
+ 	const GSLocalMemory::psm_t& frame_psm = GSLocalMemory::m_psm[frame.PSM];
+ 	const GSLocalMemory::psm_t& tex_psm = GSLocalMemory::m_psm[tex0.PSM];
+-	const GSVertex* RESTRICT verts = m_vertex->buff;
+ 	const u16* RESTRICT index = m_index->buff;
+ 	constexpr u32 verts_per_quad = primclass == GS_SPRITE_CLASS ? 2 : 6;
+ 	const u32 num_quads = m_index->tail / verts_per_quad;
+@@ -352,6 +352,7 @@ GSRendererHW::TextureShuffleInfo GSRendererHW::DetectTextureShuffleImpl()
+ 		return { TextureShuffleType::None, TextureShuffleChannels_None };
+ 	}
+ 
++	const GSVertex* RESTRICT verts = GetVertexBuffer();
+ 	const auto GetQuadXYUV = [&](u32 i, GSVector4i& xyout, GSVector4i& uvout) {
+ 		GSVertex v0, v1;
+ 		if (!GetQuadCorners(verts, index + verts_per_quad * i, v0, v1))
+@@ -861,8 +862,8 @@ void GSRendererHW::ConvertSpriteTextureShuffleImpl(GSTextureCache::Target* rt, G
+ 	const bool bilinear = m_vt.IsRealLinear();
+ 	
+ 	// Copy the attributes from the provoking vertex.
+-	GSVertex v_default = primclass == GS_SPRITE_CLASS ? m_vertex->buff[m_index->buff[1]] :
+-	                                                    m_vertex->buff[m_index->buff[2]];
++	GSVertex v_default = primclass == GS_SPRITE_CLASS ? GetVertexBuffer()[m_index->buff[1]] :
++	                                                    GetVertexBuffer()[m_index->buff[2]];
+ 
+ 	const auto SetTexCoords = [&](float u, float v, GSVertex& vtx_out) {
+ 		if constexpr (fst)
+@@ -1235,13 +1236,13 @@ void GSRendererHW::ConvertSpriteTextureShuffleImpl(GSTextureCache::Target* rt, G
+ 	m_index->tail = 0;
+ 	m_vertex->head = m_vertex->tail = m_vertex->next = 0;
+ 
+-	GSVertex* vout = m_vertex->buff;
++	GSVertex* vout = GetVertexBuffer();
+ 	u16* iout = m_index->buff;
+ 
+ 	WriteQuad(m_r, tex_r, vout, iout);
+ 
+ 	m_index->tail = iout - m_index->buff;
+-	m_vertex->head = m_vertex->tail = m_vertex->next = vout - m_vertex->buff;
++	m_vertex->head = m_vertex->tail = m_vertex->next = vout - GetVertexBuffer();
+ }
+ 
+ void GSRendererHW::ConvertSpriteTextureShuffle(GSTextureCache::Target* rt, GSTextureCache::Source* tex)
+@@ -1284,7 +1285,7 @@ GSVector4 GSRendererHW::RealignTargetTextureCoordinate(const GSTextureCache::Sou
+ 		return GSVector4(0.0f);
+ 	}
+ 
+-	const GSVertex* v = &m_vertex->buff[0];
++	const GSVertex* v = &GetVertexBuffer()[0];
+ 	const float scale = tex->GetScale();
+ 	const bool linear = m_vt.IsRealLinear();
+ 	const int t_position = v[0].U;
+@@ -1377,7 +1378,7 @@ void GSRendererHW::MergeSprite(GSTextureCache::Source* tex)
+ 			// neither in a fast way. So instead let's just take the hypothesis that all sprites must have the same
+ 			// size.
+ 			// Tested on Tekken 5.
+-			const GSVertex* v = &m_vertex->buff[0];
++			const GSVertex* v = &GetVertexBuffer()[0];
+ 			bool is_paving = true;
+ 			bool is_paving_h = true;
+ 			bool is_paving_v = true;
+@@ -1418,7 +1419,7 @@ void GSRendererHW::MergeSprite(GSTextureCache::Source* tex)
+ 			{
+ 				// Replace all sprite with a single fullscreen sprite.
+ 				u32 unique_verts = 2;
+-				GSVertex* s = &m_vertex->buff[0];
++				GSVertex* s = &GetVertexBuffer()[0];
+ 				if (is_paving_h)
+ 				{
+ 					s[0].XYZ.X = static_cast<u16>((16.0f * m_vt.m_min.p.x) + m_context->XYOFFSET.OFX);
+@@ -1639,7 +1640,7 @@ bool GSRendererHW::IsPossibleChannelShuffle() const
+ 	const int mask = (((m_vt.m_max.p - m_vt.m_min.p) <= GSVector4(64.0f)).mask() & 0x3);
+ 	if (mask == 0x3) // single_page
+ 	{
+-		const GSVertex* v = &m_vertex->buff[0];
++		const GSVertex* v = &GetVertexBuffer()[0];
+ 
+ 		const int draw_width = std::abs(v[1].XYZ.X - v[0].XYZ.X) >> 4;
+ 		const int draw_height = std::abs(v[1].XYZ.Y - v[0].XYZ.Y) >> 4;
+@@ -1661,7 +1662,7 @@ bool GSRendererHW::IsPossibleChannelShuffle() const
+ 	if (m_cached_ctx.TEX0.TBW == (m_cached_ctx.FRAME.FBW * 2) &&
+ 		GSLocalMemory::IsPageAligned(m_cached_ctx.FRAME.PSM, GSVector4i(m_vt.m_min.p.upld(m_vt.m_max.p))))
+ 	{
+-		const GSVertex* v = &m_vertex->buff[0];
++		const GSVertex* v = &GetVertexBuffer()[0];
+ 
+ 		const int draw_width = std::abs(v[1].XYZ.X - v[0].XYZ.X) >> 4;
+ 		const int draw_height = std::abs(v[1].XYZ.Y - v[0].XYZ.Y) >> 4;
+@@ -1727,7 +1728,7 @@ bool GSRendererHW::IsSplitTextureShuffle(GIFRegTEX0& rt_TEX0, GSVector4i& valid_
+ 		return false;
+ 
+ 	// Different channel being shuffled, so needs to be handled separately (misdetection in 50 Cent)
+-	if (m_vertex->buff[m_index->buff[0]].U != m_v.U)
++	if (GetVertexBuffer()[m_index->buff[0]].U != m_v.U)
+ 		return false;
+ 
+ 	// Check that both the position and texture coordinates are page aligned, so we can work in pages instead of coordinates.
+@@ -2181,7 +2182,7 @@ bool GSRendererHW::IsDepthAlwaysPassing()
+ 	// Depth is always pass/fail (no read) and write are discarded.
+ 	return (!m_cached_ctx.TEST.ZTE || m_cached_ctx.TEST.ZTST <= ZTST_ALWAYS) ||
+ 	       // Depth test will always pass
+-	       (m_cached_ctx.TEST.ZTST == ZTST_GEQUAL && m_vt.m_eq.z && std::min(m_vertex->buff[check_index].XYZ.Z, max_z) == max_z);
++	       (m_cached_ctx.TEST.ZTST == ZTST_GEQUAL && m_vt.m_eq.z && std::min(GetVertexBuffer()[check_index].XYZ.Z, max_z) == max_z);
+ }
+ 
+ bool GSRendererHW::IsUsingCsInBlend()
+@@ -2217,12 +2218,12 @@ bool GSRendererHW::IsTBPFrameOrZ(u32 tbp, bool frame_only)
+ 	const u32 max_z = (0xFFFFFFFF >> (GSLocalMemory::m_psm[m_cached_ctx.ZBUF.PSM].fmt * 8));
+ 	const bool no_rt = (!m_cached_ctx.TEST.DATE && !IsRTWritten());
+ 	const bool no_ds = (
+-	                       // Depth is always pass/fail (no read) and write are discarded.
+-	                       (zm != 0 && m_cached_ctx.TEST.ZTST <= ZTST_ALWAYS) ||
+-	                       // Depth test will always pass
+-	                       (zm != 0 && m_cached_ctx.TEST.ZTST == ZTST_GEQUAL && m_vt.m_eq.z && std::min(m_vertex->buff[0].XYZ.Z, max_z) == max_z) ||
+-	                       // Depth will be written through the RT
+-	                       (!no_rt && m_cached_ctx.FRAME.FBP == m_cached_ctx.ZBUF.ZBP && !PRIM->TME && zm == 0 && (fm & fm_mask) == 0 && m_cached_ctx.TEST.ZTE)) ||
++						   // Depth is always pass/fail (no read) and write are discarded.
++						   (zm != 0 && m_cached_ctx.TEST.ZTST <= ZTST_ALWAYS) ||
++						   // Depth test will always pass
++						   (zm != 0 && m_cached_ctx.TEST.ZTST == ZTST_GEQUAL && m_vt.m_eq.z && std::min(GetVertexBuffer()[0].XYZ.Z, max_z) == max_z) ||
++						   // Depth will be written through the RT
++						   (!no_rt && m_cached_ctx.FRAME.FBP == m_cached_ctx.ZBUF.ZBP && !PRIM->TME && zm == 0 && (fm & fm_mask) == 0 && m_cached_ctx.TEST.ZTE)) ||
+ 	                   // No color or Z being written.
+ 	                   (no_rt && zm != 0);
+ 
+@@ -2237,7 +2238,7 @@ void GSRendererHW::HandleManualDeswizzle()
+ 
+ 	// Check if it's doing manual deswizzling first (draws are 32x16), if they are, check if the Z is flat, if not,
+ 	// we're gonna have to get creative and swap around the quandrants, but that's a TODO.
+-	GSVertex* v = &m_vertex->buff[0];
++	GSVertex* v = &GetVertexBuffer()[0];
+ 	GSIndexBuff& idx_buff = *m_index;
+ 	// Check for page quadrant and compare it to the quadrant from the verts, if it does match then we need to do correction.
+ 	const GSVector2i page_quadrant = GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].pgs / 2;
+@@ -2480,7 +2481,7 @@ void GSRendererHW::SwSpriteRender()
+ 
+ 	const bool alpha_blending_enabled = NeedsBlending();
+ 
+-	const GSVertex& v = m_index->tail > 0 ? m_vertex->buff[m_index->buff[m_index->tail - 1]] : GSVertex(); // Last vertex if any.
++	const GSVertex& v = m_index->tail > 0 ? GetVertexBuffer()[m_index->buff[m_index->tail - 1]] : GSVertex(); // Last vertex if any.
+ 	const GSVector4i vc = GSVector4i(v.RGBAQ.R, v.RGBAQ.G, v.RGBAQ.B, v.RGBAQ.A) // 0x000000AA000000BB000000GG000000RR
+ 	                          .ps32();                                           // 0x00AA00BB00GG00RR00AA00BB00GG00RR
+ 
+@@ -2657,7 +2658,7 @@ void GSRendererHW::RoundSpriteOffset()
+ 	bool debug = linear;
+ #endif
+ 	const u32 count = m_vertex->next;
+-	GSVertex* v = &m_vertex->buff[0];
++	GSVertex* v = &GetVertexBuffer()[0];
+ 
+ 	for (u32 i = 0; i < count; i += 2)
+ 	{
+@@ -2773,6 +2774,73 @@ void GSRendererHW::RoundSpriteOffset()
+ 	}
+ }
+ 
++bool GSRendererHW::DrawNativeTriangles(const GSVertexTrace::Vertex& minimum, const GSVertexTrace::Vertex& maximum,
++	const u16* indices, u32 nindices, u32 nverts, bool nonconstant_depth, void* context,
++	bool (*submit)(void*, GSHWDrawConfig&), void (*materialize)(void*, GSVertex*, u32))
++{
++	if (!indices || !nindices || nindices % 3 || nverts < 3 || nverts > 65532 || nindices > 65532 ||
++		!nonconstant_depth || !submit || !materialize || m_native_materialize ||
++		GSUtil::GetPrimClass(m_env.PRIM.PRIM) != GS_TRIANGLE_CLASS || !m_env.PRIM.IIP ||
++		m_env.PRIM.FST || m_env.PRIM.AA1 || m_gsc || m_oi || GSConfig.UserHacks_RewriteLargeSTCoords ||
++		GSConfig.UserHacks_Limit24BitDepth == GSLimit24BitDepth::PrioritizeUpper)
++		return false;
++	for (u32 i = 0; i < nindices; ++i)
++		if (indices[i] >= nverts)
++			return false;
++	for (u32 i = 0; i < 4; ++i)
++		if (!std::isfinite(minimum.p.F32[i]) || !std::isfinite(maximum.p.F32[i]) ||
++			!std::isfinite(minimum.t.F32[i]) || !std::isfinite(maximum.t.F32[i]) ||
++			minimum.p.F32[i] > maximum.p.F32[i] || minimum.t.F32[i] > maximum.t.F32[i] ||
++			minimum.c.I32[i] < 0 || maximum.c.I32[i] > 255 || minimum.c.I32[i] > maximum.c.I32[i])
++			return false;
++	if (minimum.t.z <= 0.0f || maximum.t.z >= 1e30f || minimum.t.z != minimum.t.w || maximum.t.z != maximum.t.w ||
++		minimum.p.x < -4096.0f || minimum.p.y < -4096.0f || maximum.p.x > 4096.0f || maximum.p.y > 4096.0f ||
++		minimum.p.z < 0.0f || maximum.p.z > 16777215.0f || minimum.p.w < 0.0f || maximum.p.w > 255.0f)
++		return false;
++
++	Flush(GSFlushReason::CONTEXTCHANGE);
++	if (m_channel_shuffle || m_channel_shuffle_width || m_split_clear_pages || m_split_texture_shuffle_pages ||
++		m_vertex->tail > 2 || m_index->tail)
++		return false;
++	// Conservative boxes can create a differently sized cold target, changing
++	// the viewport's floating-point interpolation. Require an established target
++	// covering this scissor until cold-target preparation has been qualified.
++	const u32 frame_base = m_context->FRAME.Block();
++	const auto* target = g_texture_cache->GetExactTarget(frame_base, m_context->FRAME.FBW,
++		GSTextureCache::RenderTarget, frame_base + 1);
++	if (!target || !target->m_texture || target->m_TEX0.TBP0 != frame_base ||
++		target->m_unscaled_size.x < m_context->scissor.in.z || target->m_unscaled_size.y < m_context->scissor.in.w)
++		return false;
++	while (m_max_vertex_count < std::max(nverts, nindices))
++		GrowVertexBuffer();
++
++	const GSVertexBuff saved = *m_vertex;
++	GSVertex remaining[2];
++	std::memcpy(remaining, saved.buff, sizeof(GSVertex) * saved.tail);
++	const ScopedGuard restore([&] {
++		m_native_vertices_pending = false;
++		m_native_geometry_context = nullptr;
++		m_native_submit = nullptr;
++		m_native_materialize = nullptr;
++		*m_vertex = saved;
++		m_index->tail = 0;
++		std::memcpy(saved.buff, remaining, sizeof(GSVertex) * saved.tail);
++	});
++	std::memcpy(m_index->buff, indices, sizeof(u16) * nindices);
++	m_vertex->head = m_vertex->tail = m_vertex->next = nverts;
++	m_index->tail = nindices;
++	m_native_geometry_context = context;
++	m_native_submit = submit;
++	m_native_materialize = materialize;
++	m_native_vertices_pending = true;
++	m_native_min = minimum;
++	m_native_max = maximum;
++	// Needs proper testing with ordered live VIF/GIF ownership before enabling
++	// runtime bypass. This scoped API deliberately does not synthesize latches.
++	FlushPrim();
++	return true;
++}
++
+ void GSRendererHW::Draw()
+ {
+ 	static u32 num_skipped_channel_shuffle_draws = 0;
+@@ -3213,7 +3281,7 @@ void GSRendererHW::Draw()
+ 		}
+ 
+ 		const u32 vert_index = (m_vt.m_primclass == GS_TRIANGLE_CLASS) ? 2 : 1;
+-		u32 const_color = vtx_buff.buff[idx_buff.buff[vert_index]].RGBAQ.U32[0];
++		u32 const_color = GetVertexBuffer()[idx_buff.buff[vert_index]].RGBAQ.U32[0];
+ 		u32 fb_mask = m_cached_ctx.FRAME.FBMSK;
+ 
+ 		// If we could just check the colour, it would be great, but Echo Night decided it's going to set the alpha and green to 128, for some reason, and actually be 32bit, so it ruined my day.
+@@ -3249,7 +3317,7 @@ void GSRendererHW::Draw()
+ 			m_cached_ctx.TEXA.TA0 = 0;
+ 			m_cached_ctx.TEXA.TA1 = 128;
+ 			m_cached_ctx.FRAME.PSM = (m_cached_ctx.FRAME.PSM & 2) ? m_cached_ctx.FRAME.PSM : PSMCT16;
+-			vtx_buff.buff[idx_buff.buff[1]].RGBAQ.U32[0] = const_color;
++			GetVertexBuffer()[idx_buff.buff[1]].RGBAQ.U32[0] = const_color;
+ 			ReplaceVerticesWithSprite(m_r, GSVector2i(m_r.width(), m_r.height()));
+ 		}
+ 
+@@ -3480,7 +3548,7 @@ void GSRendererHW::Draw()
+ 			if (GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].bpp == 16 &&
+ 				(idx_buff.tail >= (m_cached_ctx.TEX0.TBW * 2) || m_cached_ctx.TEX0.TBP0 == m_cached_ctx.FRAME.Block() || m_cached_ctx.CLAMP.WMS > CLAMP_CLAMP || m_cached_ctx.CLAMP.WMT > CLAMP_CLAMP))
+ 			{
+-				const GSVertex* v = &vtx_buff.buff[0];
++				const GSVertex* v = &GetVertexBuffer()[0];
+ 
+ 				const int first_x = std::clamp((static_cast<int>(((v[0].XYZ.X - m_context->XYOFFSET.OFX) + 8))) >> 4, 0, 2048);
+ 				const bool offset_last = PRIM->FST ? (v[1].U > v[0].U) : ((v[1].ST.S / v[1].RGBAQ.Q) > (v[0].ST.S / v[1].RGBAQ.Q));
+@@ -3506,7 +3574,7 @@ void GSRendererHW::Draw()
+ 			{
+ 				bool shuffle_channel_reads = !m_cached_ctx.FRAME.FBMSK;
+ 				const u32 increment = (m_vt.m_primclass == GS_TRIANGLE_CLASS) ? 3 : 2;
+-				const GSVertex* v = &vtx_buff.buff[0];
++				const GSVertex* v = &GetVertexBuffer()[0];
+ 
+ 				if (shuffle_channel_reads)
+ 				{
+@@ -3860,7 +3928,7 @@ void GSRendererHW::Draw()
+ 
+ 			if (vertical_offset || horizontal_offset)
+ 			{
+-				GSVertex* v = &vtx_buff.buff[0];
++				GSVertex* v = &GetVertexBuffer()[0];
+ 				const u32 tail = vtx_buff.tail;
+ 
+ 				for (u32 i = 0; i < tail; i++)
+@@ -4159,7 +4227,7 @@ void GSRendererHW::Draw()
+ 
+ 			if (vertical_offset || horizontal_offset)
+ 			{
+-				GSVertex* v = &vtx_buff.buff[0];
++				GSVertex* v = &GetVertexBuffer()[0];
+ 				const u32 tail = vtx_buff.tail;
+ 
+ 				for (u32 i = 0; i < tail; i++)
+@@ -4627,7 +4695,7 @@ void GSRendererHW::Draw()
+ 			const GSVector2i fb_size = PCRTCDisplays.GetFramebufferSize(-1);
+ 			if (std::abs(fb_size.x - m_r.width()) <= 1 && std::abs(fb_size.y - m_r.height()) <= 1)
+ 			{
+-				GSVertex* v = vtx_buff.buff;
++				GSVertex* v = GetVertexBuffer();
+ 
+ 				v[0].XYZ.Z = v[1].XYZ.Z;
+ 				v[0].RGBAQ = v[1].RGBAQ;
+@@ -5111,7 +5179,7 @@ void GSRendererHW::Draw()
+ 	if (CanUpscale() && (m_vt.m_primclass == GS_SPRITE_CLASS) && rt && rt->GetScale() > 1.0f)
+ 	{
+ 		const u32 count = vtx_buff.next;
+-		GSVertex* v = &vtx_buff.buff[0];
++		GSVertex* v = &GetVertexBuffer()[0];
+ 
+ 		// Hack to avoid vertical black line in various games (ace combat/tekken)
+ 		if (GSConfig.UserHacks_AlignSpriteX)
+@@ -5397,7 +5465,7 @@ void GSRendererHW::HandleFlatShadedVertices()
+ 	{
+ 		for (u32 j = 0; j < n - 1; j++)
+ 		{
+-			if (vtx_buff.buff[idx_buff.buff[i + j]].RGBAQ.U32[0] != vtx_buff.buff[idx_buff.buff[i + n - 1]].RGBAQ.U32[0])
++			if (GetVertexBuffer()[idx_buff.buff[i + j]].RGBAQ.U32[0] != GetVertexBuffer()[idx_buff.buff[i + n - 1]].RGBAQ.U32[0])
+ 			{
+ 				prims_flat = false;
+ 				break;
+@@ -5415,30 +5483,41 @@ void GSRendererHW::HandleFlatShadedVertices()
+ 
+ 	for (int i = static_cast<int>(idx_buff.tail) - 1; i >= 0; i--)
+ 	{
+-		vtx_buff.buff_copy[i] = vtx_buff.buff[idx_buff.buff[i]];
++		vtx_buff.buff_copy[i] = GetVertexBuffer()[idx_buff.buff[i]];
+ 		idx_buff.buff[i] = static_cast<u16>(i);
+ 	}
+-	std::swap(vtx_buff.buff, vtx_buff.buff_copy);
++	std::swap(GetVertexBuffer(), vtx_buff.buff_copy);
+ 	vtx_buff.head = vtx_buff.next = vtx_buff.tail = idx_buff.tail;
+ 
+ 	// Make all vertices the same color to simplify handling in expand shaders.
+ 	for (u32 i = 0; i < idx_buff.tail; i += n)
+ 	{
+ 		for (u32 j = 0; j < n - 1; j++)
+-			vtx_buff.buff[i + j].RGBAQ.U32[0] = vtx_buff.buff[i + n - 1].RGBAQ.U32[0];
++			GetVertexBuffer()[i + j].RGBAQ.U32[0] = GetVertexBuffer()[i + n - 1].RGBAQ.U32[0];
+ 	}
+ }
+ 
+ void GSRendererHW::SetupIA(float target_scale, float sx, float sy, bool req_vert_backup, const bool no_rt)
+ {
+ 	GL_PUSH("HW: IA");
++	if (m_native_vertices_pending && !req_vert_backup && !m_vt.m_accurate_stq)
++	{
++		pxAssert(m_vt.m_primclass == GS_TRIANGLE_CLASS && PRIM->IIP && !PRIM->AA1 && !PRIM->FST);
++		m_conf.topology = GSHWDrawConfig::Topology::Triangle;
++		m_conf.indices_per_prim = 3;
++		m_conf.verts = nullptr;
++		m_conf.indices = m_index->buff;
++		m_conf.nverts = m_vertex->next;
++		m_conf.nindices = m_index->tail;
++		return;
++	}
+ 
+ 	// Do not force even sprite positive for texture shuffles since the coordinates are already aligned.
+ 	if (GSConfig.UserHacks_ForceEvenSpritePosition && !m_isPackedUV_HackFlag && m_process_texture && PRIM->FST &&
+ 		!m_texture_shuffle)
+ 	{
+ 		for (u32 i = 0; i < m_vertex->next; i++)
+-			m_vertex->buff[i].UV &= 0x3FEF3FEF;
++			GetVertexBuffer()[i].UV &= 0x3FEF3FEF;
+ 	}
+ 
+ 	const bool unscale_pt_ln = !GSConfig.UserHacks_DisableSafeFeatures && (target_scale != 1.0f);
+@@ -5465,7 +5544,7 @@ void GSRendererHW::SetupIA(float target_scale, float sx, float sy, bool req_vert
+ 						m_conf.vs.expand = GSHWDrawConfig::VSExpand::Point;
+ 						m_conf.cb_vs.point_size = GSVector2(16.0f * sx, 16.0f * sy);
+ 						m_conf.topology = GSHWDrawConfig::Topology::Triangle;
+-						m_conf.verts = m_vertex->buff;
++						m_conf.verts = GetVertexBuffer();
+ 						m_conf.nverts = m_vertex->next;
+ 						m_conf.nindices = m_index->tail * 6;
+ 						m_conf.indices_per_prim = 6;
+@@ -5546,7 +5625,7 @@ void GSRendererHW::SetupIA(float target_scale, float sx, float sy, bool req_vert
+ 
+ 					if (req_vert_backup)
+ 					{
+-						memcpy(m_draw_vertex.buff, m_vertex->buff, sizeof(GSVertex) * m_vertex->next);
++						memcpy(m_draw_vertex.buff, GetVertexBuffer(), sizeof(GSVertex) * m_vertex->next);
+ 						memcpy(m_draw_index.buff, m_index->buff, sizeof(u16) * m_index->tail);
+ 
+ 						m_conf.verts = m_draw_vertex.buff;
+@@ -5554,7 +5633,7 @@ void GSRendererHW::SetupIA(float target_scale, float sx, float sy, bool req_vert
+ 					}
+ 					else
+ 					{
+-						m_conf.verts = m_vertex->buff;
++						m_conf.verts = GetVertexBuffer();
+ 						m_conf.indices = m_index->buff;
+ 					}
+ 					m_conf.nverts = m_vertex->next;
+@@ -5591,7 +5670,7 @@ void GSRendererHW::SetupIA(float target_scale, float sx, float sy, bool req_vert
+ 				// See note above in GS_SPRITE_CLASS.
+ 				if (m_vt.m_accurate_stq && m_vt.m_eq.stq) [[unlikely]]
+ 				{
+-					GSVertex* const v = m_vertex->buff;
++					GSVertex* const v = GetVertexBuffer();
+ 					const GSVector4 v_q = GSVector4(v[0].RGBAQ.Q);
+ 					for (u32 i = 0; i < m_vertex->next; i++)
+ 					{
+@@ -5610,7 +5689,7 @@ void GSRendererHW::SetupIA(float target_scale, float sx, float sy, bool req_vert
+ 
+ 	if (req_vert_backup)
+ 	{
+-		memcpy(m_draw_vertex.buff, m_vertex->buff, sizeof(GSVertex) * m_vertex->next);
++		memcpy(m_draw_vertex.buff, GetVertexBuffer(), sizeof(GSVertex) * m_vertex->next);
+ 		memcpy(m_draw_index.buff, m_index->buff, sizeof(u16) * m_index->tail);
+ 
+ 		m_conf.verts = m_draw_vertex.buff;
+@@ -5618,7 +5697,7 @@ void GSRendererHW::SetupIA(float target_scale, float sx, float sy, bool req_vert
+ 	}
+ 	else
+ 	{
+-		m_conf.verts = m_vertex->buff;
++		m_conf.verts = GetVertexBuffer();
+ 		m_conf.indices = m_index->buff;
+ 	}
+ 	m_conf.nverts = m_vertex->next;
+@@ -6217,7 +6296,7 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale,
+ 			// This kinda screws things up when using ST, so let's not.
+ 			if (m_vt.m_primclass == GS_SPRITE_CLASS && rtscale > 1.0f && (m_process_texture && PRIM->FST))
+ 			{
+-				const GSVertex* v = &m_vertex->buff[0];
++				const GSVertex* v = &GetVertexBuffer()[0];
+ 				const int x1_frac = ((v[1].XYZ.X - m_context->XYOFFSET.OFX) & 0xf);
+ 				const int y1_frac = ((v[1].XYZ.Y - m_context->XYOFFSET.OFY) & 0xf);
+ 				if (x1_frac & 8)
+@@ -6521,7 +6600,7 @@ __ri u32 GSRendererHW::EmulateChannelShuffle(GSTextureCache::Target* src, bool t
+ 	}
+ 	else if (m_cached_ctx.CLAMP.WMS == 3 && ((m_cached_ctx.CLAMP.MAXU & 0x8) == 8))
+ 	{
+-		const ChannelFetch channel_select = ((m_cached_ctx.CLAMP.WMT != 3 && (m_vertex->buff[m_index->buff[0]].V & 0x20) == 0) || (m_cached_ctx.CLAMP.WMT == 3 && ((m_cached_ctx.CLAMP.MAXV & 0x2) == 0))) ? ChannelFetch_BLUE : ChannelFetch_ALPHA;
++		const ChannelFetch channel_select = ((m_cached_ctx.CLAMP.WMT != 3 && (GetVertexBuffer()[m_index->buff[0]].V & 0x20) == 0) || (m_cached_ctx.CLAMP.WMT == 3 && ((m_cached_ctx.CLAMP.MAXV & 0x2) == 0))) ? ChannelFetch_BLUE : ChannelFetch_ALPHA;
+ 
+ 		// MGS3/Kill Zone
+ 		if (test_only)
+@@ -6535,7 +6614,7 @@ __ri u32 GSRendererHW::EmulateChannelShuffle(GSTextureCache::Target* src, bool t
+ 	{
+ 		// Read either Red or Green. Let's check the V coordinate. 0-1 is likely top so
+ 		// red. 2-3 is likely bottom so green (actually depends on texture base pointer offset)
+-		const bool green = (m_cached_ctx.CLAMP.WMT == 3 && ((m_cached_ctx.CLAMP.MAXV & 0x2) == 2)) || (PRIM->FST && (m_vertex->buff[0].V & 32));
++		const bool green = (m_cached_ctx.CLAMP.WMT == 3 && ((m_cached_ctx.CLAMP.MAXV & 0x2) == 2)) || (PRIM->FST && (GetVertexBuffer()[0].V & 32));
+ 		if (green && (m_cached_ctx.FRAME.FBMSK & 0x00FFFFFF) == 0x00FFFFFF)
+ 		{
+ 			// Typically used in Terminator 3
+@@ -6668,7 +6747,7 @@ __ri u32 GSRendererHW::EmulateChannelShuffle(GSTextureCache::Target* src, bool t
+ 	m_channel_shuffle_src_valid = src->m_valid;
+ 	if (GSConfig.UserHacks_TextureInsideRt == GSTextureInRtMode::Disabled || ((src->m_TEX0.TBW == rt->m_TEX0.TBW) && (!m_in_target_draw && IsPageCopy())) || m_conf.ps.urban_chaos_hle || m_conf.ps.tales_of_abyss_hle)
+ 	{
+-		GSVertex* s = &m_vertex->buff[0];
++		GSVertex* s = &GetVertexBuffer()[0];
+ 		s[0].XYZ.X = static_cast<u16>(m_context->XYOFFSET.OFX + 0);
+ 		s[1].XYZ.X = static_cast<u16>(m_context->XYOFFSET.OFX + 16384);
+ 		s[0].XYZ.Y = static_cast<u16>(m_context->XYOFFSET.OFY + 0);
+@@ -6716,7 +6795,7 @@ __ri u32 GSRendererHW::EmulateChannelShuffle(GSTextureCache::Target* src, bool t
+ 
+ 		if (!(m_index->tail <= 64 && !IsPageCopy() && m_cached_ctx.CLAMP.WMT == 3))
+ 		{
+-			GSVertex* s = &m_vertex->buff[0];
++			GSVertex* s = &GetVertexBuffer()[0];
+ 			s[0].XYZ.X = static_cast<u16>(m_context->XYOFFSET.OFX + (m_r.x << 4));
+ 			s[1].XYZ.X = static_cast<u16>(m_context->XYOFFSET.OFX + (m_r.z << 4));
+ 			s[0].XYZ.Y = static_cast<u16>(m_context->XYOFFSET.OFY + (m_r.y << 4));
+@@ -8089,7 +8168,7 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt,
+ 
+ 			if (can_offset && tex->m_scale > 1.0f)
+ 			{
+-				const GSVertex* v = &m_vertex->buff[0];
++				const GSVertex* v = &GetVertexBuffer()[0];
+ 				if (PRIM->FST)
+ 				{
+ 					const int x1_frac = ((v[1].XYZ.X - m_context->XYOFFSET.OFX) & 0xf);
+@@ -8160,7 +8239,7 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt,
+ 
+ 			if (can_offset && tex->m_scale > 1.0f)
+ 			{
+-				const GSVertex* v = &m_vertex->buff[0];
++				const GSVertex* v = &GetVertexBuffer()[0];
+ 				if (PRIM->FST)
+ 				{
+ 					const int x1_frac = ((v[1].XYZ.X - m_context->XYOFFSET.OFX) & 0xf);
+@@ -9546,7 +9625,14 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
+ 	}
+ 
+ 	if (!m_channel_shuffle_width)
+-		g_gs_device->RenderHW(m_conf);
++	{
++		if (!m_native_vertices_pending || !m_native_submit(m_native_geometry_context, m_conf))
++		{
++			if (m_native_vertices_pending)
++				m_conf.verts = GetVertexBuffer();
++			g_gs_device->RenderHW(m_conf);
++		}
++	}
+ 	else
+ 		m_last_rt = rt;
+ 
+@@ -9887,7 +9973,7 @@ bool GSRendererHW::DetectStripedDoubleClear(bool& no_rt, bool& no_ds)
+ 	                        !m_cached_ctx.ZBUF.ZMSK &&
+ 	                        (m_cached_ctx.FRAME.PSM & 0x30) != (m_cached_ctx.ZBUF.PSM & 0x30) &&
+ 	                        (m_cached_ctx.FRAME.PSM & 0xF) == (m_cached_ctx.ZBUF.PSM & 0xF) && m_vt.m_eq.z == 1 &&
+-	                        m_vertex->buff[1].XYZ.Z == m_vertex->buff[1].RGBAQ.U32[0];
++	                        GetVertexBuffer()[1].XYZ.Z == GetVertexBuffer()[1].RGBAQ.U32[0];
+ 
+ 	// Z and color must be constant and the same and must be drawing strips.
+ 	if (!z_is_frame || m_vt.m_eq.rgba != 0xFFFF)
+@@ -9902,14 +9988,14 @@ bool GSRendererHW::DetectStripedDoubleClear(bool& no_rt, bool& no_ds)
+ 	// LOTR has 4096 verts, so this isn't going to be super fast on that game, most games will be just 16 verts so they should be ok,
+ 	// and I could cheat and stop when we get a size that matches, but that might be a lucky misdetection, I don't wanna risk it.
+ 	int vertex_offset = 0;
+-	int last_vertex = m_vertex->buff[0].XYZ.X;
++	int last_vertex = GetVertexBuffer()[0].XYZ.X;
+ 	const u32 tail = m_vertex->tail;
+ 	GSVertexBuff& vtx_buff = *m_vertex;
+ 
+ 	for (u32 i = 1; i < tail; i++)
+ 	{
+-		vertex_offset = std::max(static_cast<int>((vtx_buff.buff[i].XYZ.X - last_vertex) >> 4), vertex_offset);
+-		last_vertex = vtx_buff.buff[i].XYZ.X;
++		vertex_offset = std::max(static_cast<int>((GetVertexBuffer()[i].XYZ.X - last_vertex) >> 4), vertex_offset);
++		last_vertex = GetVertexBuffer()[i].XYZ.X;
+ 
+ 		// Found a gap which is much bigger, no point continuing to scan.
+ 		if (vertex_offset > strip_size)
+@@ -10285,7 +10371,7 @@ bool GSRendererHW::TryTargetClear(GSTextureCache::Target* rt, GSTextureCache::Ta
+ 		if (ds && !preserve_depth && m_r.rintersect(ds->m_valid).eq(ds->m_valid))
+ 		{
+ 			const u32 max_z = 0xFFFFFFFF >> (GSLocalMemory::m_psm[m_cached_ctx.ZBUF.PSM].fmt * 8);
+-			const u32 z = std::min(max_z, m_vertex->buff[1].XYZ.Z);
++			const u32 z = std::min(max_z, GetVertexBuffer()[1].XYZ.Z);
+ 			const float d = static_cast<float>(z) * 0x1p-32f;
+ 			GL_INS("HW: TryTargetClear(): DS at %x <= %f", ds->m_TEX0.TBP0, d);
+ 			g_gs_device->ClearDepth(ds->m_texture, d);
+@@ -10352,7 +10438,7 @@ bool GSRendererHW::TryGSMemClear(bool no_rt, bool preserve_rt, bool invalidate_r
+ 
+ 	if (!no_ds && !preserve_z)
+ 	{
+-		ClearGSLocalMemory(m_context->offset.zb, m_r, m_vertex->buff[1].XYZ.Z);
++		ClearGSLocalMemory(m_context->offset.zb, m_r, GetVertexBuffer()[1].XYZ.Z);
+ 
+ 		if (invalidate_z)
+ 		{
+@@ -10642,7 +10728,7 @@ bool GSRendererHW::TextureCoversWithoutGapsNotEqual()
+ 		return true;
+ 	}
+ 
+-	const GSVertex* v = &m_vertex->buff[0];
++	const GSVertex* v = &GetVertexBuffer()[0];
+ 	const int first_dpY = v[1].XYZ.Y - v[0].XYZ.Y;
+ 	const int first_dpX = v[1].XYZ.X - v[0].XYZ.X;
+ 	const int first_dtV = v[1].V - v[0].V;
+@@ -10763,7 +10849,7 @@ int GSRendererHW::IsScalingDraw(GSTextureCache::Source* src, bool no_gaps)
+ 	if (m_vt.m_primclass == GS_SPRITE_CLASS && m_index->tail > 2 && !no_gaps_or_single_sprite && m_context->TEX1.MMAG == 1 && is_target_src && (m_cached_ctx.TEST.ZTST == ZTST_ALWAYS || m_cached_ctx.TEST.ZTE == 0) &&
+ 		!m_context->ALPHA.IsOpaque() && GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].bpp == GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].bpp)
+ 	{
+-		GSVertex* v = &m_vertex->buff[0];
++		GSVertex* v = &GetVertexBuffer()[0];
+ 		float tw = 1 << src->m_TEX0.TW;
+ 		float th = 1 << src->m_TEX0.TH;
+ 
+@@ -10822,7 +10908,7 @@ u32 GSRendererHW::GetConstantDirectWriteMemClearColor() const
+ {
+ 	// Take the vertex colour, but check if the blending would make it black.
+ 	const u32 vert_index = (m_vt.m_primclass == GS_TRIANGLE_CLASS) ? 2 : 1;
+-	u32 vert_color = m_vertex->buff[m_index->buff[vert_index]].RGBAQ.U32[0];
++	u32 vert_color = GetVertexBuffer()[m_index->buff[vert_index]].RGBAQ.U32[0];
+ 	if (PRIM->ABE && m_context->ALPHA.IsBlack())
+ 		vert_color &= 0xFF000000u;
+ 
+@@ -10843,7 +10929,7 @@ u32 GSRendererHW::GetConstantDirectWriteMemClearColor() const
+ u32 GSRendererHW::GetConstantDirectWriteMemClearDepth() const
+ {
+ 	const u32 max_z = (0xFFFFFFFF >> (GSLocalMemory::m_psm[m_cached_ctx.ZBUF.PSM].fmt * 8));
+-	return std::min(m_vertex->buff[1].XYZ.Z, max_z);
++	return std::min(GetVertexBuffer()[1].XYZ.Z, max_z);
+ }
+ 
+ bool GSRendererHW::IsReallyDithered() const
+@@ -10865,7 +10951,7 @@ void GSRendererHW::ReplaceVerticesWithSprite(const GSVector4i& unscaled_rect, co
+ {
+ 	const GSVector4i fpr = unscaled_rect.sll32<4>();
+ 	const GSVector4i fpuv = unscaled_uv_rect.sll32<4>();
+-	GSVertex* v = m_vertex->buff;
++	GSVertex* v = GetVertexBuffer();
+ 
+ 	v[0].XYZ.X = static_cast<u16>(m_context->XYOFFSET.OFX + fpr.x);
+ 	v[0].XYZ.Y = static_cast<u16>(m_context->XYOFFSET.OFY + fpr.y);
+@@ -10939,8 +11025,8 @@ void GSRendererHW::OffsetDraw(s32 fbp_offset, s32 zbp_offset, s32 xoffset, s32 y
+ 
+ 	for (u32 i = 0; i < vtx_buff.next; i++)
+ 	{
+-		vtx_buff.buff[i].XYZ.X += fp_xoffset;
+-		vtx_buff.buff[i].XYZ.Y += fp_yoffset;
++		GetVertexBuffer()[i].XYZ.X += fp_xoffset;
++		GetVertexBuffer()[i].XYZ.Y += fp_yoffset;
+ 	}
+ 
+ 	m_vt.m_min.p.x += static_cast<float>(xoffset);
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.h b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+index 4ee9d55..91e6207 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.h
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+@@ -32,6 +32,8 @@ public:
+ 	static constexpr int MAX_FRAMEBUFFER_HEIGHT = 1280;
+ 
+ private:
++	bool (*m_native_submit)(void*, GSHWDrawConfig&) = nullptr;
++
+ 	static constexpr float SSR_UV_TOLERANCE = 1.0f;
+ 
+ 	using GSC_Ptr = bool(*)(GSRendererHW& r, int& skip);	// GSC - Get Skip Count
+@@ -381,6 +383,18 @@ public:
+ 	void Move() override;
+ 	void Draw() override;
+ 
++	// Draw-only seam: preceding GIF work is flushed, stream latches/unfinished
++	// primitives are preserved. The caller owns final GIF/VU latch updates.
++	// Requires finite conservative bounds, positive Q, and independently proven
++	// nonconstant depth (flat-depth texel rounding is not supported here).
++	// submit must leave config/device unchanged when returning false.
++	// materialize fills exactly nverts GS records; neither callback may throw.
++	// False means declined before this draw; true means consumed (including a
++	// CPU fallback or a GS-test-cull). No GPU readback is performed.
++	bool DrawNativeTriangles(const GSVertexTrace::Vertex& minimum, const GSVertexTrace::Vertex& maximum,
++		const u16* indices, u32 nindices, u32 nverts, bool nonconstant_depth, void* context,
++		bool (*submit)(void*, GSHWDrawConfig&), void (*materialize)(void*, GSVertex*, u32));
++
+ 	void PurgeTextureCache(bool sources, bool targets, bool hash_cache) override;
+ 	void ReadbackTextureCache() override;
+ 
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHWMultiISA.cpp b/pcsx2/GS/Renderers/HW/GSRendererHWMultiISA.cpp
+index b8d0bce..3b8c4da 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHWMultiISA.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHWMultiISA.cpp
+@@ -53,7 +53,7 @@ bool GSRendererHWFunctions::SwPrimRender(GSRendererHW& hw, bool invalidate_tc, b
+ 	// Optimize the division by 1 with a nop. It also means that GS_SPRITE_CLASS must be processed when !vt.m_eq.q.
+ 	// If you have both GS_SPRITE_CLASS && vt.m_eq.q, it will depends on the first part of the 'OR'.
+ 	const u32 q_div = !hw.IsMipMapActive() && ((vt.m_eq.q && vt.m_min.t.z != 1.0f) || (!vt.m_eq.q && vt.m_primclass == GS_SPRITE_CLASS));
+-	GSVertexSW::s_cvb[vt.m_primclass][PRIM->TME][PRIM->FST][q_div](context, data.vertex, hw.m_vertex->buff, hw.m_vertex->next);
++	GSVertexSW::s_cvb[vt.m_primclass][PRIM->TME][PRIM->FST][q_div](context, data.vertex, hw.GetVertexBuffer(), hw.m_vertex->next);
+ 
+ 	GSVector4i scissor = context->scissor.in;
+ 	GSVector4i bbox = GSVector4i(vt.m_min.p.floor().xyxy(vt.m_max.p.ceil())).rintersect(scissor);
+@@ -527,9 +527,9 @@ bool GSRendererHWFunctions::SwPrimRender(GSRendererHW& hw, bool invalidate_tc, b
+ 		for (int i = 0, j = hw.m_vertex->tail; i < j; i++)
+ 		{
+ #if _M_SSE >= 0x501
+-			if ((((hw.m_vertex->buff[i].XYZ.X - ofx) + 15) >> 4) & 7) // aligned to 8
++			if ((((hw.GetVertexBuffer()[i].XYZ.X - ofx) + 15) >> 4) & 7) // aligned to 8
+ #else
+-			if ((((hw.m_vertex->buff[i].XYZ.X - ofx) + 15) >> 4) & 3) // aligned to 4
++			if ((((hw.GetVertexBuffer()[i].XYZ.X - ofx) + 15) >> 4) & 3) // aligned to 4
+ #endif
+ 			{
+ 				gd.sel.notest = 0;

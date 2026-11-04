@@ -270,12 +270,10 @@ still passes with zero differing pixels, including the corrected X/Y transform
 update test. The fitted viewports and fixed untextured draw state remain
 diagnostic; they do not implement the game's texture/depth/blending decisions.
 
-The next renderer integration must feed these bounds into GS vertex-trace/LOD
-preparation and handle or decline per-vertex special cases before calling the
-GPU draw interface. `GSRendererHW::Draw` and `SetupIA` still contain CPU vertex
-reads, mutations and heuristic paths. Supplying bounds alone does not make
-those functions safe with a missing CPU vertex array. Ordered engine/VIF/GIF
-metadata and uncovered VU-state readers also remain required for live bypass.
+The scoped renderer integration below now feeds these bounds into GS trace/LOD
+preparation and handles per-vertex special cases. Supplying bounds alone is
+still insufficient for live bypass: ordered engine/VIF/GIF metadata and
+uncovered VU-state readers remain required.
 
 ## Reusing identical field transforms
 
@@ -294,3 +292,68 @@ second field on reuse, so it exercises both equal-matrix reuse and distinct
 matrix computation in one run. It still has zero pixel differences. This is
 validated elimination of redundant arithmetic in the GPU component, not a
 measured frame-rate gain or live geometry offload.
+
+## GS frontend preparation from native mesh metadata
+
+The opt-in PCSX2 patch now adds `GSRendererHW::DrawNativeTriangles`.
+`prepareDualTrace` converts cached mesh bounds into GS screen/texture units,
+rounding texture ranges outward. The native trace uses the ordinary filter/LOD
+logic and conservative coverage/overlap answers. The existing texture cache,
+depth, alpha-test and blend preparation then produce the actual draw config.
+`SetupIA` binds the native vertex path without copying transformed CPU vertices.
+
+CPU vertex reads and mutations in hardware renderer helpers go through a lazy
+materialization accessor. The first such access invokes the caller's fallback
+and selects ordinary CPU drawing for that entire submission. A declined final
+GPU submission also materializes and draws normally. The callback contract
+requires exact vertices, no exceptions, and no device/config mutation on a
+declined GPU submission. No geometry output is read back from the GPU.
+
+This is a synchronous **GS-thread draw-only seam**, not a per-mesh cross-thread
+wait. It flushes preceding ordinary draws and preserves stream-buffer leftovers;
+it deliberately does not synthesize final GIF or VU latches. The caller still
+owns those updates and ordered delivery. The native callback is placed at the
+current draw's submission, so it cannot accidentally replace an older deferred
+channel-shuffle draw.
+
+Eligibility currently requires textured IIP triangles, finite bounds, positive
+Q, no coordinate wrap, supported depth handling, and an established exact
+render target covering the scissor. Pending shuffles, split clears, game-specific
+draw hooks, AA1, FST, and large-ST rewriting decline. Cold target creation is
+excluded: conservative bounds can allocate a different target size and alter
+floating-point interpolation. **Nonconstant depth must be proven independently**;
+a loose depth interval cannot prove it. Flat-depth texel rounding is unsupported.
+The diagnostic obtains this witness from captured reference vertices. A live
+caller must derive it from source metadata before using this seam.
+
+```powershell
+python -B testing/test_gpu_dual_transform.py draw --frontend --prepared <private-grouped-directory> --dll <private-gpu-build>/tf_hwgs.dll --report <fresh-private-frontend-report.json>
+```
+
+The frontend diagnostic uses all 224 captured mesh instances through the real
+GS frontend, with generated checkerboard textures and four rendering modes:
+depth-tested texture rendering, alpha testing/blending, mipmap filtering/blending,
+and deliberate final-submission fallback. Each comparison uses independently
+submitted GIF reference triangles. Both targets are established at the same size
+before drawing. The first three modes require **zero CPU materializations**.
+
+Results at **2048 × 1792 internal resolution**: 1,216 GPU draws and 408 deliberate
+CPU fallbacks, 400 mipmap-filtered submission callbacks, **zero differing pixels
+across 14,680,064 full-resolution comparisons**, and zero differences in the
+reduced GS VRAM comparisons. The diagnostic also rejects nonfinite bounds,
+out-of-range indices, and missing nonconstant-depth proof before callbacks run.
+Texture data and render state are synthetic; this does not qualify arbitrary
+game texture feedback, palettes, GS culling, or unfinished primitive sequences.
+
+The next runtime step is ordered mesh/source ownership and VIF/GIF handoff,
+including final-latch updates and fallback materialization from retained source
+data. Live VU bypass remains disabled. These renderer results do not establish
+a gameplay FPS gain or true rendered 60 fps.
+
+The enhanced Amazon route also passed with this patched renderer and the PGO,
+static-VU runtime, direct presentation, 16:9 and 4× internal rendering. Opening
+and arrival cinematics were skipped. Its gameplay-only window measured
+**54.9299 physics updates/s**, median **17.736 ms**, p95 **22.2 ms**. Live native
+geometry submission was disabled in that run. This single sample is a shared
+renderer regression check, not an attributed GPU-offload speedup or a count of
+distinct rendered frames.

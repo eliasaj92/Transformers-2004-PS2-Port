@@ -309,8 +309,8 @@ overflowing, nonpositive-Q and W=0-crossing cases are declined.
 The grouped draw diagnostic uses these bounds for viewport preparation and
 still matches its separate reference draws exactly. The maximum conservative
 box area is 10.15244 times the exact projected vertex box in this window; its
-effect on texture-cache work remains unmeasured. This bounds provider does not
-yet replace the GS renderer's vertex trace or its per-vertex heuristic paths.
+effect on texture-cache work remains unmeasured. The bounds provider feeds the
+scoped GS frontend described below; it does not qualify live VU bypass.
 
 The earlier transform-update diagnostic swapped the two view matrices, which
 were equal in these captures. It therefore did not establish that updated
@@ -324,3 +324,26 @@ the first transformed record in that case while retaining separate field draws.
 All 37,136 outputs in the larger 776-chunk arithmetic set still match, and the
 resident-draw test explicitly exercises distinct matrices after its update.
 No live gameplay measurement is implied by this shader optimization.
+
+## Textured GS frontend from cached bounds
+
+`DrawNativeTriangles` now runs the ordinary GS texture-cache, depth, alpha-test,
+blend and LOD preparation from native bounds. Hardware renderer helpers lazily
+materialize exact CPU vertices if a special case needs to inspect or mutate
+them; that submission then stays on the CPU draw path. Warm render targets and
+independent proof of nonconstant depth are required. Final GIF/VU latches and
+ordered cross-thread ownership remain the caller's responsibility.
+
+The enhanced-capture diagnostic submitted 1,216 GPU draws with no CPU geometry
+materialization, plus 408 intentionally declined submissions checking fallback.
+It exercised generated textures, depth, blending, alpha testing and mipmaps at
+2048 × 1792. All 14,680,064 full-resolution pixel comparisons against independent
+GIF reference draws matched. This closes the earlier fixed-untextured-state
+limitation, but does not establish game-specific texture feedback, live VU
+bypass, or a frame-rate gain. See [eligibility and commands](../../deps/hwgs/GPU_GEOMETRY.md).
+
+The enhanced Amazon route passed with the shared renderer changes and live VU
+bypass disabled. Its measured gameplay window reached 54.9299 physics updates/s
+(17.736 ms median, 22.2 ms p95). Only the enhanced accelerated build ran, with
+cinematics skipped. This sample does not attribute a speedup to GPU offload or
+establish distinct rendered 60 fps.

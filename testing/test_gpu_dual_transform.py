@@ -254,7 +254,7 @@ def replay(directory, capture_path, gpu_report_path, fixtures, runner, report_pa
     return result.returncode
 
 
-def draw(directory, dll, report_path):
+def draw(directory, dll, report_path, frontend=False):
     """Render captured meshes from GPU buffers; compare final diagnostic images."""
     directory, dll, report_path = private(directory), private(dll), private(report_path)
     if report_path.exists():
@@ -286,30 +286,38 @@ def draw(directory, dll, report_path):
         gs.tf_gs_open.restype = c.c_int
         gs.tf_gs_close.argtypes = []
         gs.tf_gs_close.restype = None
-        probe = gs.tf_gs_gpu_dual_draw_probe_v3
+        probe = gs.tf_gs_gpu_frontend_probe_v1 if frontend else gs.tf_gs_gpu_dual_draw_probe_v3
         probe.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32, c.POINTER(c.c_uint32), c.c_uint32, c.c_void_p,
                           c.POINTER(c.c_uint64), c.c_void_p, c.c_uint32]
         probe.restype = c.c_int
         error, stats = c.create_string_buffer(4096), (c.c_uint64 * 17)()
         source, constants, reference = (c.create_string_buffer(value) for value in (inputs, batches, expected))
-        if not gs.tf_gs_open(1, 0, str(dll.parent / "resources").encode(), error, len(error)):
+        if not gs.tf_gs_open(4 if frontend else 1, 0, str(dll.parent / "resources").encode(), error, len(error)):
             raise RuntimeError(error.value.decode(errors="replace"))
         try:
             passed = bool(probe(source, count, constants, batch_count, group_ends, len(groups),
                                 reference, stats, error, len(error)))
         finally:
             gs.tf_gs_close()
-    report = {"passed": passed, "batches": batch_count, "groups": len(groups), "source_vertices": count,
-              "allocations": stats[0], "reuses": stats[1], "dispatches": stats[2], "native_draws": stats[3],
+    metrics = ({"native_submissions": stats[0], "submit_callbacks": stats[1], "cpu_materializations": stats[2],
+                "textured_callbacks": stats[3], "depth_callbacks": stats[4], "blend_callbacks": stats[5],
+                "lod_callbacks": stats[6], "painted_pixels": stats[7], "differing_pixels": stats[8],
+                "completed_modes": stats[9], "full_resolution_differing_pixels": stats[10],
+                "full_resolution_compared_pixels": stats[11], "gpu_draws": stats[12],
+                "mipmap_filtered_callbacks": stats[13], "internal_scale": 4} if frontend else
+               {"allocations": stats[0], "reuses": stats[1], "dispatches": stats[2], "native_draws": stats[3],
               "painted_pixels": stats[4], "differing_pixels": stats[5],
               "handler_replacements": stats[6], "ordinary_draws": stats[7],
               "mesh_uploads": stats[8], "resident_mesh_bytes": stats[9],
               "source_upload_bytes": stats[10], "constant_upload_bytes": stats[11],
               "bounded_groups": stats[12], "declined_bounds": stats[13], "bounded_vertices": stats[14],
-              "wrapped_bounds": stats[15], "max_bounds_area_ratio": stats[16] / 1000000,
+              "wrapped_bounds": stats[15], "max_bounds_area_ratio": stats[16] / 1000000})
+    report = {"passed": passed, "batches": batch_count, "groups": len(groups), "source_vertices": count, **metrics,
               "dll_sha256": digest(dll.read_bytes()), "fixture_sha256": meta["sha256"],
               "prepared_manifest_sha256": digest((directory / "manifest.json").read_bytes()),
-              "scope": "GPU-resident captured-mesh draws with diagnostic GS state; not live game integration or FPS"}
+              "scope": ("Real GS frontend with synthetic texture/depth/blend state and enhanced captured meshes; "
+                        "not live game integration or FPS" if frontend else
+                        "GPU-resident captured-mesh draws with diagnostic GS state; not live game integration or FPS")}
     if error.value:
         report["error"] = error.value.decode(errors="replace")
     report_path.write_text(json.dumps(report, indent=2))
@@ -340,6 +348,7 @@ if __name__ == "__main__":
     resident.add_argument("--prepared", type=Path, required=True)
     resident.add_argument("--dll", type=Path, required=True)
     resident.add_argument("--report", type=Path, required=True)
+    resident.add_argument("--frontend", action="store_true", help="Exercise GS texture/depth/blend preparation")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.fixtures, args.program_manifest, args.output)
@@ -349,4 +358,4 @@ if __name__ == "__main__":
         raise SystemExit(replay(args.prepared, args.gpu_capture, args.gpu_report,
                                args.fixtures, args.runner, args.report))
     else:
-        raise SystemExit(draw(args.prepared, args.dll, args.report))
+        raise SystemExit(draw(args.prepared, args.dll, args.report, args.frontend))
