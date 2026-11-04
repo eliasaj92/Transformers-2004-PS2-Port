@@ -75,3 +75,28 @@ materialization, strict CPU fallback geometry and caller floating-point state.
 The optional broad list also verifies the authenticated manager and context
 setup programs' read footprints by poisoning all data outside their inputs. Both use only
 the accelerated static package. See [the contract and recorded results](../../deps/hwgs/GPU_GEOMETRY.md#guarded-cpu-tail-and-deferred-vu-memory).
+
+## Reflection input capture and GPU tail experiment
+
+Configure a separate private build with `-DTF_REPLAY_REFLECTION_CAPTURE=ON`
+to build `tf_reflection_capture`. The chain wrapper authenticates the resident
+reflection program and records its input/output memory plus semantic state.
+The enclosing accelerated replay must still match every original captured call.
+Use the Python driver to select a fresh output path, verify that replay, prepare
+vertex inputs, compare the optimized GPU kernel and run the retained-tail
+experiment:
+
+```powershell
+cmake -S testing/vu1_replay -B C:/private/reflection -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release -DPACKAGE_DIR=C:/private/vu-package `
+  -DTF_REPLAY_REFLECTION_CAPTURE=ON
+cmake --build C:/private/reflection --parallel 4
+```
+
+The capture/GPU/tail commands and result scope are documented in the
+[reflection contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-lighting-kernel-and-retained-cpu-tail).
+The tail mode restores omitted vertices from an authenticated **actual GPU**
+capture, compares final chain state/memory/cycles, and carries the candidate's
+pending pipeline state through the rest of each call. It declines active GIF
+transfers and batches of four or fewer vertices. This diagnostic does not enable
+a live readback path or establish a gameplay speedup.

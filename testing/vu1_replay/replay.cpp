@@ -27,6 +27,10 @@ bool grassTailCapture(uint32_t, const uint8_t*&, uint32_t, bool, bool);
 void grassReplayBegin(const void*, const uint8_t*, uint8_t*, uint64_t);
 void grassReplayResolve(bool, bool);
 #endif
+#ifdef TF_REPLAY_REFLECTION_CAPTURE
+void reflectionReplayInitialize();
+void reflectionReplayFinish();
+#endif
 namespace fs = std::filesystem;
 namespace {
 std::vector<uint8_t> packets;
@@ -127,6 +131,9 @@ int main(int argc, char** argv) {
     try {
 #ifdef TF_REPLAY_GRASS_TAIL
         grassReplayInitialize();
+#endif
+#ifdef TF_REPLAY_REFLECTION_CAPTURE
+        reflectionReplayInitialize();
 #endif
         if (argc != 3 && argc != 4 && argc != 8) throw std::runtime_error("usage: tf_vu1_replay <private-pre-file-list> <fresh-report.csv> [restore-grass-vf-mask-hex | --gpu-dual selection inputs batches capture]");
         std::unique_ptr<DualReplay> dual;
@@ -270,6 +277,9 @@ int main(int argc, char** argv) {
         if (dual && !failures) dual->finish();
 #ifdef TF_REPLAY_GRASS_TAIL
         if (!failures) grassReplayFinish();
+#endif
+#ifdef TF_REPLAY_REFLECTION_CAPTURE
+        if (!failures) reflectionReplayFinish();
 #endif
         std::printf("REPLAY final mode=%s fixtures=%zu failures=%zu packet_bytes=%llu fallback=0 pending=0 restore_mask=%08x restored_calls=%zu differing_states=%zu gpu_dual_calls=%zu\n",
                     dual ? "gpu-dual-bypass" : restoreMask ? "register-experiment" : "exact", total, failures,

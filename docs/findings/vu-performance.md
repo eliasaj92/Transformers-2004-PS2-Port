@@ -250,3 +250,22 @@ the feedback guard. No bounds/output-capacity groups are rejected.
 This reduces submission and materialization work but does not establish an FPS
 improvement. Thirty-nine published frames are skipped by host acquisition.
 The feature remains opt-in, and sustained true 60 fps remains unfinished.
+
+The following instrumented run collects 10,071 samples per selected thread.
+The renderer map again matches the loaded DLL code. Hardware-renderer waits
+account for 20.15%, while `GSRendererHW::Draw` accounts for 6.80%. VU waits are
+5.57%; retained grass `sr729` is 5.04%, reflection `sr752` is 4.22%, and dual
+projection `sr799` is 2.80%. The runtime GS submission thread waits 95.38%.
+This supports investigating the remaining VU geometry while keeping the EE
+frame-wait/scheduler costs in view; it is not a new frame-rate measurement.
+
+## Reflection GPU arithmetic and state preservation
+
+The reflection lighting/environment-coordinate kernel matches 14,017 vertices
+from 706 accelerated boundaries exactly on the RTX 3080 Laptop GPU. The optimized
+DXC path avoids incorrect optimized FXC component output. An accelerated shadow
+tail then replaces 704 batches, omits 11,193 CPU vertices and preserves all
+5,000 complete captured calls, including semantic state, cycles, memory and GIF.
+No live reflection bypass or additional FPS gain follows from this offline
+test. The next required seam is GPU-resident reflection-to-projection transport
+with deferred guest memory, bounds and fallback. See the [contract and commands](../../deps/hwgs/GPU_GEOMETRY.md#reflection-lighting-kernel-and-retained-cpu-tail).

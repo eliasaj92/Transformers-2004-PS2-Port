@@ -956,6 +956,62 @@ python -B testing/test_gpu_dual_transform.py draw --merge `
   --report $private/dual-merged-result.json
 ```
 
+## Reflection lighting kernel and retained CPU tail
+
+The next geometry candidate is the first-pass reflection stage. It calculates
+two-light color, view/reflection vectors, environment-map coordinates and
+opacity before the existing projection stage. The offline kernel consumes only
+object-space inputs and constants; expected vertices are never uploaded.
+Its results match all 168,204 words for 14,017 vertices across 706 captured
+batches on the RTX 3080 Laptop GPU. The capture wrapper authenticates all 1,248
+program bytes, and its enclosing 5,000-call accelerated replay preserves complete
+registers, memory, cycles and ordered GIF output with no interpreter fallback.
+
+The kernel uses the renderer's existing optimized DXC shader-model-6.5 path,
+with double precision for rounding-direction checks. Optimized FXC output lost
+components on both tested adapters; disabling optimization matched, and the
+optimized DXC result also matches. No FXC result is admitted for this kernel.
+These checks cover the captured finite input domain, not every possible VU
+arithmetic edge case.
+
+An accelerated shadow experiment retains the last four vertices on the CPU,
+advances the skipped pipeline calendar and injects actual qualified GPU output
+for the omitted vertices. It compares the entire chain's state and memory,
+then carries the candidate pipeline state through the rest of each captured
+call. The broad replay replaces 704 batches and skips 11,193 vertices while
+preserving all 5,000 calls exactly. Two four-vertex batches keep their original
+accelerated path. Transfers already in progress decline the experiment; this
+capture contains no such reflection entries. The following vertex's pipelined
+color store is retained by the tail.
+
+This is an offline qualification, with diagnostic GPU readback. No live
+reflection bypass or FPS improvement is claimed. Live work still needs owned
+reflection inputs carried into projection/drawing, source-derived bounds,
+deferred VU-memory ownership and CPU fallback without geometry readback.
+
+Build the private accelerated runner with
+`-DTF_REPLAY_REFLECTION_CAPTURE=ON`, as described in
+[the replay instructions](../../testing/vu1_replay/README.md), then run:
+
+```powershell
+python -B testing/test_gpu_reflection.py capture `
+  --fixtures $private/all-fixtures.txt --runner $private/reflection/tf_reflection_capture.exe `
+  --output $private/reflection-capture
+python -B testing/test_gpu_reflection.py gpu `
+  --prepared $private/reflection-capture --dll $private/gpu-build/tf_hwgs.dll `
+  --adapter 'NVIDIA GeForce RTX 3080 Laptop GPU' `
+  --report $private/reflection-gpu.json --capture $private/reflection-gpu.bin
+python -B testing/test_gpu_reflection.py tail `
+  --prepared $private/reflection-capture --gpu-report $private/reflection-gpu.json `
+  --gpu-capture $private/reflection-gpu.bin --fixtures $private/all-fixtures.txt `
+  --runner $private/reflection/tf_reflection_capture.exe --report $private/reflection-tail.json
+```
+
+The driver checks file hashes, capture ordering, input ranges, the observed
+memory-write footprint and complete replay results. It fails on empty captures;
+the grass-only moving sample does not exercise reflection and provides no
+additional coverage for this kernel.
+
 ## Bounded output-image cadence capture
 
 `PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;

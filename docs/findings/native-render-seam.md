@@ -541,3 +541,19 @@ measures 57.4907 physics updates/s and 56.4953 direct handoffs/s, with no
 demonstrated FPS improvement. The 32-image camera turn again matches all
 117,178,368 pixels exactly. The feature remains opt-in; remaining VU geometry
 work is the next offload target. See [the contract and diagnostics](../../deps/hwgs/GPU_GEOMETRY.md#merged-mesh-packets).
+
+## First-pass reflection boundary
+
+The GPU now reproduces captured first-pass lighting and reflection-coordinate
+calculations exactly: 706 batches, 14,017 vertices and 168,204 compared words.
+Keeping the final four vertices per batch on the accelerated CPU preserves the
+pipeline tail while allowing 11,193 earlier vertices to use actual GPU results
+in the offline experiment. All 5,000 enclosing calls still match state, memory,
+cycles and ordered GIF output.
+
+The remaining integration must carry original object-space reflection inputs
+through the subsequent projection stage and into resident native draws. Merely
+dispatching this kernel and reading its result back would add a new stall.
+Source-derived bounds, deferred guest-memory ownership and fallback therefore
+remain gates for live use. The kernel and tail are currently diagnostics, with
+no new gameplay FPS claim. See [the qualification and commands](../../deps/hwgs/GPU_GEOMETRY.md#reflection-lighting-kernel-and-retained-cpu-tail).
