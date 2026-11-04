@@ -66,6 +66,7 @@ void ps2PadStopHostRumble();        // ps2_pad.cpp, TEMP(transformers): playtest
 #include "native/tf_grass_oracle.h"
 #include "ps2_crash_reporter.h"     // crash report + minidump (generic, ported from SSX3)
 #include "ps2_sprint_probe.h"       // TEMP(transformers): qualification - PS2X_SPRINT_LOG=1 robot walk/run telemetry
+#include "ps2_movement_timing.h"
 #include <sstream>
 
 namespace ps2_stubs
@@ -3437,6 +3438,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     const char* native60Option=std::getenv("PS2X_TF_NATIVE60");
     const bool native60=elfCrc32Valid && elfCrc32==0x74c982c0u && native60Option && native60Option[0]>='1' && native60Option[0]<='3';
     g_tfNative60NextField=native60 && native60Option[0]>='2';
+    if (elfCrc32Valid && elfCrc32==0x74c982c0u)
+        TfMovementTiming::install(*this, native60 && native60Option[0]=='3');
     if(native60 && native60Option[0]=='3' && hasFunction(0x0032E8A0u)) {
         replaceFunction(0x0032E8A0u,&tfFullSimulationRate);
         m_memory.getRDRAM()[0x006CF654u]=0;
