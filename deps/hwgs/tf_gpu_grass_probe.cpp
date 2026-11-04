@@ -2,12 +2,14 @@
 // Offline arithmetic qualification. Readback here is diagnostic only.
 #include "tf_hwgs.h"
 #include "tf_gpu_shaders.h"
+#include "tf_gpu_dual_bounds.h"
 #include "kzgs_internal.h"
 #include "GS/Renderers/DX12/GSDevice12.h"
 #include <d3dcompiler.h>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include <cfenv>
 
 namespace
 {
@@ -53,11 +55,12 @@ void upload(ID3D12Resource *buffer, const void *source, uint32_t bytes)
 }
 } // namespace
 
-extern "C" TF_HWGS_API int tf_gs_gpu_grass_emit_probe(const void *inputs, uint32_t count, void *output,
-                                                      uint32_t outputCapacity, char *error, uint32_t errorCapacity)
+static int grassProbe(const void *inputs, uint32_t count, void *output, uint32_t outputCapacity, char *error,
+                      uint32_t errorCapacity, bool native)
 {
+    const uint32_t inputStride = native ? 320 : 256, outputStride = native ? 1024 : 640;
     bool passed = false;
-    if (!inputs || !output || !count || count > 65536 || outputCapacity < uint64_t(count) * 640)
+    if (!inputs || !output || !count || count > 65536 || outputCapacity < uint64_t(count) * outputStride)
     {
         if (error && errorCapacity)
             std::snprintf(error, errorCapacity, "Invalid grass-emitter probe buffers");
@@ -76,9 +79,10 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_emit_probe(const void *inputs, uint32
             if (!options.DoublePrecisionFloatShaderOps)
                 throw std::runtime_error("Grass-emitter qualification requires double precision shader operations");
             wil::com_ptr_nothrow<ID3DBlob> code, diagnostics, serialized;
+            const D3D_SHADER_MACRO macros[] = {{"TF_GPU_GRASS_NATIVE", "1"}, {nullptr, nullptr}};
             const HRESULT compiled =
-                D3DCompile(tf_gpu_grass_emit_shader, sizeof(tf_gpu_grass_emit_shader) - 1, "grass-emitter", nullptr,
-                           nullptr, "main", "cs_5_0",
+                D3DCompile(tf_gpu_grass_emit_shader, sizeof(tf_gpu_grass_emit_shader) - 1, "grass-emitter",
+                           native ? macros : nullptr, nullptr, "main", "cs_5_0",
                            D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_IEEE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
                            0, code.put(), diagnostics.put());
             if (FAILED(compiled))
@@ -105,13 +109,13 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_emit_probe(const void *inputs, uint32
             wil::com_ptr_nothrow<ID3D12PipelineState> pipeline;
             check(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(pipeline.put())),
                   "Create grass-emitter pipeline");
-            auto source = createBuffer(device, count * 256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
-                                       D3D12_RESOURCE_FLAG_NONE);
+            auto source = createBuffer(device, count * inputStride, D3D12_HEAP_TYPE_UPLOAD,
+                                       D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
             auto result =
-                createBuffer(device, count * 640, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            auto readback = createBuffer(device, count * 640, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
-                                         D3D12_RESOURCE_FLAG_NONE);
+                createBuffer(device, count * outputStride, D3D12_HEAP_TYPE_DEFAULT,
+                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            auto readback = createBuffer(device, count * outputStride, D3D12_HEAP_TYPE_READBACK,
+                                         D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
             struct LifetimeGuard
             {
                 GSDevice12 *device;
@@ -120,7 +124,7 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_emit_probe(const void *inputs, uint32
                     device->WaitForGPUIdle();
                 }
             } lifetime{gs};
-            upload(source.get(), inputs, count * 256);
+            upload(source.get(), inputs, count * inputStride);
             gs->EndRenderPass();
             auto *command = gs->GetCommandList().list4.get();
             command->SetComputeRootSignature(signature.get());
@@ -136,13 +140,13 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_emit_probe(const void *inputs, uint32
             barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
             command->ResourceBarrier(1, &barrier);
-            command->CopyBufferRegion(readback.get(), 0, result.get(), 0, count * 640);
+            command->CopyBufferRegion(readback.get(), 0, result.get(), 0, count * outputStride);
             gs->InvalidateCachedState();
             gs->ExecuteCommandList(true);
             void *mapped = nullptr;
-            const D3D12_RANGE range{0, count * 640};
+            const D3D12_RANGE range{0, count * outputStride};
             check(readback->Map(0, &range, &mapped), "Read diagnostic transformed vertices");
-            std::memcpy(output, mapped, count * 640);
+            std::memcpy(output, mapped, count * outputStride);
             const D3D12_RANGE empty{0, 0};
             readback->Unmap(0, &empty);
             passed = true;
@@ -154,4 +158,68 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_emit_probe(const void *inputs, uint32
         }
     });
     return passed ? 1 : 0;
+}
+
+extern "C" TF_HWGS_API int tf_gs_gpu_grass_emit_probe(const void *inputs, uint32_t count, void *output,
+                                                      uint32_t outputCapacity, char *error, uint32_t errorCapacity)
+{
+    return grassProbe(inputs, count, output, outputCapacity, error, errorCapacity, false);
+}
+extern "C" TF_HWGS_API int tf_gs_gpu_grass_native_probe(const void *inputs, uint32_t count, void *output,
+                                                        uint32_t outputCapacity, char *error, uint32_t errorCapacity)
+{
+    return grassProbe(inputs, count, output, outputCapacity, error, errorCapacity, true);
+}
+
+extern "C" TF_HWGS_API int tf_gs_grass_bounds_probe(const void *inputs, uint32_t count, const void *expected,
+                                                    uint64_t *stats, char *error, uint32_t capacity)
+{
+    if (!inputs || !expected || !stats || !count || count > 65536)
+        return 0;
+    const auto word = [](const uint8_t *data) {
+        uint32_t value;
+        std::memcpy(&value, data, 4);
+        return value;
+    };
+    for (unsigned packet = 0; packet < count; ++packet)
+    {
+        std::array<tf_gpu::DualDrawBounds, 2> bounds;
+        const uint32_t saved = _mm_getcsr();
+        const int rounding = std::fegetround();
+        const bool accepted = tf_gpu::projectGrassBounds(static_cast<const uint8_t *>(inputs) + packet * 320, bounds);
+        if (_mm_getcsr() != saved || std::fegetround() != rounding)
+        {
+            if (error && capacity)
+                std::snprintf(error, capacity, "Grass bounds changed the caller's float environment");
+            return 0;
+        }
+        ++stats[accepted ? 0 : 1];
+        if (!accepted)
+            continue;
+        for (unsigned field = 0; field < 2; ++field)
+            for (unsigned vertex = 0; vertex < 16; ++vertex)
+            {
+                const auto &b = bounds[field];
+                const auto *v = static_cast<const uint8_t *>(expected) + packet * 1024 + field * 512 + vertex * 32;
+                const uint32_t position[] = {word(v + 16) & 65535u, word(v + 16) >> 16, word(v + 20)};
+                bool valid = true;
+                for (unsigned axis = 0; axis < 3; ++axis)
+                    valid &= position[axis] >= b.xyzMin[axis] && position[axis] <= b.xyzMax[axis];
+                if (vertex & 1)
+                    for (unsigned channel = 0; channel < 4; ++channel)
+                    {
+                        const unsigned color = (word(v + 8) >> (channel * 8)) & 255;
+                        valid &= color >= b.colorMin[channel] && color <= b.colorMax[channel];
+                    }
+                if (!valid)
+                {
+                    if (error && capacity)
+                        std::snprintf(error, capacity, "Grass bounds missed packet %u field %u vertex %u", packet,
+                                      field, vertex);
+                    return 0;
+                }
+                ++stats[2];
+            }
+    }
+    return stats[0] ? 1 : 0;
 }

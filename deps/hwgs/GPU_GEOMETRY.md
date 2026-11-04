@@ -621,8 +621,8 @@ bytes intact: **17,096 shortened loops, 34,192 skipped iterations, 14,448
 overlapping transfers and 29,915,408 packet bytes**. No interpreter oracle or
 original game build is used. This is offline qualification: GPU results are
 downloaded for replay and are not yet a live grass rendering path or an FPS
-improvement. Direct GPU sprite consumption, retained guest-memory ownership
-and renderer fallback must be completed before enabling the shortcut in-game.
+improvement. The resident sprite work below addresses direct GPU consumption;
+retained guest-memory ownership and live fallback still gate the in-game shortcut.
 
 Build the diagnostic with the authenticated private package. The chain wrapper
 is generated only in the private build directory; game-derived C++ is never
@@ -649,3 +649,65 @@ python -B testing/replay_gpu_grass.py --prefix $private/grass-capture `
 Use fresh private report/capture paths. The last driver writes the detailed
 CSV and log next to its JSON report, and fails if any GPU result remains unused
 or any state, memory, control or packet comparison differs.
+
+## Resident grass sprites
+
+The grass emitter also produces two contiguous arrays of 16 native GS vertices.
+Its 320-byte input adds the incoming STQ and RGBA latches for each field. The
+shared fenced output pool appends 64 bytes of per-field GS culling state before
+dispatch. Both the VU ADC flag and the GS upscaled primitive-culling test suppress
+sprites as zero-area pairs. The latter matters at screen edges: relying on the
+GPU scissor alone left subpixels which the ordinary GIF frontend rejects.
+
+D3D12 sprite expansion reads this output directly as a vertex-shader SRV. The
+scoped binding restores the ordinary stream afterward. Retained output pages,
+command-list rollover, bounded allocation and completed-page reuse use the same
+ownership rules as the existing triangle path. The device diagnostic alternates
+GPU and ordinary sprites, changes source colors, retains two outputs, checks
+budget rejection, and reuses a completed page. It passes 1,026 native draws with
+zero differences across 1,048,576 compared pixels.
+
+`DrawNativeSprites` supplies the real GS texture/depth/blend frontend with
+consecutive vertex pairs, pre-rounded ST, unit Q and a nonconstant-depth witness.
+Only supported state is admitted. Any actual vertex read or mutation selects
+CPU fallback; optional coverage tests conservatively preserve the target without
+fetching geometry. Sprite upscaling no longer requests CPU vertices when the
+coordinate adjustment is disabled. Unsupported APIs, depth/state cases and cold
+targets retain ordinary processing.
+
+`projectGrassBounds` computes conservative position/color ranges from the small
+emitter input using monotone binary32 interval arithmetic. It restores the
+caller's floating-point environment and does not emit, map or download vertices.
+Both captures qualify 16,435 of 17,096 packets (96.1%); all 525,920 checked
+vertices and their flat colors fall inside their bounds. The other 661 packets
+decline, for example when a conservative W range crosses zero. Native GPU
+packing still matches all 547,072 captured records exactly, including ADC
+suppression and the incoming attribute latches.
+
+Two 256-packet samples from broad and moving-camera captures pass all four
+frontend modes at 2048x1792. Textures, depth, blending, alpha testing, mipmaps and
+deliberate CPU fallback match across **29,360,128 full-resolution pixels**, with
+zero differences. The first three modes issue 2,970 resident GPU draws with no
+CPU vertex materialization; the fourth deliberately materializes 990 draws.
+The existing grouped-triangle frontend also passes unchanged: 1,216 GPU draws
+and zero differences across 14,680,064 full-resolution pixels.
+
+```powershell
+python -B testing/test_gpu_grass_native.py prepare --prefix $private/grass-capture `
+  --output $private/grass-native
+python -B testing/test_gpu_grass_native.py run --prepared $private/grass-native `
+  --dll $private/gpu-build/tf_hwgs.dll --report $private/grass-native.json
+python -B testing/test_gpu_grass_native.py draw --prepared $private/grass-native `
+  --dll $private/gpu-build/tf_hwgs.dll --report $private/grass-resident.json
+python -B testing/test_gpu_grass_native.py draw --frontend --prepared $private/grass-native `
+  --dll $private/gpu-build/tf_hwgs.dll --report $private/grass-frontend.json
+```
+
+These are renderer diagnostics using enhanced gameplay captures, with synthetic
+texture/GS state. Reference geometry still supplies a diagnostic depth witness
+and CPU fallback. **Live grass offload is not enabled and the last gameplay FPS
+measurement is unchanged.** Connecting the qualified accelerated loop shortcut
+requires ordered grass companions, retained guest-memory ownership and an exact
+CPU materializer. The existing dual-geometry companion owns only XYZ lanes;
+grass also owns color and clipping words, so partially overwritten VU memory
+cannot reuse that ownership scheme without extending its contract.

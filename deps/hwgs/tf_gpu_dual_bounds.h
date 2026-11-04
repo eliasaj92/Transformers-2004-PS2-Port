@@ -35,4 +35,7 @@ void mergeDualAttributes(DualAttributes &result, const DualAttributes &other);
 // non-finite/overflowing inputs, boxes crossing W=0, and nonpositive output Q.
 // This supplies bounds, not all GS draw state or permission to skip VU work.
 bool projectDualBounds(const DualAttributes &attributes, const void *matrix, uint32_t bias, DualDrawBounds &result);
+// Bounds from one 320-byte grass emitter input, without emitting its vertices.
+// Uses monotone binary32 interval operations in the VU rounding environment.
+bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &result);
 } // namespace tf_gpu

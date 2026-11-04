@@ -459,8 +459,18 @@ flags, retained in VF7.w. A small calculation preserves those flags while the
 existing pipeline calendar progresses the earlier transfer. This is narrower
 than replacing the whole grass program and avoids assuming its registers are
 dead. It is still an offline experiment with diagnostic GPU readback. The
-existing native renderer accepts indexed triangles; grass also requires direct
-GPU sprite consumption and deferred memory/fallback handling before this
-shortcut can be enabled live.
+native renderer at that stage accepted indexed triangles. The sprite extension
+below addresses direct GPU consumption; deferred memory/fallback handling still
+gates the live shortcut.
 
 See the [grass contract and reproducible diagnostics](../../deps/hwgs/GPU_GEOMETRY.md#grass-gpu-emission-and-retained-state).
+
+The next renderer milestone qualifies GPU-resident grass sprites through the
+real GS frontend. Source-derived bounds replace CPU vertex tracing; GPU culling
+matches both ADC and GS screen-edge rejection. Two enhanced capture samples pass
+textures/depth/blending/mipmaps with 2,970 GPU draws, no CPU vertex materialization
+in the native modes, and zero differences across 29,360,128 full-resolution
+pixels. Deliberate CPU fallback and the existing grouped triangle path also pass.
+Live grass companions, deferred-memory ownership and the CPU fallback materializer
+remain to be connected to the shortened accelerated loop. No new live FPS claim
+follows from these diagnostics. See [resident grass sprites](../../deps/hwgs/GPU_GEOMETRY.md#resident-grass-sprites).

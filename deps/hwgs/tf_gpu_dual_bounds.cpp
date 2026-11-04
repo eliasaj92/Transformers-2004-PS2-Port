@@ -281,4 +281,103 @@ bool projectDualBounds(const DualAttributes &a, const void *matrixWords, uint32_
     result.colorMax = a.colorMax;
     return true;
 }
+bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &result)
+{
+    result = {};
+    if (!inputs)
+        return false;
+    Environment environment;
+    if (!environment.ready || std::fesetround(FE_TOWARDZERO) != 0)
+        return false;
+    _mm_setcsr(_mm_getcsr() | 0x8040u); // Match VU input/output denormal flushing.
+    const auto *data = static_cast<const uint8_t *>(inputs);
+    double vectors[16][4];
+    for (unsigned vector = 0; vector < 16; ++vector)
+        for (unsigned axis = 0; axis < 4; ++axis)
+        {
+            vectors[vector][axis] = normal(word(data + vector * 16 + axis * 4));
+            if (!std::isfinite(vectors[vector][axis]))
+                return false;
+        }
+    for (unsigned field = 0; field < 2; ++field)
+    {
+        const auto *stq = data + 256 + field * 16;
+        for (unsigned axis = 0; axis < 2; ++axis)
+        {
+            const uint32_t value = word(stq + axis * 4);
+            if (value != 0 && value != 0x3f000000u && value != 0x3f800000u)
+                return false;
+        }
+        if (word(stq + 8) != 0x3f800000u)
+            return false;
+    }
+    const auto unite = [](DualRange a, DualRange b) {
+        return DualRange{std::min(a.low, b.low), std::max(a.high, b.high)};
+    };
+    // Each endpoint is itself binary32. Separate volatile operations prevent
+    // contraction and honor the saved/restored RTZ/FTZ environment (/fp:strict).
+    const auto add = [](DualRange a, DualRange b) {
+        volatile float low = float(a.low) + float(b.low), high = float(a.high) + float(b.high);
+        return DualRange{low, high};
+    };
+    const auto product = [](DualRange a, DualRange b) {
+        volatile float aa = float(a.low) * float(b.low), ab = float(a.low) * float(b.high);
+        volatile float ba = float(a.high) * float(b.low), bb = float(a.high) * float(b.high);
+        const double values[] = {aa, ab, ba, bb};
+        return DualRange{*std::min_element(std::begin(values), std::end(values)),
+                         *std::max_element(std::begin(values), std::end(values))};
+    };
+    const auto scalar = [&](unsigned vector, unsigned axis) {
+        return DualRange{vectors[vector][axis], vectors[vector][axis]};
+    };
+    DualRange weights[4];
+    for (unsigned axis = 0; axis < 4; ++axis)
+    {
+        weights[axis] = scalar(12, axis);
+        for (unsigned pair = 1; pair < 4; ++pair)
+            weights[axis] = unite(weights[axis], scalar(12 + pair, axis));
+    }
+    const auto interpolate = [&](unsigned first, unsigned axis) {
+        const auto base = add(scalar(first, axis), product(scalar(first + 1, axis), weights[0]));
+        const auto a = add(base, product(scalar(first + 2, axis), weights[1]));
+        const auto b =
+            add(add(base, product(scalar(first + 1, axis), weights[2])), product(scalar(first + 2, axis), weights[3]));
+        return unite(a, b);
+    };
+    std::array<uint32_t, 4> colorMin{}, colorMax{};
+    for (unsigned channel = 0; channel < 4; ++channel)
+    {
+        const auto range = interpolate(9, channel);
+        if (!finite(range) || range.low < 0)
+            return false;
+        const uint32_t low = std::bit_cast<uint32_t>(float(range.low));
+        const uint32_t high = std::bit_cast<uint32_t>(float(range.high));
+        colorMin[channel] = (low >> 8) == (high >> 8) ? low & 255u : 0;
+        colorMax[channel] = (low >> 8) == (high >> 8) ? high & 255u : 255;
+    }
+    for (unsigned field = 0; field < 2; ++field)
+    {
+        auto &bounds = result[field];
+        const auto w = interpolate(3 + field * 3, 3);
+        if (!finite(w) || w.low <= 0)
+            return false;
+        volatile float qLow = 1.0f / float(w.high), qHigh = 1.0f / float(w.low);
+        const DualRange reciprocal{qLow, qHigh};
+        if (!finite(reciprocal) || reciprocal.low <= 0)
+            return false;
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            const auto origin = interpolate(3 + field * 3, axis);
+            const auto corner = add(origin, scalar(2, axis));
+            const auto screen = product(unite(origin, corner), reciprocal);
+            if (!finite(origin) || !finite(corner) || !finite(screen) || !packBounds(screen, axis, bounds))
+                return false;
+            bounds.stq[axis] = axis == 2 ? DualRange{1, 1} : DualRange{0, 1};
+        }
+        bounds.texture = {DualRange{0, 1}, DualRange{0, 1}};
+        bounds.colorMin = colorMin;
+        bounds.colorMax = colorMax;
+    }
+    return true;
+}
 } // namespace tf_gpu

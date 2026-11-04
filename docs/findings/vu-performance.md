@@ -134,6 +134,15 @@ clipping flags and pending graphics transfers. Across the broad and moving
 captures, 17,096 loops skip 34,192 iterations and consume actual GPU geometry
 with complete state/memory/packet equality. The shader checks 547,072 endpoints
 plus colors and clipping flags exactly. These results do not update the live
-frame-rate measurement above: direct GPU sprite drawing and guest-memory
-ownership are still required. See the
+frame-rate measurement above. They precede the resident sprite work below;
+guest-memory ownership still gates the live shortcut. See the
 [grass emission contract](../../deps/hwgs/GPU_GEOMETRY.md#grass-gpu-emission-and-retained-state).
+
+The following renderer work supplies direct GPU sprite consumption, source-based
+bounds and GS-compatible edge culling. All native packing checks remain exact;
+the two textured frontend samples produce zero differing pixels and perform no
+CPU vertex materialization in their GPU modes. This qualifies the renderer path;
+live VU/packet ownership remains unfinished. The shortened grass loop is still offline and no
+new game frame-rate measurement has been taken. The current next step is joining
+that loop to ordered grass companions and deferred VU memory, then measuring the
+enhanced Amazon route. See [resident grass sprites](../../deps/hwgs/GPU_GEOMETRY.md#resident-grass-sprites).

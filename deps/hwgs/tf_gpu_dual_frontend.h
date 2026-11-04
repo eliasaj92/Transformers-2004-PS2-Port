@@ -9,4 +9,6 @@ namespace tf_gpu
 // This does not prove nonconstant depth, GIF ordering, or VU-state ownership.
 bool prepareDualTrace(const DualDrawBounds &bounds, const GSDrawingContext &context, const GIFRegPRIM &prim,
                       GSVertexTrace::Vertex &minimum, GSVertexTrace::Vertex &maximum);
+bool prepareGrassTrace(const DualDrawBounds &bounds, const GSDrawingContext &context, const GIFRegPRIM &prim,
+                       GSVertexTrace::Vertex &minimum, GSVertexTrace::Vertex &maximum);
 } // namespace tf_gpu

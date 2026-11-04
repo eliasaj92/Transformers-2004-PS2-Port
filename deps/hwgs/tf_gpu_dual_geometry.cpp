@@ -48,7 +48,7 @@ struct DualGeometry::Pipeline
     GSDevice12 &gs;
     wil::com_ptr_nothrow<ID3D12RootSignature> signature;
     wil::com_ptr_nothrow<ID3D12PipelineState> pipeline;
-    explicit Pipeline(GSDevice12 &device, bool grouped = false) : gs(device)
+    explicit Pipeline(GSDevice12 &device, bool grouped = false, bool grass = false) : gs(device)
     {
         D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
         check(gs.GetDevice()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)),
@@ -57,16 +57,19 @@ struct DualGeometry::Pipeline
             throw std::runtime_error("Native dual geometry requires double-precision shader arithmetic");
         wil::com_ptr_nothrow<ID3DBlob> code, error, serialized;
         const D3D_SHADER_MACRO macros[] = {{"TF_GPU_DUAL_GROUPED", "1"}, {nullptr, nullptr}};
+        const D3D_SHADER_MACRO grassMacros[] = {
+            {"TF_GPU_GRASS_NATIVE", "1"}, {"TF_GPU_GRASS_CULL", "1"}, {nullptr, nullptr}};
+        const char *shader = grass ? tf_gpu_grass_emit_shader : tf_gpu_dual_transform_shader;
         const HRESULT compiled =
-            D3DCompile(tf_gpu_dual_transform_shader, sizeof(tf_gpu_dual_transform_shader) - 1, "dual-transform",
-                       grouped ? macros : nullptr, nullptr, "main", "cs_5_0",
+            D3DCompile(shader, std::strlen(shader), grass ? "grass-emitter" : "dual-transform",
+                       grass ? grassMacros : (grouped ? macros : nullptr), nullptr, "main", "cs_5_0",
                        D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_IEEE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
                        code.put(), error.put());
         if (FAILED(compiled))
             throw std::runtime_error(error ? static_cast<const char *>(error->GetBufferPointer())
                                            : "Dual shader compilation failed");
         D3D12_ROOT_PARAMETER parameters[11]{};
-        const unsigned srvs = grouped ? 9 : 2;
+        const unsigned srvs = grass ? 1 : (grouped ? 9 : 2);
         for (unsigned i = 0; i < srvs; ++i)
         {
             parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
@@ -356,6 +359,32 @@ DualGeometry::Batch DualGeometry::prepareGroup(const Mesh *meshes, const void *c
     return result;
 }
 
+DualGeometry::Batch DualGeometry::prepareGrass(const void *inputs, uint32_t count, const GrassRasterState *raster)
+{
+    if (!inputs || !count || count > 65536)
+        return {};
+    if (raster)
+        for (uint32_t i = 0; i < count; ++i)
+            for (unsigned field = 0; field < 2; ++field)
+                if (raster[i].offset[field][2] || uint32_t(raster[i].offset[field][3]) > 1)
+                    return {};
+    if (!m_grassPipeline)
+        m_grassPipeline = std::make_unique<Pipeline>(m_device, false, true);
+    auto page = acquirePage((count * 384 + 65535) & ~65535u, (count * 1024 + 65535) & ~65535u);
+    if (!page)
+        return {};
+    const GrassRasterState disabled{};
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        auto *destination = static_cast<uint8_t *>(page->mappedUpload) + i * 384;
+        std::memcpy(destination, static_cast<const uint8_t *>(inputs) + i * 320, 320);
+        std::memcpy(destination + 320, raster ? &raster[i] : &disabled, 64);
+    }
+    m_stats.constantUploadBytes += uint64_t(count) * 384;
+    const auto address = page->upload->GetGPUVirtualAddress();
+    return dispatch(std::move(page), address, count * 16, 0, nullptr, 0, true);
+}
+
 bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batches, uint32_t firstChunk,
                           uint32_t chunks, std::array<DualDrawBounds, 2> &result) const
 {
@@ -383,7 +412,8 @@ bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batc
 }
 
 DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices,
-                                           uint32_t constantsOffset, const uint64_t *groupSources, uint32_t groups)
+                                           uint32_t constantsOffset, const uint64_t *groupSources, uint32_t groups,
+                                           bool grass)
 {
     m_device.EndRenderPass();
     auto *command = m_device.GetCommandList().list4.get();
@@ -393,22 +423,27 @@ DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t 
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     if (page->vertexState)
     {
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        barrier.Transition.StateBefore =
+            (D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         command->ResourceBarrier(1, &barrier);
     }
-    const auto &pipeline = groups ? m_groupedPipeline : m_pipeline;
+    const auto &pipeline = grass ? m_grassPipeline : (groups ? m_groupedPipeline : m_pipeline);
     const unsigned sources = groups ? 8 : 1;
     command->SetComputeRootSignature(pipeline->signature.get());
     command->SetPipelineState(pipeline->pipeline.get());
     for (unsigned i = 0; i < sources; ++i)
         command->SetComputeRootShaderResourceView(i, groups && i < groups ? groupSources[i] : sourceAddress);
-    command->SetComputeRootShaderResourceView(sources, page->upload->GetGPUVirtualAddress() + constantsOffset);
-    command->SetComputeRootUnorderedAccessView(sources + 1, page->output->GetGPUVirtualAddress());
-    command->SetComputeRoot32BitConstant(sources + 2, groups ? groups : vertices, 0);
-    command->Dispatch(((groups ? groups * 32 : vertices) + 63) / 64, 1, 1);
+    if (!grass)
+        command->SetComputeRootShaderResourceView(sources, page->upload->GetGPUVirtualAddress() + constantsOffset);
+    const unsigned outputSlot = grass ? 1 : sources + 1;
+    const uint32_t count = grass ? vertices / 16 : (groups ? groups : vertices);
+    command->SetComputeRootUnorderedAccessView(outputSlot, page->output->GetGPUVirtualAddress());
+    command->SetComputeRoot32BitConstant(outputSlot + 1, count, 0);
+    command->Dispatch(((grass ? count * 8 : (groups ? groups * 32 : vertices)) + 63) / 64, 1, 1);
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    barrier.Transition.StateAfter =
+        (D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     command->ResourceBarrier(1, &barrier);
     page->vertexState = true;
     page->fence = m_device.GetCurrentFenceValue();
@@ -416,6 +451,8 @@ DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t 
     ++m_stats.dispatches;
     m_stats.groupedDispatches += groups != 0;
     m_stats.groupedMeshes += groups;
+    m_stats.grassDispatches += grass;
+    m_stats.grassBatches += grass ? count : 0;
     Batch result;
     result.page = std::move(page);
     result.vertices = vertices;

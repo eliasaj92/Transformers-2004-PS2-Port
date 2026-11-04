@@ -5,10 +5,11 @@
 
 namespace tf_gpu
 {
-bool prepareDualTrace(const DualDrawBounds &b, const GSDrawingContext &ctx, const GIFRegPRIM &prim,
-                      GSVertexTrace::Vertex &minimum, GSVertexTrace::Vertex &maximum)
+static bool prepareTrace(const DualDrawBounds &b, const GSDrawingContext &ctx, const GIFRegPRIM &prim,
+                         GSVertexTrace::Vertex &minimum, GSVertexTrace::Vertex &maximum, bool grass)
 {
-    if (!prim.TME || !prim.IIP || prim.FST || prim.AA1 || b.wrappedAxes)
+    if (!prim.TME || (!grass && (!prim.IIP || b.wrappedAxes)) || prim.FST || prim.AA1 ||
+        (grass && (prim.PRIM != GS_SPRITE || b.stq[2].low != 1 || b.stq[2].high != 1)))
         return false;
     const auto outward = [](double value, bool upper) {
         return std::nextafter(static_cast<float>(value),
@@ -37,12 +38,22 @@ bool prepareDualTrace(const DualDrawBounds &b, const GSDrawingContext &ctx, cons
         }
         const double scale = channel < 2 ? double(1u << (channel ? ctx.TEX0.TH : ctx.TEX0.TW)) : 1.0;
         const auto &range = channel < 2 ? b.texture[channel] : b.stq[2];
-        minimum.t.F32[channel] = outward(range.low * scale, false);
-        maximum.t.F32[channel] = outward(range.high * scale, true);
+        minimum.t.F32[channel] = grass ? float(range.low * scale) : outward(range.low * scale, false);
+        maximum.t.F32[channel] = grass ? float(range.high * scale) : outward(range.high * scale, true);
         if (!std::isfinite(minimum.t.F32[channel]) || !std::isfinite(maximum.t.F32[channel]) ||
             minimum.t.F32[channel] > maximum.t.F32[channel])
             return false;
     }
     return minimum.t.z > 0 && maximum.t.z < 1e30f;
+}
+bool prepareDualTrace(const DualDrawBounds &b, const GSDrawingContext &ctx, const GIFRegPRIM &prim,
+                      GSVertexTrace::Vertex &minimum, GSVertexTrace::Vertex &maximum)
+{
+    return prepareTrace(b, ctx, prim, minimum, maximum, false);
+}
+bool prepareGrassTrace(const DualDrawBounds &b, const GSDrawingContext &ctx, const GIFRegPRIM &prim,
+                       GSVertexTrace::Vertex &minimum, GSVertexTrace::Vertex &maximum)
+{
+    return prepareTrace(b, ctx, prim, minimum, maximum, true);
 }
 } // namespace tf_gpu
