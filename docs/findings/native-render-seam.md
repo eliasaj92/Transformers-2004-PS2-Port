@@ -1,6 +1,6 @@
 # Transformers native render seam investigation
 
-Status: observation tooling and executable analysis, November 2026. No geometry is replaced or executed on the GPU by this probe. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Normal play retains the accelerated VU path.
+Status: whole-list capture and first exact mesh-input import, November 2026. No geometry is replaced or executed on the GPU by this probe. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Normal play retains the accelerated VU path.
 
 ## Why this boundary
 
@@ -21,6 +21,9 @@ The older [native renderer comparison document](../NATIVE_RENDERER.md) describes
 | `0x23aa90` | Context dispatcher: walks the shader-context list at scratchpad `0x700005f0`, checks dirty flags and invokes virtual method +0x0c. The observed grass return addresses are `0x23aaf4` and `0x23ab24`. |
 | `0x1b0d50` | Four-vector matrix multiply used to populate the first transform. |
 | `0x261c40` | Registration callsite for `vlShaderAssembly_Grass`, disc program 38, 3,872 bytes. A registration callsite is not a draw callsite. |
+| `0x260a70` | Visibility renderer. Its second argument contains a mesh-list pointer at +0x14. The observed grass path updates contexts at `0x260bfc` and appends CALL/MSCAL(0)/FLUSH at `0x260c20..0x260c2c`. |
+| `0x360818` | Observed return address of the caller submitting all 27 grass lists in the three-field Amazon capture. |
+| `0x26f790` | Separate leaf submission helper used by `0x270480`: emits CALL/MSCAL(0)/FLUSH for its first argument. Static lead only; this helper was not used in the measured Amazon window. |
 
 The filled grass payload is 0x380 bytes:
 
@@ -35,7 +38,7 @@ The filled grass payload is 0x380 bytes:
 
 The existing VIF field-2 repair can alter an invalid second matrix after upload. An oracle must capture effective VU input after that repair and any VIF mode operation, rather than assuming the raw EE payload is always the final input.
 
-Two concrete batch leads precede GPU work. `0x260a70` checks visibility, calls the context dispatcher, then appends a DMA CALL using a list pointer at its second argument +0x14. `0x221b80` appends the same CALL template after resolving a list through virtual method +0x10. Their template contains MSCAL at entry zero and FLUSH. These are static-analysis leads; the first probe does not yet establish which one owns the observed grass draws. Other callers construct dynamic packets instead of using this list path.
+The first probe identified `0x260a70` and `0x221b80` as batch leads. The extended capture below verifies `0x260a70` for this scene. `0x221b80` resolves a list through virtual method +0x10 and remains unqualified. Other callers construct dynamic packets instead of using a prebuilt list.
 
 ## Opt-in observation probe
 
@@ -48,7 +51,7 @@ The probe records:
 - Raw unmasked 56-qword V4-32 uploads, including VIF mode/cycle and resolved VU destination. The EE and VIF fingerprints can be compared without copying game data into the source tree.
 - MSCAL/MSCALF entry PC, TOP/ITOP and a 64-byte code fingerprint; MSCNT has no explicit entry PC. MPG records identify code upload ranges and fingerprints.
 
-It never reads live VU data/registers, adds a VU fence, edits guest state, suppresses DMA/GIF, or changes timing settings. Existing VU code is read on the VIF consumer side. Worker events have no EE field value; presenter labels are approximate and must not be used as unique batch identities. Repeated constants and shared code prefixes can be ambiguous. Use stream order, destination, complete code identity and eventually captured bytes to resolve them before substituting any batch.
+Trace-only mode does not read live VU data/registers. The optional capture below reads them on their executing thread, inside the accelerated backend boundary. Neither mode adds a VU fence, edits guest state, suppresses DMA/GIF, or changes timing settings. Existing VU code is read on the VIF consumer side. Worker events have no EE field value; presenter labels are approximate and must not be used as unique batch identities. Repeated constants and shared code prefixes can be ambiguous. Use stream order, destination, complete code identity and captured bytes to resolve them before substituting any batch.
 
 The display-list allocator uses the EE's `0x20000000` uncached RAM alias. The probe validates the physical span and reads the corresponding backing RAM, while preserving the original guest address in its record. Scratchpad/MMIO addresses are rejected. The first diagnostic iteration rejected these aliases and emitted `invalid_constants`; it is retained privately as a failed attribution attempt, not evidence of missing or invalid game constants.
 
@@ -69,10 +72,42 @@ This establishes a live constant-update path and a reusable observation tool. It
 
 The ordinary threaded run also matched the route's six terminal counters and eight player probes. It captured 369 completed blocks and 369 uploads, with 342 matching fingerprints; the 27 unmatched uploads were restricted to the opening labels 3000..3002. All 342 matches again led to the manager entry. Worker lag changes which earlier EE blocks fall outside a presenter-bounded capture, so later attribution should use submission sequence identifiers rather than treating these labels as synchronized EE/VU frame numbers.
 
+## Whole-list and accelerated output capture
+
+In addition to `PS2X_TF_SEAM_TRACE`, set `PS2X_TF_SEAM_CAPTURE=<fresh private filename prefix>`. `PS2X_TF_SEAM_CALLS` bounds the number of accelerated invocations, default 256, maximum 6,000. Total binary output has a separate 512 MiB hard limit. Use a very short range; the measured capture used 3000:3002 and 5,000 calls. Existing files are never overwritten. Truncated captures, write errors, missing begin/end pairs and fingerprint mismatches must not be accepted as fixtures.
+
+The observer produces:
+
+- `<prefix>-ee.bin`: the first validated grass submission's EE RAM, scratchpad, low GPR words and boundary metadata. The generic renderer is wrapped across continuation aliases. A newly completed grass context from inside that invocation, restored stack/return PC, and the exact emitted CALL tag are required. Culled objects are not reported as submitted meshes. This snapshot is not globally atomic across other emulated devices.
+- `<prefix>-vu-NNNNNN-pre.bin` and `post.bin`: the existing vu1dump layout, with header `{entry/resume-PC, TOP, ITOP, sizeof(VU1State)}`, 16 KiB code, 16 KiB data and state. Captures surround the accelerated backend, after VIF operations and field-2 repair. They do not force interpreter execution.
+- `<prefix>-vu-NNNNNN-gif.bin`: ordered records `{path, bytes, drainImmediately, path2DirectHl}` followed by packet bytes. A thread-local invocation ticket records packets before worker buffering; later EE replay has no ticket and is not recorded twice. This is VU output, not a complete GS-state snapshot.
+
+The CSV adds `parent`, `context_hash` and `capture` columns. `constants.parent` identifies the context dispatcher's saved caller. `mesh_call` associates a completed context with its following validated CALL. `vu_begin`/`vu_end` share a capture ticket and fingerprint the complete code/data. On `vu_end`, `destination` counts packets; `cycle` marks a pending-pipeline transfer and `mode` marks interpreter fallback. Either flag disqualifies that invocation as a self-contained replacement fixture. Captured state padding is not meaningful for future register comparisons.
+
+`python -B testing/inspect_native_seam_capture.py <prefix> --trace <private.csv> --program-manifest <private-extraction/manifest.json>` validates capture pairs and fingerprints, walks the captured DMA list through its return, parses VIF boundaries, identifies complete disc microprograms in resident code, and summarizes GIF output. It emits metadata only. It is deliberately bounded and rejects unqualified formats rather than inventing data. Raw RAM, mesh data, microcode and GIF files remain private.
+
+The corrected build-26 capture passed the accelerated cutscene-skipping route and matched all 59 cumulative VU hashes, all six route counters, and all eight player probes/modes against the prior baseline. Its 19,070 CSV rows included 27 completed grass contexts and 27 validated mesh submissions, covering nine distinct list pointers. All used parent `0x260c04` and caller `0x360818`. The earlier build-25 capture preserved the same hashes but found no submissions through the alternative leaf helper; that negative result redirected the hook to the live generic renderer.
+
+The 5,000 complete accelerated fixtures contain nine distinct code images, no pipeline transfers and no interpreter fallbacks. Full-byte matching resolves grass at VU `0x1380`; the shader table selects one stage with constants at qword 53. There are 68 manager continuations with that selection, plus 24 manager initializations carrying the same table. These counts must not be conflated with 92 executions of the grass transform. The continuations emitted 2,590 PATH1 packets totaling 3,111,040 bytes. Every captured packet stream parsed completely, but this alone does not establish GS-state or visual equivalence.
+
+The previously unresolved VU entry `0x450` is the full-byte-matched `vlShaderAssembly_TransformClip_PCT_LoadContext`, immediately after the 0x450-byte manager. The manager's entry zero initializes state and stops; continuations at `0x10`/`0xf8` read ITOP, an input descriptor, and the stage table at qwords 4 and 5 onward. The actual shader chain therefore cannot be inferred from the MSCAL entry alone.
+
+The ordinary threaded capture also passed the route, matching the six counters and eight player probes/modes. Its first list has the same content fingerprint, and every imported chunk matches a VU input there too. Across the single-threaded hash run and the normal worker run, **3,663 identical captured inputs have identical outputs**, including all meaningful VU state bytes, full data memory and exact ordered GIF records. Compiler padding is excluded; cycles are retained. `python -B testing/compare_native_seam_captures.py <left-prefix> <right-prefix>` reproduces this comparison after validating both captures with the inspector. Diagnostic runs are not performance benchmarks.
+
+## First mesh-input importer
+
+`python -B testing/import_grass_seam.py <prefix> --trace <private.csv>` imports the observed single-RET list into word patches and raw position triples per geometry chunk. It admits only the captured absolute-address layouts, 1/1 or 3/1 cycles, and required unpack/mask/row operations. It handles signed packed inputs and the V2/V3 lane behavior, including the real DMA quadword phase. It rejects unsupported layouts. Matching requires the exact grass microprogram fingerprint and the observed manager stage table.
+
+The first captured root has one RET tag with 183 payload qwords: 2,936 VIF bytes including TTE. It contains five chunks, 31 UNPACK commands and five MSCNT continuations. ITOP cycles through qwords 180, 452 and 724. Descriptor counts are 28, 28, 28, 28 and 25. Static shader analysis identifies the first two positions in each chunk as bounds, followed by instances: 127 instances across the list.
+
+The imported patches match **every written 32-bit word** in all five chunks against accelerated pre-execution fixtures: 352, 344, 344, 344 and 308 words respectively. Each chunk matched twice in the bounded capture, demonstrating reuse across submissions. The importer does not compare unwritten/preserved lanes or prove a unique submission identity. The matching bytes establish the input format; they do not qualify transformed output, persistent VU registers/memory, or a runtime bypass.
+
+Grass emits multiple GS sprite passes, not merely one triangle mesh. The next transform must reproduce clipping, density/instance selection, both field transforms, packet state changes and persistent VU outputs. Native GPU work should consume these imported instance inputs and retain the existing ordered renderer dependencies. No speedup from this observation/import work is claimed.
+
 ## Implementation sequence
 
-1. Attribute the grass constant writer to its calling context dispatcher and following VU launch stream. Identify the complete batch root and its mesh/VIF-list pointer; add static mesh families using the same method. Measure coverage instead of assuming every launch belongs to the last grass upload.
-2. Capture bounded fixtures at the established batch boundary: mesh list, effective constants, relevant VU entry/exit state, ordered GIF output and GS state. Build a parser cached by content and source generation, invalidating it on guest writes or level unload.
+1. Extend the observed grass boundary and exact first-list importer to more visible lists and static mesh families. Measure coverage instead of assuming every launch belongs to the last grass upload.
+2. Complete the output oracle with surrounding GS state and explicit submission identities. The existing fixtures contain mesh input, effective constants, VU entry/exit state and ordered VU GIF output. Add a runtime mesh cache keyed by content and source generation, invalidating it on guest writes or level unload.
 3. Implement a host transform for one family, preferably a simple static mesh if its dependency map is smaller than grass. Compare geometry packets and persistent VU state against the accelerated reference, including clipping, strip restarts, two-field transforms and transitions into uncovered programs. Keep fallback for every unqualified case.
 4. Replace only qualified whole batches with that host transform, still producing ordered GS primitives. This separates mesh/transform correctness from graphics backend work and can already remove interpreted VIF/VU overhead.
 5. Add native vertex buffers, constants and a vertex shader to the hardware renderer. Extend the ordered GS command stream with native draw packets and preserve current texture/CLUT, target/depth, alpha, scissor, multipass and VRAM dependency handling. Keep transformed vertices on the GPU; reuse the existing direct presentation path.

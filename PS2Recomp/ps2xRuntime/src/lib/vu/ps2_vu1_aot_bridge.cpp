@@ -21,6 +21,7 @@
 #include <tuple>
 #include <vector>
 #include "../debug_counters.h"
+#include "../ps2_native_seam_probe.h"
 
 // Implemented in the private, generated object library.
 int ps2Vu1AotIdentify(const uint8_t* code,uint32_t size,uint32_t entry);
@@ -386,6 +387,8 @@ bool VU1Interpreter::tryAot(uint8_t* code,uint32_t codeSize,uint8_t* data,uint32
     static thread_local std::array<uint8_t,16384> probePreData;
     std::chrono::steady_clock::time_point probeT0;
     if(probe.on){probePre=m_state;std::memcpy(probePreData.data(),data,16384);probeT0=std::chrono::steady_clock::now();}
+    const uint32_t seamTicket = ps2_native_seam_probe::captureEnabled
+        ? ps2_native_seam_probe::vuBegin(pc, continuing, top, itop, code, data, m_state) : 0;
     const bool needsTransfer=(staticReady?ps2Vu1StaticRun:ps2Vu1AotRun)(image,&m_state,continuing,code,data,gs,memory,entry,top,itop,budget,transfer.data());
     bool probeFell=false;
     { // TEMP(transformers) qualification (release fix): the package counter moved during this call = mid-call fallback.
@@ -393,6 +396,7 @@ bool VU1Interpreter::tryAot(uint8_t* code,uint32_t codeSize,uint8_t* data,uint32
         const uint64_t fb=ps2Vu1AotFallbackCalls()+ps2Vu1StaticFallbackCalls();
         if(fb!=lastFallback && fb!=UINT64_MAX){lastFallback=fb;++aotStats.midFallback;ps2_perfscope::noteVu1MidFallback();probeFell=true;}
     }
+    if (seamTicket) ps2_native_seam_probe::vuEnd(seamTicket, code, data, m_state, needsTransfer, probeFell);
     if(probe.on)
     { // TEMP(transformers) qualification (release fix)
         const uint64_t callNs=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-probeT0).count());
