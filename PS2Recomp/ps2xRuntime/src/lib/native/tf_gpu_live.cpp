@@ -4,6 +4,7 @@
 #include "runtime/ps2_memory.h"
 #include "tf_dual_state.h"
 #include "tf_dual_memory.h"
+#include "runtime/gs/gs_native_grass_vu.h"
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -123,6 +124,7 @@ void install(uint32_t crc)
             throw std::runtime_error("GPU geometry bypass requires D3D12 HWGS and accelerated static VU");
     }
     std::fprintf(stderr, "[gpu-dual] ordered live renderer enabled; CPU geometry bypass=%u\n", unsigned(bypassEnabled));
+    tf_gpu_grass::install(crc, bypassEnabled);
 }
 
 void readMemory(const void *owner, uint8_t *data, unsigned first, unsigned count, ReadReason reason)
@@ -256,6 +258,9 @@ bool begin(uint32_t pc, bool continuing, uint32_t itop, uint64_t generation, con
 }
 gsnative::DualPacketPtr packet(uint32_t path, const uint8_t *data, uint32_t bytes)
 {
+    if (tf_gpu_grass::enabled)
+        if (auto grass = tf_gpu_grass::packet(path, data, bytes))
+            return grass;
     if (!pending.packet || pending.emitted)
         return {};
     pending.emitted = true;
@@ -422,6 +427,7 @@ void end(bool transferred, bool fellBack)
 }
 void finish()
 {
+    tf_gpu_grass::finish();
     if (enabled)
         std::fprintf(stderr,
                      "[gpu-dual] selected=%llu attached=%llu declined=%llu; VU bypass=%llu tail_vertices=%llu "

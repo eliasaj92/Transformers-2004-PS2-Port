@@ -24,6 +24,7 @@
 #include "../ps2_native_seam_probe.h"
 #include "../native/tf_grass_oracle.h"
 #include "../native/tf_gpu_live.h"
+#include "runtime/gs/gs_native_grass_vu.h"
 
 // Implemented in the private, generated object library.
 int ps2Vu1AotIdentify(const uint8_t* code,uint32_t size,uint32_t entry);
@@ -407,6 +408,8 @@ bool VU1Interpreter::tryAot(uint8_t* code,uint32_t codeSize,uint8_t* data,uint32
     const bool tail = nativeGeometry && staticReady &&
         tf_gpu_live::tryTail(code, data, m_state, gs, memory, pc, top, itop, budget, transfer.data());
     if (!tail && !setup && resolve.active) tf_gpu_live::readMemory(memory, data, 0, 1024, tf_gpu_live::ProgramRead);
+    const bool gpuGrass = tf_gpu_grass::enabled && staticReady && !tail && !setup && memory->instantWorker();
+    if (gpuGrass) tf_gpu_grass::beginCall(memory, code, data, generation);
     const bool needsTransfer=!tail && (staticReady?ps2Vu1StaticRun:ps2Vu1AotRun)(image,&m_state,continuing,code,data,gs,memory,entry,top,itop,budget,transfer.data());
     if (tail || setup) resolve.active = false;
     bool probeFell=false;
@@ -415,6 +418,7 @@ bool VU1Interpreter::tryAot(uint8_t* code,uint32_t codeSize,uint8_t* data,uint32
         const uint64_t fb=ps2Vu1AotFallbackCalls()+ps2Vu1StaticFallbackCalls();
         if(fb!=lastFallback && fb!=UINT64_MAX){lastFallback=fb;++aotStats.midFallback;ps2_perfscope::noteVu1MidFallback();probeFell=true;}
     }
+    if (gpuGrass) tf_gpu_grass::endCall(needsTransfer, probeFell);
     if (grassOracle) tf_grass_oracle::end(needsTransfer, probeFell);
     if (setup && (needsTransfer || probeFell))
         throw std::runtime_error("Qualified VU setup changed accelerated control flow");

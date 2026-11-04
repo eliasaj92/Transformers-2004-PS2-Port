@@ -18,6 +18,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("prefix", "gpu-capture", "gpu-report", "fixtures", "runner", "report"):
         parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument("--defer-memory", action="store_true",
+                        help="Keep skipped VU words unresolved and check ordered source-based reconstruction")
     args = parser.parse_args()
     prefix, gpu, gpu_report, fixtures, runner, report = (
         private(p) for p in (args.prefix, args.gpu_capture, args.gpu_report, args.fixtures, args.runner, args.report))
@@ -36,7 +38,12 @@ def main():
         raise ValueError("Grass GPU output is not bound to these uploaded inputs and reference packets")
     environment = os.environ.copy()
     environment.pop("PS2X_GRASS_CAPTURE", None)
+    environment.pop("PS2X_GRASS_DEFER", None)
+    environment.pop("PS2X_TF_GPU_GRASS", None)
     environment.update(PS2X_GRASS_GPU_CAPTURE=str(gpu), PS2X_GRASS_GPU_INPUTS=str(inputs_path))
+    if args.defer_memory:
+        environment["PS2X_GRASS_DEFER"] = "1"
+        environment["PS2X_TF_GPU_GRASS"] = "1"
     with log_path.open("xb") as log:
         result = subprocess.run([str(runner), str(fixtures), str(csv_path)], env=environment,
                                 stdout=log, stderr=subprocess.STDOUT, check=False)
@@ -53,11 +60,21 @@ def main():
                        map(int, match.groups()))) if match else {}
     passed = bool(passed and metrics["calls"] == count and metrics["emitted"] == count and
                   metrics["gpu_replaced"] == count and metrics["skipped_iterations"] == count * 2)
-    report.write_text(json.dumps({"passed": passed, "fixtures": len(rows), **metrics,
+    ownership = {}
+    if args.defer_memory:
+        match = re.search(r"GRASS_DEFER packets=(\d+) recorded=(\d+) overwritten_qwords=(\d+) "
+                          r"materialized_sprites=(\d+) materialized_qwords=(\d+) dirty=(\d+)", text)
+        if match:
+            ownership = dict(zip(("packets", "recorded", "overwritten_qwords", "materialized_sprites",
+                                  "materialized_qwords", "dirty"), map(int, match.groups())))
+        passed = bool(passed and ownership and ownership["packets"] == count and
+                      ownership["recorded"] == count and ownership["dirty"] == 0)
+    report.write_text(json.dumps({"passed": passed, "fixtures": len(rows), **metrics, "deferred_memory": ownership,
         "exit_code": result.returncode, "inputs_sha256": digest(inputs), "gpu_capture_sha256": digest(capture),
         "gpu_report_sha256": digest(gpu_report.read_bytes()), "runner_sha256": digest(runner.read_bytes()),
         "fixture_list_sha256": digest(fixtures.read_bytes()), "csv_sha256": digest(csv_path.read_bytes()) if rows else None,
-        "scope": "Accelerated replay with actual GPU geometry and no full CPU emission oracle; not live rendering or FPS"
+        "scope": ("Accelerated shortcut with unresolved VU geometry, ordered CPU fallback checked against actual GPU output; not live FPS"
+                  if args.defer_memory else "Accelerated replay with actual GPU geometry and no full CPU emission oracle; not live rendering or FPS")
     }, indent=2))
     print(report.read_text())
     if not passed:

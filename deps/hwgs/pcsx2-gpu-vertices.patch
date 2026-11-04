@@ -371,7 +371,7 @@ index 3eeab02..a959060 100644
  	D3D12_INDEX_BUFFER_VIEW m_index_buffer = {};
  	D3D12_PRIMITIVE_TOPOLOGY m_primitive_topology = {};
 diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
-index 9ef9fec..b6b8344 100644
+index 9ef9fec..e3405cd 100644
 --- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
 +++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
 @@ -10,6 +10,7 @@
@@ -598,7 +598,7 @@ index 9ef9fec..b6b8344 100644
 +
 +	Flush(GSFlushReason::CONTEXTCHANGE);
 +	if (m_channel_shuffle || m_channel_shuffle_width || m_split_clear_pages || m_split_texture_shuffle_pages ||
-+		m_vertex->tail > 2 || m_index->tail)
++		m_vertex->tail > 2 || m_index->tail || (sprite && m_vertex->head != m_vertex->tail))
 +		return false;
 +	// Conservative boxes can create a differently sized cold target, changing
 +	// the viewport's floating-point interpolation. Require an established target
@@ -1011,7 +1011,7 @@ index 9ef9fec..b6b8344 100644
  
  	m_vt.m_min.p.x += static_cast<float>(xoffset);
 diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.h b/pcsx2/GS/Renderers/HW/GSRendererHW.h
-index 4ee9d55..b32bd9e 100644
+index 4ee9d55..d3bca05 100644
 --- a/pcsx2/GS/Renderers/HW/GSRendererHW.h
 +++ b/pcsx2/GS/Renderers/HW/GSRendererHW.h
 @@ -32,6 +32,8 @@ public:
@@ -1023,7 +1023,7 @@ index 4ee9d55..b32bd9e 100644
  	static constexpr float SSR_UV_TOLERANCE = 1.0f;
  
  	using GSC_Ptr = bool(*)(GSRendererHW& r, int& skip);	// GSC - Get Skip Count
-@@ -381,6 +383,30 @@ public:
+@@ -381,6 +383,31 @@ public:
  	void Move() override;
  	void Draw() override;
  
@@ -1040,6 +1040,7 @@ index 4ee9d55..b32bd9e 100644
 +		bool (*submit)(void*, GSHWDrawConfig&), void (*materialize)(void*, GSVertex*, u32));
 +	// Sprite vertices must have unit Q and ST already rounded as FlushPrim does.
 +	// Pairs are consecutive; ADC/GS-culled pairs must be represented as zero area.
++	const GSVertex& GetNativeVertexLatch() const { return m_v; }
 +	bool DrawNativeSprites(const GSVertexTrace::Vertex& minimum, const GSVertexTrace::Vertex& maximum,
 +		const u16* indices, u32 nverts, bool nonconstant_depth, void* context,
 +		bool (*submit)(void*, GSHWDrawConfig&), void (*materialize)(void*, GSVertex*, u32));

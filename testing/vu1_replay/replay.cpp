@@ -23,7 +23,9 @@ uint64_t ps2Vu1StaticFallbackCalls();
 #ifdef TF_REPLAY_GRASS_TAIL
 void grassReplayInitialize();
 void grassReplayFinish();
-bool grassTailCapture(uint32_t, const uint8_t*, uint32_t, bool, bool);
+bool grassTailCapture(uint32_t, const uint8_t*&, uint32_t, bool, bool);
+void grassReplayBegin(const void*, const uint8_t*, uint8_t*, uint64_t);
+void grassReplayResolve(bool, bool);
 #endif
 namespace fs = std::filesystem;
 namespace {
@@ -209,8 +211,14 @@ int main(int argc, char** argv) {
             if (!QueryThreadCycleTime(GetCurrentThread(), &start)) throw std::runtime_error("Cannot read thread cycles");
             std::bitset<1024> geometry;
             const bool native = dual && dual->replace(name, actual, memory, geometry);
+#ifdef TF_REPLAY_GRASS_TAIL
+            grassReplayBegin(&memory, resident.data(), actual.data.data(), memory.gen1);
+#endif
             const bool pending = !native && ps2Vu1StaticRun(0, &actual.state, continuing, resident.data(), actual.data.data(),
                 gs, &memory, entry, before.header[1], before.header[2], 40000000, transfer.data());
+#ifdef TF_REPLAY_GRASS_TAIL
+            grassReplayResolve(pending, ps2Vu1StaticFallbackCalls() != fallback);
+#endif
             if (!QueryThreadCycleTime(GetCurrentThread(), &finish)) throw std::runtime_error("Cannot read thread cycles");
             if (pending || ps2Vu1StaticFallbackCalls() != fallback)
                 throw std::runtime_error("Replay transferred pending work or fell back: " + name);

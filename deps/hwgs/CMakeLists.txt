@@ -31,13 +31,15 @@ if(TF_HWGS_GPU_GEOMETRY)
     target_include_directories(tf_hwgs PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_sources(tf_hwgs PRIVATE tf_gpu_geometry_probe.cpp tf_gpu_dual_probe.cpp
         tf_gpu_dual_geometry.cpp tf_gpu_grass_probe.cpp tf_gpu_grass_draw_probe.cpp tf_gpu_dual_draw_probe.cpp tf_gpu_draw_trace.cpp
-        tf_gpu_dual_frontend.cpp tf_gpu_frontend_probe.cpp tf_gpu_grass_frontend_probe.cpp tf_gpu_live_draw.cpp)
+        tf_gpu_dual_frontend.cpp tf_gpu_frontend_probe.cpp tf_gpu_grass_frontend_probe.cpp tf_gpu_live_draw.cpp
+        tf_gpu_live_grass.cpp)
     # Bounds must honor/restore the caller's floating-point environment. Keep
     # this object separate from kzgs_flags, whose /fp:contract conflicts with
     # /fp:strict under MSVC.
     add_library(tf_gpu_dual_bounds OBJECT tf_gpu_dual_bounds.cpp)
     target_sources(tf_gpu_dual_bounds PRIVATE
-        ../../PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_dual_math.cpp)
+        ../../PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_dual_math.cpp
+        ../../PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_grass_math.cpp)
     target_include_directories(tf_gpu_dual_bounds PRIVATE ../../PS2Recomp/ps2xRuntime/include)
     target_compile_features(tf_gpu_dual_bounds PRIVATE cxx_std_20)
     if(MSVC)

@@ -146,3 +146,23 @@ live VU/packet ownership remains unfinished. The shortened grass loop is still o
 new game frame-rate measurement has been taken. The current next step is joining
 that loop to ordered grass companions and deferred VU memory, then measuring the
 enhanced Amazon route. See [resident grass sprites](../../deps/hwgs/GPU_GEOMETRY.md#resident-grass-sprites).
+
+
+## Ordered grass runtime integration
+
+The opt-in runtime now joins the shortened grass loop to owned GPU packets and
+an exact CPU fallback. Accelerated replay uses the same runtime hook: both
+captures preserve state, memory and packet order with the skipped geometry
+poisoned. Only 2.46% of deferred VU qwords need restoration; the rest are
+superseded by later output. The first pair must also be deferred because its
+stores finish during the next loop iteration.
+
+The GS packet path draws both fields in order, obtains its initial attributes
+from real GS state, and restores final latches using the retained last pair.
+GPU/ordinary fallback comparisons pass 2,048 latch checks and 29,360,128 pixels
+at 2048x1792 with zero differences. It uses source-derived bounds and a depth
+witness from resolved tail sprites, without rebuilding the omitted geometry
+just to qualify native drawing. See the [runtime contract and commands](../../deps/hwgs/GPU_GEOMETRY.md#deferred-grass-packets-and-runtime-hook).
+
+These are correctness results from enhanced captures; the last live measurement
+above remains the performance reference until the new enhanced level run.

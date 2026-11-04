@@ -397,6 +397,7 @@ add_library(ps2_runtime STATIC
     src/lib/gs/gs_hw_backend.cpp
     src/lib/gs/gs_hw_present.cpp
     src/lib/gs/gs_native_dual_math.cpp
+    src/lib/gs/gs_native_grass_math.cpp
     src/lib/ps2_trainer.cpp
     src/lib/ps2_objectives.cpp
     src/lib/ps2_native_seam_probe.cpp
@@ -404,8 +405,10 @@ add_library(ps2_runtime STATIC
     src/lib/native/tf_grass_packets.cpp
     src/lib/native/tf_grass_oracle.cpp
     src/lib/native/tf_gpu_live.cpp
+    src/lib/native/tf_gpu_grass.cpp
     src/lib/native/tf_dual_state.cpp
     src/lib/native/tf_dual_memory.cpp
+    src/lib/native/tf_grass_memory.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
@@ -498,10 +501,10 @@ target_sources(ps2_runtime PRIVATE
     ${KERNEL_SRC_FILES}
 )
 if(MSVC)
-    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/native/tf_dual_state.cpp
+    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/gs/gs_native_grass_math.cpp src/lib/native/tf_dual_state.cpp
         PROPERTIES COMPILE_OPTIONS "/fp:strict")
 else()
-    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/native/tf_dual_state.cpp
+    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/gs/gs_native_grass_math.cpp src/lib/native/tf_dual_state.cpp
         PROPERTIES COMPILE_OPTIONS "-frounding-math;-ffp-contract=off")
 endif()
 
@@ -811,6 +814,7 @@ endif()
 # Transformers port: opt-in static fragments coexist with the default whole-image package.
 option(PS2X_WITH_VU1_STATIC "Compile an external experimental static VU1 package" OFF)
 option(PS2X_VU1_STATIC_AVX2 "Require AVX2 for the locally generated static VU1 package" OFF)
+option(PS2X_VU1_GPU_GRASS "Wrap qualified static grass emission for opt-in GPU offload" OFF)
 if(PS2X_WITH_VU1_STATIC)
     if(NOT PS2X_WITH_VU1_AOT)
         target_sources(ps2_runtime PRIVATE src/lib/vu/ps2_vu1_aot_bridge.cpp src/lib/vu/ps2_vu1_aot_stubs.cpp)
@@ -821,6 +825,21 @@ if(PS2X_WITH_VU1_STATIC)
         message(FATAL_ERROR "Set PS2X_VU1_STATIC_DIR to your locally generated package")
     endif()
     include("${PS2X_VU1_STATIC_DIR}/sources.cmake")
+    if(PS2X_VU1_GPU_GRASS)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        set(GRASS_HOOK_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/vu1/prepare_grass_hooks.py")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${GRASS_HOOK_SCRIPT}")
+        execute_process(COMMAND "${Python3_EXECUTABLE}" -B "${GRASS_HOOK_SCRIPT}"
+            --package "${PS2X_VU1_STATIC_DIR}" --output "${CMAKE_CURRENT_BINARY_DIR}/grass-hooks"
+            COMMAND_ERROR_IS_FATAL ANY)
+        include("${CMAKE_CURRENT_BINARY_DIR}/grass-hooks/grass_chain.cmake")
+        list(FIND PS2X_VU1_STATIC_SOURCES "${GRASS_ORIGINAL_CHAIN}" GRASS_CHAIN_INDEX)
+        if(GRASS_CHAIN_INDEX LESS 0)
+            message(FATAL_ERROR "Qualified grass chain is absent from the private package source list")
+        endif()
+        list(REMOVE_ITEM PS2X_VU1_STATIC_SOURCES "${GRASS_ORIGINAL_CHAIN}")
+        list(APPEND PS2X_VU1_STATIC_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/grass-hooks/grass_chain.cpp")
+    endif()
     set(PS2X_VU1_STATIC_JOBS 2 CACHE STRING "Parallel jobs for locally generated VU1 code")
     if(NOT PS2X_VU1_STATIC_JOBS MATCHES "^[1-9][0-9]*$" OR PS2X_VU1_STATIC_JOBS GREATER 16)
         message(FATAL_ERROR "PS2X_VU1_STATIC_JOBS must be between 1 and 16")
@@ -831,6 +850,7 @@ if(PS2X_WITH_VU1_STATIC)
     target_include_directories(ps2_vu1_static BEFORE PRIVATE
         "${PS2X_VU1_STATIC_DIR}/native/include"
         "${PS2X_VU1_STATIC_DIR}/native/src/lib/vu"
+        "${PS2X_VU1_STATIC_DIR}/generated"
         "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(ps2_vu1_static PRIVATE ps2_runtime)
     set_target_properties(ps2_vu1_static PROPERTIES UNITY_BUILD OFF JOB_POOL_COMPILE ps2x_vu1_static_pool)

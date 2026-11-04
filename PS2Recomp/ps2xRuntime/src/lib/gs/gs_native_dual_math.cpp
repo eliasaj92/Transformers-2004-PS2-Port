@@ -92,7 +92,8 @@ void materializeDualPacket(const DualPacket &packet, uint8_t *gif, uint32_t byte
 {
     if (packet.version != 2)
         return;
-    if (!gif || packet.vertices < 3 || packet.vertices > 28 || bytes != (8 + 6 * packet.vertices) * 16)
+    if (!gif || packet.kind != GeometryKind::DualTransform || packet.vertices < 3 || packet.vertices > 28 ||
+        bytes != (8 + 6 * packet.vertices) * 16)
         throw std::runtime_error("Malformed deferred geometry packet");
     DualFloatScope floating;
     if (!floating.ready)

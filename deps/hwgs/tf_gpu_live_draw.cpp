@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "tf_hwgs.h"
 #include "tf_gpu_live_draw.h"
+#include "tf_gpu_live_grass.h"
 #include "tf_gpu_dual_geometry.h"
 #include "tf_gpu_dual_frontend.h"
-#include "runtime/gs/gs_native_dual_math.h"
+#include "runtime/gs/gs_native_grass_math.h"
 #include "kzgs_internal.h"
 #include "GS/Renderers/HW/GSRendererHW.h"
 #include "GS/Renderers/DX12/GSDevice12.h"
@@ -69,6 +70,7 @@ struct Live
     uint64_t packets = 0, gpuDraws = 0, cpuFallbacks = 0, declinedFields = 0, sourceHits = 0, noBounds = 0;
     uint64_t sourceDeclined = 0, outputDeclined = 0;
     uint64_t packetGroups = 0, groupPackets = 0, groupDeclined = 0;
+    tf_gpu::GrassLiveStats grass;
     // Retain the visible level's source working set. The initial 256-entry
     // cache uploaded 125,208 of 155,337 packets. Extra pool capacity covers
     // released buffers which are still in flight.
@@ -124,6 +126,10 @@ struct Live
                      s.sourceUploadBytes, s.allocations, s.pageProbes, sourceDeclined, outputDeclined,
                      sourceHashes.size(), s.groupedDispatches, s.groupedMeshes, packetGroups, groupPackets,
                      groupDeclined);
+        std::fprintf(stderr, "[gpu-grass:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
+                     "declined_fields=%llu bounds_declined=%llu output_declined=%llu dispatches=%llu batches=%llu\n",
+                     grass.packets, grass.gpuDraws, grass.materializations, grass.declinedFields,
+                     grass.boundsDeclined, grass.outputDeclined, s.grassDispatches, s.grassBatches);
     }
 };
 // Accessed/destroyed only on the owning GS thread, before device shutdown.
@@ -206,7 +212,8 @@ void materialize(void *context, GSVertex *vertices, uint32_t)
 }
 bool framing(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes)
 {
-    if ((p.version != 1 && p.version != 2) || p.vertices < 3 || p.vertices > 28 || bytes != (8 + p.vertices * 6) * 16 ||
+    if (p.kind != gsnative::GeometryKind::DualTransform || (p.version != 1 && p.version != 2) ||
+        p.vertices < 3 || p.vertices > 28 || bytes != (8 + p.vertices * 6) * 16 ||
         word(p.constants.data() + 140))
         return false;
     for (unsigned i = 0; i < p.vertices; ++i)
@@ -248,9 +255,21 @@ void executePacket(const uint8_t *bytes, uint32_t size, const Prepared *prepared
             return;
         }
         std::vector<uint8_t> restored(packet, packet + payload.bytes);
-        gsnative::materializeDualPacket(p, restored.data(), payload.bytes);
+        gsnative::materializePacket(p, restored.data(), payload.bytes);
         kzgs::ExecuteGIFOnGSThread(payload.path, restored.data(), payload.bytes);
     };
+    if (p.kind == gsnative::GeometryKind::GrassSprites)
+    {
+        if (g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::D3D12 && payload.path == 1)
+        {
+            if (!live)
+                live = std::make_unique<Live>(*GSDevice12::GetInstance());
+            if (tf_gpu::drawGrassPacket(live->pool, p, packet, payload.bytes, live->grass))
+                return;
+        }
+        ordinary();
+        return;
+    }
     if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || payload.path != 1 ||
         !framing(p, packet, payload.bytes) || g_gs_renderer->m_path[0].nloop)
     {
@@ -400,7 +419,8 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
 extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_t bytes,
                                      const gsnative::DualPacket *geometry)
 {
-    if (path != 1 || !data || !geometry || !framing(*geometry, data, bytes))
+    if (path != 1 || !data || !geometry ||
+        (!framing(*geometry, data, bytes) && !tf_gpu::grassPacketFraming(*geometry, data, bytes)))
         return 0;
     alignas(16) std::array<uint8_t, sizeof(Payload) + (8 + 28 * 6) * 16> storage;
     const Payload payload{*geometry, path, bytes, 0};

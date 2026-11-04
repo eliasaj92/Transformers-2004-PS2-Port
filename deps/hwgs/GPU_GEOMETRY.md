@@ -340,7 +340,7 @@ and deliberate final-submission fallback. Each comparison uses independently
 submitted GIF reference triangles. Both targets are established at the same size
 before drawing. The first three modes require **zero CPU materializations**.
 
-Results at **2048 × 1792 internal resolution**: 1,216 GPU draws and 408 deliberate
+Results at **2048 Ã— 1792 internal resolution**: 1,216 GPU draws and 408 deliberate
 CPU fallbacks, 400 mipmap-filtered submission callbacks, **zero differing pixels
 across 14,680,064 full-resolution comparisons**, and zero differences in the
 reduced GS VRAM comparisons. The diagnostic also rejects nonfinite bounds,
@@ -354,7 +354,7 @@ data. Live VU bypass remains disabled. These renderer results do not establish
 a gameplay FPS gain or true rendered 60 fps.
 
 The enhanced Amazon route also passed with this patched renderer and the PGO,
-static-VU runtime, direct presentation, 16:9 and 4× internal rendering. Opening
+static-VU runtime, direct presentation, 16:9 and 4Ã— internal rendering. Opening
 and arrival cinematics were skipped. Its gameplay-only window measured
 **54.9299 physics updates/s**, median **17.736 ms**, p95 **22.2 ms**. Live native
 geometry submission was disabled in that run. This single sample is a shared
@@ -703,11 +703,83 @@ python -B testing/test_gpu_grass_native.py draw --frontend --prepared $private/g
   --dll $private/gpu-build/tf_hwgs.dll --report $private/grass-frontend.json
 ```
 
-These are renderer diagnostics using enhanced gameplay captures, with synthetic
-texture/GS state. Reference geometry still supplies a diagnostic depth witness
-and CPU fallback. **Live grass offload is not enabled and the last gameplay FPS
-measurement is unchanged.** Connecting the qualified accelerated loop shortcut
-requires ordered grass companions, retained guest-memory ownership and an exact
-CPU materializer. The existing dual-geometry companion owns only XYZ lanes;
-grass also owns color and clipping words, so partially overwritten VU memory
-cannot reuse that ownership scheme without extending its contract.
+These renderer diagnostics use enhanced gameplay captures with synthetic GS
+texture state. They do not measure gameplay speed. The ordered runtime path
+below adds source ownership and a depth witness from the retained CPU tail.
+
+## Deferred grass packets and runtime hook
+
+`PS2X_VU1_GPU_GRASS=ON` wraps the supported private grass chain in the build
+directory. The package and its generated instruction bodies remain intact.
+At runtime, `PS2X_TF_GPU_GRASS=1` additionally requires the supported executable,
+`PS2X_TF_GPU_DUAL=2`, the accelerated static VU worker and D3D12 HWGS.
+Both options remain opt-in.
+
+The shared runtime hook authenticates all 3,872 resident program bytes, caching
+identity by owner, code pointer, generation and load address. It checks the
+loop/control state, finite inputs, saturated sticky flags and enough cycle
+budget for the retained iteration, epilogue and kick. The two middle iterations
+are skipped using the existing transfer/pipeline calendar. The final iteration
+and epilogue preserve registers and the last sprite pair.
+
+Each iteration finishes stores for the previous pair. Consequently, skipping
+two iterations leaves part of the first pair unfinished too. Version-2 grass
+companions own geometry for **sprites 0..5**, not just the middle four sprites.
+Sprites 6 and 7 remain resolved. Each field owns XYZF2/RGBA/XYZF2 qwords, including
+clipping/color W: 36 qwords per packet. A masked XYZ write must resolve W before
+replacing XYZ. Full-qword writes discard the old owner.
+
+Every queued transfer owns its emitter constants and scatter records. Pending
+transfers can finish while the following emitter advances, so a FIFO carries
+the companions in order. Guest-memory owners are separate from queued packet
+owners. Reusing a VU output buffer discards its old deferred words without
+reconstructing them. For now, remaining output buffers are restored at every
+VU-call boundary before another program or EE/VIF code can observe them.
+
+The runtime packet path reconstructs initial STQ and RGBA from actual GS state
+and the retained first-field tail. Source bounds and the two surviving tail
+sprites provide draw eligibility without calculating skipped vertices. The
+compute shader applies ADC and GS scissor/empty-box rejection, and D3D12 reads
+the resulting vertex buffer directly. The ordinary PRE/STQ prefix establishes
+state; an ADC-suppressed replay of the last pair restores latches and XY history.
+Incomplete sprite primitives, unsupported state, flat/insufficient depth
+witnesses, native-resolution culling and unbounded inputs retain ordinary GIF
+processing. Both fallback paths use the shared CPU materializer, never a GPU
+readback. Mixed packet groups preserve order and currently dispatch grass
+packets individually; existing triangle groups remain available.
+
+The accelerated replay now uses the **same runtime hook and memory tracker**.
+It deliberately poisons all 36 unresolved qwords after each epilogue and checks
+ordered fallback against authenticated actual GPU output. Both captures pass:
+5,374 calls, 17,096 shortened emitters, 14,448 overlapping transfers and complete
+semantic state, data, code, cycles and packet equality. Of 615,456 owned qwords,
+600,300 are overwritten and 15,156 (2.46%) are restored in VU memory. Independent
+partial-write/full-write checks also pass all 17,096 packets.
+
+The ordered GS-thread packet diagnostic compares both fields in packet order,
+including source-based ordinary fallback and deliberate native-draw fallback.
+Two 256-packet samples cover four texture/depth/blend/mipmap modes. They produce
+2,088 resident GPU draws, 696 deliberate native vertex materializations, 2,048
+exact final GS vertex-latch checks, and zero differences across 29,360,128 pixels
+at 2048x1792. Bounds/depth declines use ordinary reconstructed packets. Native
+GPU modes make no unexpected vertex fetches. The existing grouped-triangle
+frontend also passes with 1,216 GPU draws and zero differing pixels.
+
+```powershell
+# Add to the enhanced static-VU build configuration:
+# -DPS2X_VU1_GPU_GRASS=ON
+# Opt in only for the enhanced accelerated D3D12 route:
+$env:PS2X_TF_GPU_GRASS = '1'
+
+python -B testing/replay_gpu_grass.py --defer-memory --prefix $private/grass-capture `
+  --gpu-report $private/grass-gpu.json --gpu-capture $private/grass-gpu.bin `
+  --fixtures $private/all-captures.txt --runner $private/grass-check/tf_grass_tail.exe `
+  --report $private/grass-deferred.json
+python -B testing/test_gpu_grass_packets.py --prepared $private/grass-native `
+  --prefix $private/grass-capture --dll $private/gpu-build/tf_hwgs.dll `
+  --report $private/grass-packets.json
+```
+
+These checks qualify the captured windows and GS integration, not full-campaign
+reliability or distinct rendered 60 fps. A live enhanced level measurement is
+required before attributing a performance gain to the grass offload.

@@ -1047,7 +1047,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (nativeGeometry && nativeGeometry->version == 2 && !rawOnly(m_backend, m_rawTap))
     {
         restoredGeometry.assign(data, data + sizeBytes);
-        gsnative::materializeDualPacket(*nativeGeometry, restoredGeometry.data(), sizeBytes);
+        gsnative::materializePacket(*nativeGeometry, restoredGeometry.data(), sizeBytes);
         data = restoredGeometry.data();
         nativeGeometry.reset();
     }

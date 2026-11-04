@@ -51,6 +51,16 @@ if(TF_REPLAY_DUAL_TAIL)
         "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native/tf_dual_memory.cpp" ${PS2X_VU1_STATIC_SOURCES})
     set_source_files_properties("${DUAL_MATH}" PROPERTIES COMPILE_OPTIONS "/fp:strict")
 elseif(TF_REPLAY_GRASS_TAIL)
+    set(GRASS_MATH "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_grass_math.cpp")
+    set(DUAL_MATH "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_dual_math.cpp")
+    set(GRASS_MEMORY "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native/tf_grass_memory.cpp")
+    set(GRASS_RUNTIME "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native/tf_gpu_grass.cpp")
+    set_source_files_properties("${GRASS_MATH}" "${DUAL_MATH}" PROPERTIES COMPILE_OPTIONS "/fp:strict")
+    add_executable(tf_grass_memory ../native_grass_memory.cpp "${GRASS_MATH}" "${DUAL_MATH}" "${GRASS_MEMORY}")
+    target_compile_features(tf_grass_memory PRIVATE cxx_std_20)
+    target_compile_options(tf_grass_memory PRIVATE /O2 /Ob2 /fp:strict /arch:AVX2)
+    target_include_directories(tf_grass_memory PRIVATE "${REPO_ROOT}/PS2Recomp/ps2xRuntime/include"
+        "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native")
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS prepare_grass_chain.py)
     execute_process(COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/prepare_grass_chain.py"
@@ -63,7 +73,7 @@ elseif(TF_REPLAY_GRASS_TAIL)
     endif()
     list(REMOVE_ITEM PS2X_VU1_STATIC_SOURCES "${GRASS_ORIGINAL_CHAIN}")
     set(REPLAY_TARGET tf_grass_tail)
-    add_executable(${REPLAY_TARGET} replay.cpp grass_tail.cpp "${DUAL_STATE}"
+    add_executable(${REPLAY_TARGET} replay.cpp grass_tail.cpp "${DUAL_STATE}" "${GRASS_MATH}" "${DUAL_MATH}" "${GRASS_MEMORY}" "${GRASS_RUNTIME}"
         "${CMAKE_BINARY_DIR}/grass/grass_chain.cpp" ${PS2X_VU1_STATIC_SOURCES})
     target_compile_definitions(${REPLAY_TARGET} PRIVATE TF_REPLAY_GRASS_TAIL=1
         "TF_GRASS_LOOP=${GRASS_LOOP}" "TF_GRASS_EPILOGUE=${GRASS_EPILOGUE}")

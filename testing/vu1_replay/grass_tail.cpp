@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Accelerated-only grass emission boundary experiment. Not a live bypass.
 #include "common.h"
+#include "runtime/gs/gs_native_grass_vu.h"
+#include "runtime/gs/gs_native_grass_math.h"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -8,6 +10,7 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#include <deque>
 
 bool TF_GRASS_LOOP(StaticVU &, uint8_t *, uint32_t, uint64_t, bool &);
 bool TF_GRASS_EPILOGUE(StaticVU &, uint8_t *, uint32_t, uint64_t, bool &);
@@ -20,6 +23,9 @@ uint64_t calls = 0, active = 0, captured = 0, replaced = 0;
 bool emitterPending = false;
 std::array<uint8_t, 256> emitterInput;
 std::ofstream inputFile, packetFile;
+bool deferGeometry = false;
+std::array<uint8_t, 1216> restoredPacket;
+uint64_t deferredPackets = 0;
 
 void require(bool condition, const char *message)
 {
@@ -53,45 +59,6 @@ uint64_t fingerprint(const uint8_t *data, size_t bytes)
     return hash;
 }
 
-// The final accelerated iteration overwrites all retained results except the
-// previous pair's second-field clipping flags. Reconstruct only those flags;
-// the GPU performs the skipped coordinate, reciprocal and color calculations.
-void skipMiddlePairs(StaticVU &v, const uint8_t *data)
-{
-    const auto add = [](__m128 x, __m128 y) { return _mm_add_ps(x, y); };
-    const auto scale = [](__m128 x, float y) { return _mm_mul_ps(x, _mm_set1_ps(y)); };
-    float weights[4];
-    std::memcpy(weights, data + ((uint16_t(v.m_state.vi[5]) + 1u) & 1023u) * 16u, 16);
-    const __m128 edge = _mm_loadu_ps(v.m_state.vf[18]);
-    __m128 point = add(_mm_loadu_ps(v.m_state.vf[10]), scale(edge, weights[0]));
-    point = add(add(point, scale(edge, weights[2])), scale(_mm_loadu_ps(v.m_state.vf[19]), weights[3]));
-    const auto flags = [&](const __m128 p) {
-        const __m128 clip = add(_mm_mul_ps(_mm_loadu_ps(v.m_state.vf[2]), _mm_shuffle_ps(p, p, 255)),
-                                _mm_mul_ps(_mm_loadu_ps(v.m_state.vf[1]), p));
-        float f[4];
-        _mm_storeu_ps(f, clip);
-        uint32_t bits = 0;
-        for (unsigned i = 0; i < 3; ++i)
-        {
-            if (f[i] > std::fabs(f[3]))
-                bits |= 1u << (i * 2);
-            if (f[i] < -std::fabs(f[3]))
-                bits |= 2u << (i * 2);
-        }
-        return bits;
-    };
-    const uint32_t retained = flags(point) & flags(add(point, _mm_loadu_ps(v.m_state.vf[3])));
-    // Advances the real pending transfer and pipeline calendar, not just the
-    // cycle counter. The following accelerated iteration retains normal timing.
-    v.advanceTo(v.m_cycle + 118);
-    v.m_state.vi[10] = int16_t(retained);
-    v.m_state.vi[12] = 63;
-    v.m_state.vi[5] = int16_t(v.m_state.vi[5] + 2);
-    v.m_state.vi[8] = int16_t(v.m_state.vi[8] + 16);
-    v.m_state.vi[9] = 2;
-    v.m_state.branchTarget = v.m_state.pc;
-    v.m_state.branchDelay = 0;
-}
 } // namespace
 
 void grassReplayInitialize()
@@ -120,6 +87,13 @@ void grassReplayInitialize()
         // The Python driver verifies SHA-256 provenance. Every record is also
         // checked byte-for-byte against its actual VU inputs below.
     }
+    if (const char *option = std::getenv("PS2X_GRASS_DEFER"))
+    {
+        require(!std::strcmp(option, "1") && !gpuGeometry.empty() && !inputFile.is_open(),
+                "Deferred grass replay requires authenticated GPU geometry and no new capture");
+        deferGeometry = true;
+        tf_gpu_grass::install(0x74c982c0, true);
+    }
 }
 
 bool grassTailProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end, bool &ended)
@@ -135,19 +109,20 @@ bool grassTailProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end, boo
     require(base <= 16384 - 3872 && v.m_activeMemory && v.m_activeMemory->vu1Code &&
                 fingerprint(v.m_activeMemory->vu1Code + base, 3872) == 0xbbe99809fbf7361eull,
             "Grass program identity changed");
-    constexpr unsigned registers[] = {1, 2, 3, 9, 16, 17, 10, 18, 19, 22, 20, 21};
-    for (unsigned i = 0; i < 12; ++i)
-        std::memcpy(emitterInput.data() + i * 16, v.m_state.vf[registers[i]], 16);
-    for (unsigned i = 0; i < 4; ++i)
-        std::memcpy(emitterInput.data() + 192 + i * 16, data + ((uint16_t(v.m_state.vi[5]) + i - 1u) & 1023u) * 16, 16);
+    emitterInput = tf_gpu_grass::inputs(v, data);
     emitterPending = true;
     if (!gpuGeometry.empty())
     {
         require(captured < gpuInputs.size() / 256 &&
                     !std::memcmp(gpuInputs.data() + captured * 256, emitterInput.data(), 256),
                 "Grass replay differs from actual GPU upload");
-        skipMiddlePairs(v, data);
-        require(TF_GRASS_LOOP(v, data, size, end, ended), "Accelerated grass tail declined");
+        if (deferGeometry)
+            require(tf_gpu_grass::loop(v, data, size, end, ended, TF_GRASS_LOOP), "Runtime grass loop declined");
+        else
+        {
+            tf_gpu_grass::skipMiddlePairs(v, data);
+            require(TF_GRASS_LOOP(v, data, size, end, ended), "Accelerated grass tail declined");
+        }
         ++replaced;
         return true;
     }
@@ -165,7 +140,7 @@ bool grassTailProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end, boo
     require(TF_GRASS_LOOP(v, data, size, end, ended), "Accelerated grass reference declined");
     captureMode = 2;
     c.m_activeVuData = scratch.data();
-    skipMiddlePairs(c, scratch.data());
+    tf_gpu_grass::skipMiddlePairs(c, scratch.data());
     bool candidateEnded = false;
     require(TF_GRASS_LOOP(c, scratch.data(), size, end, candidateEnded), "Accelerated grass tail declined");
     captureMode = 0;
@@ -185,12 +160,16 @@ bool grassTailProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end, boo
 
 bool grassEpilogueProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end, bool &ended)
 {
-    require(TF_GRASS_EPILOGUE(v, data, size, end, ended), "Accelerated grass epilogue declined");
+    if (deferGeometry)
+        require(tf_gpu_grass::epilogue(v, data, size, end, ended, TF_GRASS_EPILOGUE),
+                "Runtime grass epilogue declined");
+    else
+        require(TF_GRASS_EPILOGUE(v, data, size, end, ended), "Accelerated grass epilogue declined");
     require(emitterPending, "Missing grass emitter inputs");
     const unsigned base = (uint16_t(v.m_state.vi[2]) - 6u) & 1023u;
     require(base <= 1024 - 76, "Wrapping grass packet");
     auto *packet = data + base * 16;
-    if (!gpuGeometry.empty())
+    if (!gpuGeometry.empty() && !deferGeometry)
     {
         const auto *raw = gpuGeometry.data() + 48 + captured * 640;
         for (unsigned field = 0; field < 2; ++field)
@@ -200,6 +179,18 @@ bool grassEpilogueProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end,
                 std::memcpy(packet + address, raw + field * 256 + sprite * 32, 16);
                 std::memcpy(packet + address + 48, raw + field * 256 + sprite * 32 + 16, 16);
                 std::memcpy(packet + address + 32, raw + 512 + sprite * 16, 16);
+            }
+    }
+    if (deferGeometry)
+    {
+        // Deliberately invalid unresolved words reveal accidental guest reads.
+        // Ordered GS packets and explicit CPU reads resolve from their source.
+        for (unsigned field = 0; field < 2; ++field)
+            for (unsigned sprite = 0; sprite < 6; ++sprite)
+            {
+                auto *p = packet + (6 + field * 38 + sprite * 4) * 16;
+                std::memset(p, 0xcd, 16);
+                std::memset(p + 32, 0xcd, 32);
             }
     }
     if (inputFile.is_open())
@@ -213,8 +204,37 @@ bool grassEpilogueProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end,
     return true;
 }
 
-bool grassTailCapture(uint32_t path, const uint8_t *data, uint32_t count, bool drain, bool direct)
+bool grassTailCapture(uint32_t path, const uint8_t *&data, uint32_t count, bool drain, bool direct)
 {
+    if (auto owner = deferGeometry ? tf_gpu_grass::packet(path, data, count) : nullptr)
+    {
+        require(!captureMode && path == 1 && drain && !direct, "Deferred grass packet routing changed");
+        const uint64_t captureIndex = owner->ticket - 1;
+        std::memcpy(restoredPacket.data(), data, count);
+        gsnative::materializePacket(*owner, restoredPacket.data(), count);
+        const auto *raw = gpuGeometry.data() + 48 + captureIndex * 640;
+        for (unsigned field = 0; field < 2; ++field)
+            for (unsigned sprite = 0; sprite < 8; ++sprite)
+            {
+                const auto *p = restoredPacket.data() + (6 + field * 38 + sprite * 4) * 16;
+                const unsigned offsets[] = {0, 48, 32};
+                const unsigned referenceOffsets[] = {field * 256 + sprite * 32, field * 256 + sprite * 32 + 16,
+                                                     512 + sprite * 16};
+                for (unsigned part = 0; part < 3; ++part)
+                    for (unsigned lane = 0; lane < 4; ++lane)
+                        if (word(p + offsets[part] + lane * 4) != word(raw + referenceOffsets[part] + lane * 4))
+                        {
+                            std::fprintf(stderr,
+                                         "GRASS_DEFER mismatch packet=%llu field=%u sprite=%u part=%u lane=%u "
+                                         "actual=%08x expected=%08x\n",
+                                         captureIndex, field, sprite, part, lane, word(p + offsets[part] + lane * 4),
+                                         word(raw + referenceOffsets[part] + lane * 4));
+                            require(false, "Deferred grass packet differs from actual GPU output");
+                        }
+            }
+        data = restoredPacket.data();
+        ++deferredPackets;
+    }
     if (!captureMode)
         return false;
     auto &out = captureMode == 1 ? referencePackets : candidatePackets;
@@ -225,10 +245,31 @@ bool grassTailCapture(uint32_t path, const uint8_t *data, uint32_t count, bool d
     return captureMode == 2;
 }
 
+void grassReplayBegin(const void *owner, const uint8_t *code, uint8_t *data, uint64_t generation)
+{
+    if (deferGeometry)
+        tf_gpu_grass::beginCall(owner, code, data, generation);
+}
+void grassReplayResolve(bool transferred, bool fellBack)
+{
+    if (deferGeometry)
+        tf_gpu_grass::endCall(transferred, fellBack);
+}
+
 void grassReplayFinish()
 {
     require(calls && calls == captured && !emitterPending, "Incomplete grass emission replay");
     require(gpuGeometry.empty() || captured == gpuInputs.size() / 256, "Unused GPU grass results");
+    if (deferGeometry)
+    {
+        const auto deferred = tf_gpu_grass::stats();
+        require(deferredPackets == captured && !deferred.dirtyQwords && deferred.attached == captured,
+                "Incomplete deferred grass ownership");
+        std::printf("GRASS_DEFER packets=%llu recorded=%llu overwritten_qwords=%llu materialized_sprites=%llu "
+                    "materialized_qwords=%llu dirty=%u\n",
+                    deferredPackets, deferred.recorded, deferred.overwrittenQwords, deferred.materializedSprites,
+                    deferred.materializedQwords, deferred.dirtyQwords);
+    }
     std::printf("GRASS_TAIL calls=%llu active_transfers=%llu emitted=%llu gpu_replaced=%llu skipped_iterations=%llu\n",
                 calls, active, captured, replaced, replaced * 2);
 }

@@ -2,7 +2,7 @@
 
 #include "runtime/gs/gs_types.h"
 #include "runtime/gs/gs_native_geometry.h"
-#include "runtime/gs/gs_native_dual_math.h"
+#include "runtime/gs/gs_native_grass_math.h"
 
 #include <cstdint>
 #include <array>
@@ -51,7 +51,7 @@ public:
     {
         if (geometry.version != 2) { RawGIF(path, data, bytes); return; }
         std::vector<uint8_t> restored(data, data + bytes);
-        gsnative::materializeDualPacket(geometry, restored.data(), bytes);
+        gsnative::materializePacket(geometry, restored.data(), bytes);
         RawGIF(path, restored.data(), bytes);
     }
 };

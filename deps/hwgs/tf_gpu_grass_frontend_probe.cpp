@@ -5,6 +5,8 @@
 #include "tf_hwgs.h"
 #include "tf_gpu_dual_geometry.h"
 #include "tf_gpu_dual_frontend.h"
+#include "tf_gpu_live_grass.h"
+#include "runtime/gs/gs_native_grass_math.h"
 
 #include "kzgs_internal.h"
 #include "GS/Renderers/HW/GSRendererHW.h"
@@ -110,8 +112,8 @@ void materialize(void *context, GSVertex *vertices, uint32_t count)
 }
 } // namespace
 
-extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, uint32_t count, const void *expected,
-                                                          uint64_t *stats, char *error, uint32_t capacity)
+static int grassFrontendProbe(const void *inputs, uint32_t count, const void *expected, const void *packets,
+                              uint64_t *stats, char *error, uint32_t capacity)
 {
     if (!inputs || !expected || !stats || !count || count > 1024)
         return 0;
@@ -125,6 +127,8 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
             std::vector<GSVertex> reference(count * 32);
             std::memcpy(reference.data(), expected, size_t(count) * 1024);
             tf_gpu::DualGeometry pool(*device);
+            tf_gpu::GrassLiveStats packetStats;
+            std::vector<GSVertex> packetLatches(count);
             std::vector<tf_gpu::GrassRasterState> raster(count);
             for (auto &state : raster)
                 for (unsigned field = 0; field < 2; ++field)
@@ -132,12 +136,18 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
                     state.scissor[field] = {-8, (field ? 224 : 0) * 16 - 8, 511 * 16 + 8, (field ? 447 : 223) * 16 + 8};
                     state.offset[field] = {28671, field ? 25591 : 29183, 0, 1};
                 }
-            auto output = pool.prepareGrass(inputs, count, raster.data());
-            require(bool(output), "Cannot dispatch frontend grass geometry");
+            tf_gpu::DualGeometry::Batch output;
+            if (!packets)
+            {
+                output = pool.prepareGrass(inputs, count, raster.data());
+                require(bool(output), "Cannot dispatch frontend grass geometry");
+            }
             std::vector<std::array<tf_gpu::DualDrawBounds, 2>> bounds(count);
             std::vector<bool> bounded(count);
             for (unsigned packet = 0; packet < count; ++packet)
             {
+                if (packets)
+                    break;
                 bounded[packet] =
                     tf_gpu::projectGrassBounds(static_cast<const uint8_t *>(inputs) + packet * 320, bounds[packet]);
                 ++stats[bounded[packet] ? 16 : 17];
@@ -148,6 +158,7 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
             for (unsigned mode = 0; mode < 4; ++mode)
             {
                 const uint64_t fallbackBefore = stats[2];
+                const uint64_t packetFallbackBefore = packetStats.materializations;
                 renderer->Flush(GSState::GSFlushReason::CONTEXTCHANGE);
                 renderer->ReadbackTextureCache();
                 GIFRegBITBLTBUF blit{};
@@ -203,6 +214,8 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
                     }
                     for (unsigned field = 0; field < 2; ++field)
                     {
+                        if (packets && field)
+                            break; // The packet path consumes both fields in their actual order.
                         GIFRegPRIM prim{};
                         prim.PRIM = GS_SPRITE;
                         prim.TME = 1;
@@ -261,6 +274,72 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
                         transfer(state);
                         for (unsigned packet = 0; packet < count; ++packet)
                         {
+                            if (packets)
+                            {
+                                alignas(16) std::array<uint8_t, 1216> raw;
+                                std::memcpy(raw.data(), static_cast<const uint8_t *>(packets) + packet * 1216, 1216);
+                                for (unsigned f = 0; f < 2; ++f)
+                                {
+                                    // Keep captured geometry/framing, but place it in the
+                                    // same synthetic texture/depth/blend comparison scene.
+                                    auto *part = raw.data() + f * 608;
+                                    auto fieldXY = xy;
+                                    fieldXY.OFY = f ? 25591 : 29183;
+                                    auto fieldScissor = scissor;
+                                    fieldScissor.SCAY0 = f ? 224 : 0;
+                                    fieldScissor.SCAY1 = f ? 447 : 223;
+                                    std::memcpy(part + 16, &fieldScissor, 8);
+                                    std::memcpy(part + 32, &fieldXY, 8);
+                                    for (unsigned tag : {48u, 80u})
+                                    {
+                                        uint64_t value, primitive;
+                                        std::memcpy(&value, part + tag, 8);
+                                        std::memcpy(&primitive, &prim, 8);
+                                        value = (value & ~(0x7ffull << 47)) | ((primitive & 0x7ff) << 47);
+                                        std::memcpy(part + tag, &value, 8);
+                                    }
+                                }
+                                if (!side)
+                                {
+                                    gsnative::DualPacket source;
+                                    source.kind = gsnative::GeometryKind::GrassSprites;
+                                    source.vertices = 8;
+                                    source.version = 2;
+                                    std::memcpy(source.inputs.data(), static_cast<const uint8_t *>(inputs) + packet * 320, 256);
+                                    if (!mode && !packet)
+                                    {
+                                        auto invalid = raw;
+                                        const uint32_t wrongQ = 0x40000000;
+                                        std::memcpy(invalid.data() + 72, &wrongQ, 4);
+                                        require(!tf_gpu::grassPacketFraming(source, invalid.data(), 1216),
+                                                "Non-unit grass packet Q was accepted");
+                                        ++stats[16];
+                                    }
+                                    for (unsigned f = 0; f < 2; ++f)
+                                        for (unsigned sprite = 0; sprite < 6; ++sprite)
+                                        {
+                                            auto *v = raw.data() + (6 + f * 38 + sprite * 4) * 16;
+                                            std::memset(v, 0xcd, 16);
+                                            std::memset(v + 32, 0xcd, 32);
+                                        }
+                                    if (!tf_gpu::drawGrassPacket(pool, source, raw.data(), 1216, packetStats, mode == 3))
+                                    {
+                                        ++stats[17];
+                                        gsnative::materializePacket(source, raw.data(), 1216);
+                                        kzgs::ExecuteGIFOnGSThread(1, raw.data(), 1216);
+                                    }
+                                    packetLatches[packet] = renderer->GetNativeVertexLatch();
+                                }
+                                else
+                                {
+                                    kzgs::ExecuteGIFOnGSThread(1, raw.data(), 1216);
+                                    require(!std::memcmp(&packetLatches[packet], &renderer->GetNativeVertexLatch(), sizeof(GSVertex)),
+                                            "Native grass changed the final GS vertex latch");
+                                    ++stats[6];
+                                }
+                                require(renderer->m_path[0].nloop == 0, "Grass packet left an unfinished GIF transfer");
+                                continue;
+                            }
                             const GSVertex *vertices = reference.data() + packet * 32 + field * 16;
                             bool varyingDepth = false;
                             GSVertexTrace::Vertex minimum{}, maximum{};
@@ -302,6 +381,7 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
                                 cpuDraw(vertices, indices);
                         }
                     }
+                    renderer->Flush(GSState::GSFlushReason::CONTEXTCHANGE);
                 }
                 // Compare the complete upscaled images before reducing them to
                 // GS VRAM. Reduced readback can hide subpixel disagreements.
@@ -359,7 +439,9 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
                 stats[8] += differences;
                 ++stats[9];
                 require(painted > 1000, "Frontend comparison did not paint enough pixels");
-                require(mode == 3 || stats[2] == fallbackBefore,
+                require(!packets || mode == 3 || packetStats.materializations == packetFallbackBefore,
+                        "A GPU packet mode unexpectedly materialized native vertices");
+                require(packets || mode == 3 || stats[2] == fallbackBefore,
                         "A GPU sprite mode unexpectedly materialized CPU vertices");
                 std::fprintf(stderr,
                              "[gpu:grass-frontend] mode=%u painted=%llu differences=%llu submits=%llu fallback=%llu\n",
@@ -370,9 +452,21 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
             stats[14] = pool.stats().grassDispatches;
             stats[15] = pool.stats().grassBatches;
             require(stats[8] == 0 && stats[10] == 0, "Native frontend pixels differ from GIF reference draws");
-            require(stats[0] > 100 && stats[1] > 100 && stats[2] > 0 && stats[3] > 100 && stats[4] > 100 &&
-                        stats[5] > 0 && stats[6] > 0 && stats[13] > 0,
-                    "Frontend diagnostic did not exercise required paths");
+            if (packets)
+            {
+                stats[0] = packetStats.packets;
+                stats[1] = packetStats.gpuDraws;
+                stats[2] = packetStats.materializations;
+                stats[3] = packetStats.declinedFields;
+                stats[4] = packetStats.boundsDeclined;
+                stats[5] = packetStats.outputDeclined;
+                require(stats[0] > 100 && stats[1] > 100 && stats[2] > 0 && stats[6] == count * 4,
+                        "Packet diagnostic did not exercise GPU draws, fallback and latches");
+            }
+            else
+                require(stats[0] > 100 && stats[1] > 100 && stats[2] > 0 && stats[3] > 100 && stats[4] > 100 &&
+                            stats[5] > 0 && stats[6] > 0 && stats[13] > 0,
+                        "Frontend diagnostic did not exercise required paths");
             passed = true;
         }
         catch (const std::exception &ex)
@@ -382,4 +476,15 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, ui
         }
     });
     return passed ? 1 : 0;
+}
+
+extern "C" TF_HWGS_API int tf_gs_gpu_grass_frontend_probe(const void *inputs, uint32_t count, const void *expected,
+                                                          uint64_t *stats, char *error, uint32_t capacity)
+{
+    return grassFrontendProbe(inputs, count, expected, nullptr, stats, error, capacity);
+}
+extern "C" TF_HWGS_API int tf_gs_gpu_grass_packet_probe(const void *inputs, uint32_t count, const void *expected,
+                                                        const void *packets, uint64_t *stats, char *error, uint32_t capacity)
+{
+    return packets ? grassFrontendProbe(inputs, count, expected, packets, stats, error, capacity) : 0;
 }

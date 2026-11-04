@@ -7,17 +7,26 @@
 
 namespace gsnative
 {
+enum class GeometryKind : uint32_t
+{
+    DualTransform = 0,
+    GrassSprites = 1
+};
 // Owned companion to one PATH1 packet. Version 1 contains complete raw GIF;
 // version 2 resolves only the CPU tail and requires source materialization for
 // ordinary fallback. Final EE/GS latches are resolved in both versions.
 // No guest pointers cross queues.
 struct alignas(16) DualPacket
 {
-    uint32_t version = 1, vertices = 0, varyingDepth = 0, reserved = 0;
+    uint32_t version = 1, vertices = 0, varyingDepth = 0;
+    GeometryKind kind = GeometryKind::DualTransform;
     uint64_t ticket = 0, generation = 0;
     std::array<uint8_t, 28 * 32> inputs{};
     std::array<uint8_t, 144> constants{};
 };
+// Grass companions use eight sprites and the first 256 input bytes for their
+// emitter constants/scatter. Version 2 retains sprites 6,7 in the raw GIF.
+// The legacy type/API name and 1072-byte queue layout remain compatible.
 static_assert(sizeof(DualPacket) == 1072 && std::is_trivially_copyable_v<DualPacket>);
 using DualPacketPtr = std::shared_ptr<const DualPacket>;
 

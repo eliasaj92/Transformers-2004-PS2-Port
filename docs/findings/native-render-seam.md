@@ -337,7 +337,7 @@ ordered cross-thread ownership remain the caller's responsibility.
 The enhanced-capture diagnostic submitted 1,216 GPU draws with no CPU geometry
 materialization, plus 408 intentionally declined submissions checking fallback.
 It exercised generated textures, depth, blending, alpha testing and mipmaps at
-2048 × 1792. All 14,680,064 full-resolution pixel comparisons against independent
+2048 Ã— 1792. All 14,680,064 full-resolution pixel comparisons against independent
 GIF reference draws matched. This closes the earlier fixed-untextured-state
 limitation, but does not establish game-specific texture feedback, live VU
 bypass, or a frame-rate gain. See [eligibility and commands](../../deps/hwgs/GPU_GEOMETRY.md).
@@ -474,3 +474,23 @@ pixels. Deliberate CPU fallback and the existing grouped triangle path also pass
 Live grass companions, deferred-memory ownership and the CPU fallback materializer
 remain to be connected to the shortened accelerated loop. No new live FPS claim
 follows from these diagnostics. See [resident grass sprites](../../deps/hwgs/GPU_GEOMETRY.md#resident-grass-sprites).
+
+
+## Ordered grass runtime integration
+
+The opt-in runtime now joins the shortened grass loop to owned GPU packets and
+an exact CPU fallback. Accelerated replay uses the same runtime hook: both
+captures preserve state, memory and packet order with the skipped geometry
+poisoned. Only 2.46% of deferred VU qwords need restoration; the rest are
+superseded by later output. The first pair must also be deferred because its
+stores finish during the next loop iteration.
+
+The GS packet path draws both fields in order, obtains its initial attributes
+from real GS state, and restores final latches using the retained last pair.
+GPU/ordinary fallback comparisons pass 2,048 latch checks and 29,360,128 pixels
+at 2048x1792 with zero differences. It uses source-derived bounds and a depth
+witness from resolved tail sprites, without rebuilding the omitted geometry
+just to qualify native drawing. See the [runtime contract and commands](../../deps/hwgs/GPU_GEOMETRY.md#deferred-grass-packets-and-runtime-hook).
+
+These are correctness results from enhanced captures; the last live measurement
+above remains the performance reference until the new enhanced level run.
