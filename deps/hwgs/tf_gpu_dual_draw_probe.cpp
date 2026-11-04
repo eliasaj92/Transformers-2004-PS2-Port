@@ -28,11 +28,13 @@ void require(bool condition, const char *text)
 }
 } // namespace
 
-extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe(const void *inputs, uint32_t count, const void *constants,
-                                                     uint32_t batches, const void *expected, uint64_t *stats,
-                                                     char *error, uint32_t capacity)
+extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe_v2(const void *inputs, uint32_t count, const void *constants,
+                                                        uint32_t batches, const uint32_t *groupEnds, uint32_t groups,
+                                                        const void *expected, uint64_t *stats, char *error,
+                                                        uint32_t capacity)
 {
-    if (!inputs || !constants || !expected || !stats || count < 3 || count > 32768 || !batches || batches > 1024)
+    if (!inputs || !constants || !expected || !stats || !groupEnds || !groups || groups > batches || count < 3 ||
+        count > 32768 || !batches || batches > 1024)
         return 0;
     bool passed = false;
     kzgs::RunOnGSThread([&] {
@@ -41,11 +43,18 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe(const void *inputs, uint32_
             require(g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::D3D12, "Dual draw probe requires D3D12");
             auto *gs = GSDevice12::GetInstance();
             const auto *transforms = static_cast<const uint8_t *>(constants);
+            unsigned previous = 0;
+            for (unsigned group = 0; group < groups; ++group)
+            {
+                require(groupEnds[group] > previous && groupEnds[group] <= batches, "Invalid diagnostic mesh groups");
+                previous = groupEnds[group];
+            }
+            require(previous == batches, "Diagnostic groups do not cover every chunk");
             std::vector<GSVertex> referenceVertices(count * 2);
             std::memcpy(referenceVertices.data(), expected, size_t(count) * 64);
             const auto *reference = reinterpret_cast<const uint8_t *>(referenceVertices.data());
             const unsigned columns = 64, tile = 48, width = columns * tile;
-            const unsigned height = ((batches * 4 + columns - 1) / columns) * tile;
+            const unsigned height = ((groups * 4 + columns - 1) / columns) * tile;
             struct Targets
             {
                 GSDevice12 *gs;
@@ -63,10 +72,17 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe(const void *inputs, uint32_
             targets.gpu = gs->CreateRenderTarget(width, height, GSTexture::Format::Color, true, false);
             targets.cpu = gs->CreateRenderTarget(width, height, GSTexture::Format::Color, true, false);
             require(targets.gpu && targets.cpu, "Cannot allocate dual draw comparison targets");
-            const uint32_t uploadBytes = (((count * 32 + 255) & ~255u) + batches * 144 + 65535) & ~65535u;
+            const uint32_t uploadBytes = (batches * 144 + 65535) & ~65535u;
             const uint32_t outputBytes = (count * 64 + 65535) & ~65535u;
-            tf_gpu::DualGeometry pool(*gs, 2ull * (uploadBytes + outputBytes));
-            auto first = pool.prepare(inputs, count, constants, batches);
+            const uint32_t sourceBytes = (count * 32 + 65535) & ~65535u;
+            tf_gpu::DualGeometry pool(*gs, 2ull * (uploadBytes + outputBytes), 2ull * sourceBytes);
+            auto firstMesh = pool.uploadMesh(inputs, count, batches);
+            require(bool(firstMesh), "Cannot upload first resident mesh");
+            std::vector<uint8_t> badConstants(transforms, transforms + batches * 144);
+            badConstants[140] ^= 1;
+            require(!pool.prepare(firstMesh, badConstants.data(), batches) && !pool.stats().dispatches,
+                    "Resident mesh accepted changed chunk boundaries");
+            auto first = pool.prepare(firstMesh, constants, batches);
             require(bool(first), "Cannot dispatch first dual geometry batch");
             std::vector<uint8_t> secondInputs(static_cast<const uint8_t *>(inputs),
                                               static_cast<const uint8_t *>(inputs) + count * 32);
@@ -80,10 +96,14 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe(const void *inputs, uint32_
                     for (unsigned lane = 0; lane < 3; ++lane)
                         secondExpected[(i * 2 + field) * 32 + 8 + lane] ^= 127;
             }
-            auto second = pool.prepare(secondInputs.data(), count, constants, batches);
+            auto secondMesh = pool.uploadMesh(secondInputs.data(), count, batches);
+            require(bool(secondMesh) && pool.stats().meshUploads == 2, "Cannot upload second resident mesh");
+            require(!pool.uploadMesh(inputs, count, batches) && pool.stats().meshUploads == 2,
+                    "Resident source pool exceeded its budget or evicted a retained mesh");
+            auto second = pool.prepare(secondMesh, constants, batches);
             require(bool(second) && pool.stats().allocations == 2 && pool.stats().reuses == 0,
                     "An outstanding dual batch reused a live buffer");
-            require(!pool.prepare(inputs, count, constants, batches) && pool.stats().dispatches == 2,
+            require(!pool.prepare(firstMesh, constants, batches) && pool.stats().dispatches == 2,
                     "Geometry pool exceeded its budget or overwrote a retained batch");
             struct Hook
             {
@@ -113,22 +133,33 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe(const void *inputs, uint32_
                 ++state.replaced;
                 return true;
             });
+            uint64_t expectedOrdinary = 0;
             const auto draw = [&](const tf_gpu::DualGeometry::Batch &batch, const uint8_t *cpu, unsigned index,
                                   unsigned field, unsigned cell) {
-                const unsigned start = word(transforms + index * 144 + 140);
-                const unsigned end = index + 1 == batches ? count : word(transforms + (index + 1) * 144 + 140);
-                require(start < end && end <= count && end - start <= 28, "Invalid diagnostic mesh range");
+                const unsigned firstChunk = index ? groupEnds[index - 1] : 0;
+                const unsigned lastChunk = groupEnds[index];
+                const auto chunkStart = [&](unsigned chunk) {
+                    return chunk == batches ? count : word(transforms + chunk * 144 + 140);
+                };
+                const unsigned start = chunkStart(firstChunk), end = chunkStart(lastChunk);
+                require(start < end && end <= count, "Invalid diagnostic mesh range");
                 const unsigned n = end - start;
                 std::vector<uint16_t> indices;
-                for (unsigned i = 2; i < n; ++i)
-                {
-                    const uint32_t mask = word(transforms + index * 144 + 132 + (i / 16) * 4);
-                    if ((mask << (i % 16)) & 32768)
-                        continue;
-                    indices.push_back(uint16_t(2 * (i - 2) + field));
-                    indices.push_back(uint16_t(2 * (i - 1) + field));
-                    indices.push_back(uint16_t(2 * i + field));
-                }
+                const auto appendChunk = [&](unsigned chunk, unsigned origin, std::vector<uint16_t> &output) {
+                    const unsigned first = chunkStart(chunk), last = chunkStart(chunk + 1);
+                    require(first >= start && first < last && last <= end && last - first <= 28,
+                            "Invalid diagnostic chunk range");
+                    for (unsigned i = 2; i < last - first; ++i)
+                    {
+                        const uint32_t mask = word(transforms + chunk * 144 + 132 + (i / 16) * 4);
+                        if ((mask << (i % 16)) & 32768)
+                            continue;
+                        for (unsigned corner = i - 2; corner <= i; ++corner)
+                            output.push_back(uint16_t(2 * (first - origin + corner) + field));
+                    }
+                };
+                for (unsigned chunk = firstChunk; chunk < lastChunk; ++chunk)
+                    appendChunk(chunk, start, indices);
                 if (indices.empty())
                     return;
                 unsigned minX = 65535, minY = 65535, maxX = 0, maxY = 0;
@@ -165,10 +196,25 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe(const void *inputs, uint32_
                 hook.count = n;
                 gs->RenderHW(config);
                 config.rt = targets.cpu;
-                config.verts = reinterpret_cast<const GSVertex *>(cpu + start * 64);
-                gs->RenderHW(config);
+                // Preserve the individual chunk submissions on the comparison
+                // side. Matching grouped-vs-grouped draws would not check the
+                // aggregation's strip boundaries or primitive order.
+                for (unsigned chunk = firstChunk; chunk < lastChunk; ++chunk)
+                {
+                    const unsigned first = chunkStart(chunk), last = chunkStart(chunk + 1);
+                    std::vector<uint16_t> localIndices;
+                    appendChunk(chunk, first, localIndices);
+                    if (localIndices.empty())
+                        continue;
+                    config.indices = localIndices.data();
+                    config.nindices = static_cast<uint32_t>(localIndices.size());
+                    config.nverts = (last - first) * 2;
+                    config.verts = reinterpret_cast<const GSVertex *>(cpu + first * 64);
+                    gs->RenderHW(config);
+                    ++expectedOrdinary;
+                }
             };
-            for (unsigned index = 0; index < batches; ++index)
+            for (unsigned index = 0; index < groups; ++index)
             {
                 for (unsigned field = 0; field < 2; ++field)
                 {
@@ -181,20 +227,30 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe(const void *inputs, uint32_
             // RenderHW may still roll the renderer's ordinary command lists.
             first = {};
             second = {};
-            require(!pool.prepare(inputs, count, constants, batches) && pool.stats().dispatches == 2,
+            require(!pool.prepare(firstMesh, constants, batches) && pool.stats().dispatches == 2,
                     "Geometry pool reused a released batch before its final fence completed");
             gs->ExecuteCommandList(true);
+            // Reuse immutable geometry with changed transforms. Swapping the
+            // two matrices has an independent reference: swap the two captured
+            // output records. The first page must get both the second mesh's
+            // colors and the new transforms without uploading source data.
+            std::vector<uint8_t> swappedTransforms(transforms, transforms + batches * 144);
+            for (unsigned chunk = 0; chunk < batches; ++chunk)
+                std::swap_ranges(swappedTransforms.begin() + chunk * 144, swappedTransforms.begin() + chunk * 144 + 64,
+                                 swappedTransforms.begin() + chunk * 144 + 64);
+            auto reusedVertices = secondVertices;
             for (unsigned i = 0; i < count; ++i)
-            {
-                secondInputs[i * 32 + 30] ^= 63;
-                for (unsigned field = 0; field < 2; ++field)
-                    secondExpected[(i * 2 + field) * 32 + 10] ^= 63;
-            }
-            auto reused = pool.prepare(secondInputs.data(), count, constants, batches);
+                std::swap(reusedVertices[2 * i], reusedVertices[2 * i + 1]);
+            const auto *reusedExpected = reinterpret_cast<const uint8_t *>(reusedVertices.data());
+            auto reused = pool.prepare(secondMesh, swappedTransforms.data(), batches);
             require(bool(reused) && pool.stats().allocations == 2 && pool.stats().reuses == 1,
                     "Completed dual geometry buffers were not reused");
-            draw(reused, secondExpected, 0, 0, 0);
-            draw(reused, secondExpected, 0, 1, 1);
+            require(pool.stats().meshUploads == 2 && pool.stats().sourceUploadBytes == uint64_t(count) * 64 &&
+                        pool.stats().constantUploadBytes == uint64_t(batches) * 144 * 3,
+                    "Resident mesh preparation uploaded source vertices again");
+            require(!pool.uploadMesh(inputs, count, batches), "Completed retained mesh was evicted");
+            draw(reused, reusedExpected, 0, 0, 0);
+            draw(reused, reusedExpected, 0, 1, 1);
             std::array<std::vector<uint8_t>, 2> images;
             const GSVector4i area(0, 0, width, height);
             for (unsigned i = 0; i < 2; ++i)
@@ -220,21 +276,34 @@ extern "C" TF_HWGS_API int tf_gs_gpu_dual_draw_probe(const void *inputs, uint32_
             stats[5] = differing;
             stats[6] = hook.replaced;
             stats[7] = hook.ordinary;
-            require(hook.replaced == pool.stats().draws && hook.ordinary == hook.replaced,
+            stats[8] = pool.stats().meshUploads;
+            stats[9] = pool.stats().meshBytes;
+            stats[10] = pool.stats().sourceUploadBytes;
+            stats[11] = pool.stats().constantUploadBytes;
+            require(hook.replaced == pool.stats().draws && hook.ordinary == expectedOrdinary,
                     "Native draw handler recursion or ordinary submission mismatch");
-            require(nonzero > batches * 16ull && !differing,
-                    "GPU-resident dual draw image mismatch or empty rendering");
+            require(nonzero > groups * 16ull && !differing, "GPU-resident dual draw image mismatch or empty rendering");
             if (count > 2048)
             {
-                tf_gpu::DualGeometry growing(*gs, uint64_t(uploadBytes) + outputBytes);
+                const uint32_t combinedUploadBytes = (((count * 32 + 255) & ~255u) + batches * 144 + 65535) & ~65535u;
+                tf_gpu::DualGeometry growing(*gs, uint64_t(combinedUploadBytes) + outputBytes, sourceBytes);
+                require(!growing.prepare(firstMesh, constants, batches), "Foreign pool's mesh was accepted");
                 auto tiny = growing.prepare(inputs, 3, constants, 1);
                 require(bool(tiny), "Cannot allocate small growth-test batch");
                 tiny = {};
                 gs->ExecuteCommandList(true);
                 auto large = growing.prepare(inputs, count, constants, batches);
                 require(bool(large) && growing.stats().allocations == 2 &&
-                            growing.stats().bytes == uint64_t(uploadBytes) + outputBytes,
+                            growing.stats().bytes == uint64_t(combinedUploadBytes) + outputBytes,
                         "Completed small allocations stranded the geometry pool budget");
+                auto smallMesh = growing.uploadMesh(inputs, 3, 1);
+                require(bool(smallMesh), "Cannot upload small source growth-test mesh");
+                smallMesh = {};
+                require(!growing.uploadMesh(inputs, count, batches), "Source pool evicted an in-flight mesh");
+                gs->ExecuteCommandList(true);
+                auto largeMesh = growing.uploadMesh(inputs, count, batches);
+                require(bool(largeMesh) && growing.stats().meshUploads == 2 && growing.stats().meshBytes == sourceBytes,
+                        "Completed small source allocation stranded the source pool budget");
             }
             passed = true;
         }

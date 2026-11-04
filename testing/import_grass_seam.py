@@ -50,7 +50,7 @@ def import_list(snapshot):
             itop = immediate
         elif name == "UNPACK":
             opcode = int(command["opcode"], 16)
-            if opcode not in (0x6c, 0x68, 0x62, 0x72, 0x75, 0x65):
+            if opcode not in (0x6c, 0x68, 0x62, 0x72, 0x75, 0x65, 0x6e):
                 raise ValueError(f"Unqualified grass UNPACK format {opcode:02x}")
             if immediate & 0x8000 or command["cycle"] not in (0x0101, 0x0103):
                 raise ValueError("Importer requires absolute destinations and 1/1 or 3/1 cycles")

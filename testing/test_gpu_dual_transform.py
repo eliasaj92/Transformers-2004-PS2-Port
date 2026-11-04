@@ -268,6 +268,15 @@ def draw(directory, dll, report_path):
     if (meta["version"] != 2 or not 3 <= count <= 32768 or not 0 < batch_count <= 1024 or
             len(inputs) != count * 32 or len(batches) != batch_count * 144 or len(expected) != count * 64):
         raise ValueError("Invalid prepared draw layout")
+    groups = meta.get("groups", [{"first_batch": i, "end_batch": i + 1} for i in range(batch_count)])
+    end = 0
+    for group in groups:
+        if group["first_batch"] != end or not end < group["end_batch"] <= batch_count:
+            raise ValueError("Invalid or noncontiguous prepared mesh groups")
+        end = group["end_batch"]
+    if end != batch_count:
+        raise ValueError("Prepared mesh groups do not cover every chunk")
+    group_ends = (c.c_uint32 * len(groups))(*(group["end_batch"] for group in groups))
     os.environ["PS2X_HWGS_API"] = "d3d12"
     os.environ["PS2X_HWGS_DIRECT"] = "0"
     os.chdir(dll.parent)
@@ -277,23 +286,27 @@ def draw(directory, dll, report_path):
         gs.tf_gs_open.restype = c.c_int
         gs.tf_gs_close.argtypes = []
         gs.tf_gs_close.restype = None
-        probe = gs.tf_gs_gpu_dual_draw_probe
-        probe.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32, c.c_void_p,
+        probe = gs.tf_gs_gpu_dual_draw_probe_v2
+        probe.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32, c.POINTER(c.c_uint32), c.c_uint32, c.c_void_p,
                           c.POINTER(c.c_uint64), c.c_void_p, c.c_uint32]
         probe.restype = c.c_int
-        error, stats = c.create_string_buffer(4096), (c.c_uint64 * 8)()
+        error, stats = c.create_string_buffer(4096), (c.c_uint64 * 12)()
         source, constants, reference = (c.create_string_buffer(value) for value in (inputs, batches, expected))
         if not gs.tf_gs_open(1, 0, str(dll.parent / "resources").encode(), error, len(error)):
             raise RuntimeError(error.value.decode(errors="replace"))
         try:
-            passed = bool(probe(source, count, constants, batch_count, reference, stats, error, len(error)))
+            passed = bool(probe(source, count, constants, batch_count, group_ends, len(groups),
+                                reference, stats, error, len(error)))
         finally:
             gs.tf_gs_close()
-    report = {"passed": passed, "batches": batch_count, "source_vertices": count,
+    report = {"passed": passed, "batches": batch_count, "groups": len(groups), "source_vertices": count,
               "allocations": stats[0], "reuses": stats[1], "dispatches": stats[2], "native_draws": stats[3],
               "painted_pixels": stats[4], "differing_pixels": stats[5],
               "handler_replacements": stats[6], "ordinary_draws": stats[7],
+              "mesh_uploads": stats[8], "resident_mesh_bytes": stats[9],
+              "source_upload_bytes": stats[10], "constant_upload_bytes": stats[11],
               "dll_sha256": digest(dll.read_bytes()), "fixture_sha256": meta["sha256"],
+              "prepared_manifest_sha256": digest((directory / "manifest.json").read_bytes()),
               "scope": "GPU-resident captured-mesh draws with diagnostic GS state; not live game integration or FPS"}
     if error.value:
         report["error"] = error.value.decode(errors="replace")

@@ -37,8 +37,10 @@ first successful check produced 512 red, 224 green and 32 blue pixels.
 real unclipped dual-transform mesh inputs against privately captured accelerated
 output. Their readback API is an offline arithmetic diagnostic, not a proposed
 per-frame runtime path. It must not be used to claim live offloading or speed.
-Here a compute batch is one captured continuation's vertex chunk; identifying
-the owning whole engine mesh submission is still required for runtime bypass.
+Here a transform record describes one continuation's vertex chunk; a compute
+dispatch can handle many chunks. Complete list sequences can now be recovered
+from an EE snapshot as described below. Live ownership is still required for
+runtime bypass.
 
 The shader now matches all 37,136 output `GSVertex` records from 776 supported
 captured continuations, using 18,568 source vertices and two transforms per
@@ -178,3 +180,53 @@ levels or identify which calls belong to the dual-transform family. Palettes
 and software/hardware blending remain relevant. Full engine-batch attribution,
 texture/bounds preparation and unresolved VU-state handling are still required
 before enabling live geometry offload.
+
+## Decoded whole meshes, grouped draws and reusable GPU inputs
+
+`testing/qualify_dual_mesh_lists.py` scans the private EE snapshot for the
+observed CALL-list form, then imports single-RET lists with the qualified VIF
+formats. The importer now includes V4-8 input. It checks every imported word
+against accelerated captures, requires each complete list to match consecutive
+VU tickets with unchanged transforms/bias, and rejects ambiguous roots and
+overlapping matches. GPU position, STQ, color, bias and restart masks come from
+the decoded list; only the view transforms still come from the capture.
+
+```powershell
+python -B testing/qualify_dual_mesh_lists.py --snapshot <private-capture>-ee.bin --prepared <private-prepared-directory> --fixtures <private-consecutive-pre-file-list> --output <fresh-private-grouped-directory>
+python -B testing/test_gpu_dual_transform.py run --prepared <private-grouped-directory> --dll <private-gpu-build>/tf_hwgs.dll --report <fresh-private-arithmetic-report.json>
+python -B testing/test_gpu_dual_transform.py draw --prepared <private-grouped-directory> --dll <private-gpu-build>/tf_hwgs.dll --report <fresh-private-draw-report.json>
+```
+
+The captured window yields **740 chunks in 224 complete mesh instances**, with
+17,596 source vertices. All **35,192 GPU output vertices** match the independent
+packed-register decode and captured raw geometry. Grouped drawing preserves
+each chunk's restart boundaries and primitive order. Both field outputs are
+checked against separately submitted CPU-reference chunks in the same fitted
+viewport: **898 grouped GPU draws versus 2,966 individual comparison draws**,
+**840,626 painted pixels and zero differing pixels**, including two outstanding
+color variants and completed-output reuse. This is an untextured diagnostic,
+not permission to reorder live textured draws between fields.
+
+`DualGeometry::uploadMesh` now copies immutable inputs into device-local memory
+once. Its `Mesh` handle can be reused with new transform records; the resident
+`prepare` overload checks chunk offsets without rereading all source vertices.
+The source pool defaults to 64 MiB, independently of the 128 MiB transform/output
+pool. Released meshes can be evicted only after their last compute fence has
+completed. Initial staging uploads are deferred through the copy fence and may
+temporarily add up to another source-pool budget. No upload/dispatch forces a
+GPU wait. Callers own asset identity, invalidation and handle release.
+
+The grouped diagnostic performs two source uploads and three dispatches:
+1,126,144 source bytes total, 319,680 transform bytes total, and **no source
+upload on reuse**. It also checks retained/in-flight source protection, budget
+exhaustion, completed-source eviction, foreign handles and changed chunk-offset
+rejection. Diagnostic export `_v2` prevents accidental calls through the older
+argument layout. Reports bind both payloads and the grouping manifest by hash.
+Reuse also swaps the two view matrices, compared against swapped captured
+output records, to check transform updates on an unchanged resident mesh.
+
+The runtime still needs ordered engine-to-GS metadata and draw-state preparation
+without bulk CPU geometry. The current GS front end derives texture bounds,
+LOD, depth and blend decisions from its CPU vertex trace and also reads vertices
+in special-case paths. Passing only the GPU buffer does not remove that work.
+These changes neither enable live VU bypass nor establish an FPS improvement.

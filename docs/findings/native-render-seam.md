@@ -270,3 +270,29 @@ selection/LOD, target/depth ownership and blend state while supplying bounds
 without requiring bulk CPU geometry. The pool and device handler now support
 that submission once the upstream boundary is identified. No live VU bypass
 or new game performance result is claimed. See [commands and scope](../../deps/hwgs/GPU_GEOMETRY.md).
+
+## Whole-list grouping and source residency
+
+The EE snapshot contains 208 candidate roots in the observed CALL form. After
+qualifying V4-8 UNPACK, 125 lists import with the bounded decoder. Matching every
+written word and requiring complete consecutive sequences identifies 740
+selected chunks as 224 whole mesh instances. Ambiguous physical roots and
+overlapping capture ranges are excluded. This recovers actual list-decoded
+geometry, but the snapshot can contain old buffers, so it does not establish a
+unique live engine caller.
+
+Their 35,192 GPU output vertices match captured geometry exactly. Grouped
+GPU drawing uses 898 submissions where the separate reference chunks use 2,966,
+with identical diagnostic images. The GPU mesh source can now remain in local
+video memory across dispatches; repeated preparation uploads only transforms.
+Source and output pools both preserve in-flight resources without forcing waits.
+The grouping diagnostic also exercises source-budget eviction and invalid-offset
+rejection. See [the detailed results](../../deps/hwgs/GPU_GEOMETRY.md).
+
+All 776 selected packet pairs in the earlier capture set use the same two
+SCISSOR/XYOFFSET prefixes, covering separate y ranges 0..223 and 224..447. This
+supports investigating per-mesh field grouping; it does not prove that live
+texture feedback or interleaved commands permit reordering. The remaining
+integration work is still draw-state preparation, ordered native submission,
+and unresolved VU-state handling. No additional game run or FPS claim follows
+from these offline checks.

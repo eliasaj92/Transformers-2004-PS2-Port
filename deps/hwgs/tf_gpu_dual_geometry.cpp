@@ -120,31 +120,32 @@ struct DualGeometry::Page
     }
 };
 
-DualGeometry::DualGeometry(GSDevice12 &device, uint64_t budget)
-    : m_device(device), m_pipeline(std::make_unique<Pipeline>(device)), m_budget(budget)
+struct DualGeometry::Source
+{
+    GSDevice12 &gs;
+    const DualGeometry *owner;
+    wil::com_ptr_nothrow<ID3D12Resource> buffer;
+    std::vector<uint32_t> firsts;
+    uint32_t vertices = 0, capacity = 0;
+    uint64_t fence = 0;
+    Source(GSDevice12 &device, const DualGeometry *pool) : gs(device), owner(pool)
+    {
+    }
+    ~Source()
+    {
+        if (buffer && fence > gs.GetCompletedFenceValue())
+            gs.DeferObjectDestruction(buffer.get());
+    }
+};
+
+DualGeometry::DualGeometry(GSDevice12 &device, uint64_t budget, uint64_t meshBudget)
+    : m_device(device), m_pipeline(std::make_unique<Pipeline>(device)), m_budget(budget), m_meshBudget(meshBudget)
 {
 }
 DualGeometry::~DualGeometry() = default;
 
-DualGeometry::Batch DualGeometry::prepare(const void *inputs, uint32_t vertices, const void *constants,
-                                          uint32_t batches)
+std::shared_ptr<DualGeometry::Page> DualGeometry::acquirePage(uint32_t uploadBytes, uint32_t outputBytes)
 {
-    if (!inputs || !constants || !vertices || vertices > 1024 * 1024 || !batches || batches > 65536)
-        return {};
-    const auto *source = static_cast<const uint8_t *>(inputs);
-    const auto *transforms = static_cast<const uint8_t *>(constants);
-    for (uint32_t i = 0; i < vertices; ++i)
-    {
-        const uint32_t batch = word(source + i * 32 + 12);
-        if (batch >= batches)
-            return {};
-        const uint32_t first = word(transforms + batch * 144 + 140);
-        if (first > i || i - first >= 28)
-            return {};
-    }
-    const uint32_t constantsOffset = (vertices * 32 + 255) & ~255u;
-    const uint32_t uploadBytes = (constantsOffset + batches * 144 + 65535) & ~65535u;
-    const uint32_t outputBytes = (vertices * 64 + 65535) & ~65535u;
     std::shared_ptr<Page> page;
     for (const auto &candidate : m_pages)
     {
@@ -180,6 +181,29 @@ DualGeometry::Batch DualGeometry::prepare(const void *inputs, uint32_t vertices,
         m_stats.bytes += bytes;
         ++m_stats.allocations;
     }
+    return page;
+}
+
+DualGeometry::Batch DualGeometry::prepare(const void *inputs, uint32_t vertices, const void *constants,
+                                          uint32_t batches)
+{
+    if (!inputs || !constants || !vertices || vertices > 1024 * 1024 || !batches || batches > 65536)
+        return {};
+    const auto *source = static_cast<const uint8_t *>(inputs);
+    const auto *transforms = static_cast<const uint8_t *>(constants);
+    for (uint32_t i = 0; i < vertices; ++i)
+    {
+        const uint32_t batch = word(source + i * 32 + 12);
+        if (batch >= batches)
+            return {};
+        const uint32_t first = word(transforms + batch * 144 + 140);
+        if (first > i || i - first >= 28)
+            return {};
+    }
+    const uint32_t constantsOffset = (vertices * 32 + 255) & ~255u;
+    auto page = acquirePage((constantsOffset + batches * 144 + 65535) & ~65535u, (vertices * 64 + 65535) & ~65535u);
+    if (!page)
+        return {};
     void *mapped = nullptr;
     const D3D12_RANGE empty{0, 0};
     check(page->upload->Map(0, &empty, &mapped), "Cannot map dual geometry source upload");
@@ -187,6 +211,102 @@ DualGeometry::Batch DualGeometry::prepare(const void *inputs, uint32_t vertices,
     std::memcpy(static_cast<uint8_t *>(mapped) + constantsOffset, transforms, size_t(batches) * 144);
     const D3D12_RANGE written{0, constantsOffset + size_t(batches) * 144};
     page->upload->Unmap(0, &written);
+    m_stats.sourceUploadBytes += uint64_t(vertices) * 32;
+    m_stats.constantUploadBytes += uint64_t(batches) * 144;
+    const auto sourceAddress = page->upload->GetGPUVirtualAddress();
+    return dispatch(std::move(page), sourceAddress, vertices, constantsOffset);
+}
+
+DualGeometry::Mesh DualGeometry::uploadMesh(const void *inputs, uint32_t vertices, uint32_t batches)
+{
+    if (!inputs || !vertices || vertices > 1024 * 1024 || !batches || batches > 65536)
+        return {};
+    const auto *data = static_cast<const uint8_t *>(inputs);
+    auto source = std::make_shared<Source>(m_device, this);
+    for (uint32_t i = 0; i < vertices; ++i)
+    {
+        const uint32_t batch = word(data + i * 32 + 12);
+        if (batch == source->firsts.size() && batch < batches)
+            source->firsts.push_back(i);
+        if (source->firsts.empty() || batch != source->firsts.size() - 1 || i - source->firsts.back() >= 28)
+            return {};
+    }
+    if (source->firsts.size() != batches)
+        return {};
+    const uint32_t capacity = (vertices * 32 + 65535) & ~65535u;
+    if (capacity > m_meshBudget)
+        return {};
+    for (auto item = m_sources.begin(); m_stats.meshBytes > m_meshBudget - capacity && item != m_sources.end();)
+    {
+        if (item->use_count() == 1 && (*item)->fence <= m_device.GetCompletedFenceValue())
+        {
+            m_stats.meshBytes -= (*item)->capacity;
+            item = m_sources.erase(item);
+        }
+        else
+            ++item;
+    }
+    if (m_stats.meshBytes > m_meshBudget - capacity)
+        return {};
+    source->buffer = makeBuffer(m_device, capacity, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST,
+                                D3D12_RESOURCE_FLAG_NONE);
+    auto staging = makeBuffer(m_device, capacity, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
+                              D3D12_RESOURCE_FLAG_NONE);
+    void *mapped = nullptr;
+    const D3D12_RANGE empty{0, 0}, written{0, size_t(vertices) * 32};
+    check(staging->Map(0, &empty, &mapped), "Cannot map native mesh staging upload");
+    std::memcpy(mapped, inputs, written.End);
+    staging->Unmap(0, &written);
+    // Finish all potentially throwing host allocations before queuing GPU use.
+    m_sources.push_back(source);
+    m_device.EndRenderPass();
+    auto *command = m_device.GetCommandList().list4.get();
+    command->CopyBufferRegion(source->buffer.get(), 0, staging.get(), 0, written.End);
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = source->buffer.get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    command->ResourceBarrier(1, &barrier);
+    source->vertices = vertices;
+    source->capacity = capacity;
+    source->fence = m_device.GetCurrentFenceValue();
+    m_device.DeferObjectDestruction(staging.get());
+    m_stats.meshBytes += capacity;
+    m_stats.sourceUploadBytes += written.End;
+    ++m_stats.meshUploads;
+    Mesh mesh;
+    mesh.source = std::move(source);
+    return mesh;
+}
+
+DualGeometry::Batch DualGeometry::prepare(const Mesh &mesh, const void *constants, uint32_t batches)
+{
+    if (!mesh.source || mesh.source->owner != this || !constants || batches != mesh.source->firsts.size())
+        return {};
+    const auto *transforms = static_cast<const uint8_t *>(constants);
+    for (uint32_t i = 0; i < batches; ++i)
+        if (word(transforms + i * 144 + 140) != mesh.source->firsts[i])
+            return {};
+    const uint32_t vertices = mesh.source->vertices;
+    auto page = acquirePage((batches * 144 + 65535) & ~65535u, (vertices * 64 + 65535) & ~65535u);
+    if (!page)
+        return {};
+    void *mapped = nullptr;
+    const D3D12_RANGE empty{0, 0}, written{0, size_t(batches) * 144};
+    check(page->upload->Map(0, &empty, &mapped), "Cannot map native mesh transform upload");
+    std::memcpy(mapped, constants, written.End);
+    page->upload->Unmap(0, &written);
+    m_stats.constantUploadBytes += written.End;
+    auto result = dispatch(std::move(page), mesh.source->buffer->GetGPUVirtualAddress(), vertices, 0);
+    mesh.source->fence = m_device.GetCurrentFenceValue();
+    return result;
+}
+
+DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices,
+                                           uint32_t constantsOffset)
+{
     m_device.EndRenderPass();
     auto *command = m_device.GetCommandList().list4.get();
     D3D12_RESOURCE_BARRIER barrier{};
@@ -201,7 +321,7 @@ DualGeometry::Batch DualGeometry::prepare(const void *inputs, uint32_t vertices,
     }
     command->SetComputeRootSignature(m_pipeline->signature.get());
     command->SetPipelineState(m_pipeline->pipeline.get());
-    command->SetComputeRootShaderResourceView(0, page->upload->GetGPUVirtualAddress());
+    command->SetComputeRootShaderResourceView(0, sourceAddress);
     command->SetComputeRootShaderResourceView(1, page->upload->GetGPUVirtualAddress() + constantsOffset);
     command->SetComputeRootUnorderedAccessView(2, page->output->GetGPUVirtualAddress());
     command->SetComputeRoot32BitConstant(3, vertices, 0);
