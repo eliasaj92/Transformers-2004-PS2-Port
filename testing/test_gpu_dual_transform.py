@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import struct
+import subprocess
 
 from inspect_native_seam_capture import gif_packets, read_vu
 
@@ -45,7 +46,7 @@ def prepare(fixtures, manifest, destination):
                 raise ValueError("Program does not match extraction manifest")
             programs[item["name"]] = data
     manager, dual, clip = (programs[name] for name in wanted)
-    inputs, batches, expected = bytearray(), bytearray(), bytearray()
+    inputs, batches, expected, packed = bytearray(), bytearray(), bytearray(), bytearray()
     selected, skipped = [], Counter()
     for line in fixtures.read_text().splitlines():
         pre = private(Path(line))
@@ -83,8 +84,9 @@ def prepare(fixtures, manifest, destination):
             if (low & 32767, low >> 58 & 3, low >> 60, high, low >> 47 & 7) != (count, 0, 3, 0x412, 4):
                 raise ValueError("Unexpected dual-transform triangle strip")
         batch_index = len(batches) // 144
-        constants = state[16:80] + data[context * 16:(context + 4) * 16] + struct.pack("<4I", descriptor[2], 0, 0, 0)
-        if not all(math.isfinite(x) for x in struct.unpack("<36f", constants)):
+        masks = struct.unpack_from("<2I", data, (head[2] + count * 3 + 4) * 16)
+        constants = state[16:80] + data[context * 16:(context + 4) * 16] + struct.pack("<4I", descriptor[2], *masks, len(inputs) // 32)
+        if not all(math.isfinite(x) for x in struct.unpack("<33f", constants[:132])):
             raise ValueError("Non-finite transform constants are not qualified")
         batches.extend(constants)
         for vertex in range(count):
@@ -104,14 +106,15 @@ def prepare(fixtures, manifest, destination):
                 xyz = struct.unpack_from("<4I", packet, output + 32)
                 if reference_color != color:
                     raise ValueError("Unexpected field-dependent vertex color")
-                expected.extend(struct.pack("<8I", stq[0], stq[1], rgba, stq[2],
-                    (xyz[0] & 65535) | ((xyz[1] & 65535) << 16), xyz[2], 0, 0))
+                packed.extend(packet[output:output + 48])
+                expected.extend(struct.pack("<8I", stq[0], stq[1], rgba, stq[2] or 0x00800000,
+                    (xyz[0] & 65535) | ((xyz[1] & 65535) << 16), (xyz[2] >> 4) & 0xffffff, 0, (xyz[3] >> 4) & 255))
         selected.append({"fixture": pre.name, "pre_sha256": digest(pre.read_bytes()),
                          "packet_sha256": digest(packet), "vertices": count})
     if not selected:
         raise ValueError("No supported real dual-transform fixtures found")
-    payloads = {"inputs.bin": inputs, "batches.bin": batches, "expected.bin": expected}
-    meta = {"version": 1, "batches": len(selected), "vertices": len(inputs) // 32,
+    payloads = {"inputs.bin": inputs, "batches.bin": batches, "expected.bin": expected, "packed.bin": packed}
+    meta = {"version": 2, "batches": len(selected), "vertices": len(inputs) // 32,
             "sha256": {name: digest(value) for name, value in payloads.items()},
             "skipped": dict(skipped), "selected": selected}
     destination.mkdir(parents=True)
@@ -121,24 +124,34 @@ def prepare(fixtures, manifest, destination):
     print(f"Prepared {len(selected)} captured chunks / {meta['vertices']} source vertices; private captures only.")
 
 
-def run(directory, dll, report_path):
+def run(directory, dll, report_path, capture_path=None):
     directory, dll, report_path = private(directory), private(dll), private(report_path)
     if report_path.exists():
         raise FileExistsError("Use a fresh private report path")
+    if capture_path is not None:
+        capture_path = private(capture_path)
+        if capture_path.exists():
+            raise FileExistsError("Use a fresh private GPU capture path")
     meta = json.loads((directory / "manifest.json").read_text())
-    inputs, batches, expected = ((directory / name).read_bytes() for name in ("inputs.bin", "batches.bin", "expected.bin"))
-    for name, value in (("inputs.bin", inputs), ("batches.bin", batches), ("expected.bin", expected)):
+    inputs, batches, expected, packed = ((directory / name).read_bytes() for name in ("inputs.bin", "batches.bin", "expected.bin", "packed.bin"))
+    for name, value in (("inputs.bin", inputs), ("batches.bin", batches), ("expected.bin", expected), ("packed.bin", packed)):
         if digest(value) != meta["sha256"][name]:
             raise ValueError("Prepared private fixture hash mismatch")
     count, batch_count = meta["vertices"], meta["batches"]
-    if (meta["version"] != 1 or not 0 < count <= 1024 * 1024 or not 0 < batch_count <= 65536 or
-            len(inputs) != count * 32 or len(batches) != batch_count * 144 or len(expected) != count * 64):
+    if (meta["version"] != 2 or not 0 < count <= 1024 * 1024 or not 0 < batch_count <= 65536 or
+            len(inputs) != count * 32 or len(batches) != batch_count * 144 or len(expected) != count * 64 or len(packed) != count * 96):
         raise ValueError("Invalid prepared geometry layout")
     os.environ["PS2X_HWGS_API"] = "d3d12"
     os.environ["PS2X_HWGS_DIRECT"] = "0"
     os.chdir(dll.parent)
     with os.add_dll_directory(str(dll.parent)):
         gs = c.CDLL(str(dll))
+        decode = gs.tf_gs_decode_dual_vertices_probe
+        decode.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32]
+        decode.restype = c.c_int
+        decoded, packet_input = c.create_string_buffer(len(expected)), c.create_string_buffer(packed)
+        if not decode(packet_input, count * 2, decoded, len(decoded)) or decoded.raw != expected:
+            raise ValueError("Prepared vertex packing differs from native GS register definitions")
         gs.tf_gs_open.argtypes = [c.c_int, c.c_int, c.c_char_p, c.c_void_p, c.c_uint32]
         gs.tf_gs_open.restype = c.c_int
         gs.tf_gs_close.argtypes = []
@@ -146,7 +159,7 @@ def run(directory, dll, report_path):
         probe = gs.tf_gs_gpu_dual_transform_probe
         probe.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint32]
         probe.restype = c.c_int
-        error, output = c.create_string_buffer(4096), c.create_string_buffer(len(expected))
+        error, output = c.create_string_buffer(4096), c.create_string_buffer(count * 128)
         source, constants = c.create_string_buffer(inputs), c.create_string_buffer(batches)
         if not gs.tf_gs_open(1, 0, str(dll.parent / "resources").encode(), error, len(error)):
             raise RuntimeError(error.value.decode(errors="replace"))
@@ -155,7 +168,9 @@ def run(directory, dll, report_path):
                 raise RuntimeError(error.value.decode(errors="replace"))
         finally:
             gs.tf_gs_close()
-    actual = output.raw
+    actual, raw = output.raw[:len(expected)], output.raw[len(expected):]
+    raw_expected = b"".join(packed[i:i + 12] + bytes(4) + packed[i + 32:i + 48]
+                            for i in range(0, len(packed), 48))
     mismatches, max_delta = Counter(), Counter()
     for i in range(0, len(expected), 4):
         a, b = struct.unpack_from("<I", actual, i)[0], struct.unpack_from("<I", expected, i)[0]
@@ -167,13 +182,76 @@ def run(directory, dll, report_path):
                 max_delta["y_fixed4"] = max(max_delta["y_fixed4"], abs((a >> 16) - (b >> 16)))
             else:
                 max_delta[str(word)] = max(max_delta[str(word)], abs(a - b))
-    report = {"exact": actual == expected, "batches": batch_count, "source_vertices": count,
+    report = {"exact": actual == expected and raw == raw_expected, "batches": batch_count, "source_vertices": count,
+              "raw_geometry_exact": raw == raw_expected,
+              "native_register_decode_exact": decoded.raw == expected,
               "output_vertices": count * 2, "mismatched_words": dict(mismatches), "max_delta": dict(max_delta),
               "dll_sha256": digest(dll.read_bytes()), "fixture_sha256": meta["sha256"],
               "scope": "Offline GPU arithmetic only; no live VU bypass or performance claim"}
+    if capture_path is not None and report["exact"]:
+        # Private diagnostic only: bind this result to its actual uploaded input.
+        header = struct.pack("<4I32s", 0x44554750, 1, count * 2, 32,
+                             hashlib.sha256(inputs + batches).digest())
+        capture = header + raw
+        with capture_path.open("xb") as stream:
+            stream.write(capture)
+        report["gpu_capture_sha256"] = digest(capture)
     report_path.write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
     return 0 if report["exact"] else 1
+
+
+def replay(directory, capture_path, gpu_report_path, fixtures, runner, report_path):
+    """Skip selected VU calls, then replay their successors with carried state."""
+    directory, capture_path, gpu_report_path, fixtures, runner, report_path = (
+        private(path) for path in (directory, capture_path, gpu_report_path, fixtures, runner, report_path))
+    selection_path = report_path.with_suffix(".selected.txt")
+    proof_path = report_path.with_suffix(".json")
+    if any(path.exists() for path in (report_path, selection_path, proof_path)):
+        raise FileExistsError("Use a fresh private replay report path")
+    meta = json.loads((directory / "manifest.json").read_text())
+    gpu_report = json.loads(gpu_report_path.read_text())
+    if (meta["version"] != 2 or not gpu_report.get("exact") or not gpu_report.get("raw_geometry_exact") or
+            not gpu_report.get("native_register_decode_exact") or gpu_report["fixture_sha256"] != meta["sha256"]):
+        raise ValueError("GPU report does not qualify these prepared fixtures")
+    for name in ("inputs.bin", "batches.bin", "expected.bin", "packed.bin"):
+        if digest((directory / name).read_bytes()) != meta["sha256"][name]:
+            raise ValueError("Prepared private fixture hash mismatch")
+    inputs, batches, capture = ((directory / "inputs.bin").read_bytes(),
+                                (directory / "batches.bin").read_bytes(), capture_path.read_bytes())
+    header = struct.pack("<4I32s", 0x44554750, 1, meta["vertices"] * 2, 32,
+                         hashlib.sha256(inputs + batches).digest())
+    if (capture[:48] != header or len(capture) != 48 + meta["vertices"] * 64 or
+            digest(capture) != gpu_report.get("gpu_capture_sha256")):
+        raise ValueError("GPU capture is not bound to these uploaded inputs")
+    available = {}
+    for line in fixtures.read_text().splitlines():
+        if not line.strip():
+            continue
+        path = private(Path(line))
+        if path.name in available:
+            raise ValueError("Replay fixture names must be unique")
+        available[path.name] = path
+    selected = []
+    for item in meta["selected"]:
+        path = available[item["fixture"]]
+        if digest(path.read_bytes()) != item["pre_sha256"]:
+            raise ValueError("Replay source changed since the GPU upload was prepared")
+        packets = gif_packets(Path(str(path)[:-7] + "gif.bin"))
+        if len(packets) != 1 or digest(packets[0][1]) != item["packet_sha256"]:
+            raise ValueError("Replay reference packet changed")
+        selected.append(str(path))
+    with selection_path.open("x") as stream:
+        stream.write("\n".join(selected) + "\n")
+    result = subprocess.run([str(runner), str(fixtures), str(report_path), "--gpu-dual",
+                             str(selection_path), str(directory / "inputs.bin"),
+                             str(directory / "batches.bin"), str(capture_path)], check=False)
+    proof = {"exit_code": result.returncode, "selected_calls": len(selected), "fixtures": len(available),
+             "runner_sha256": digest(runner.read_bytes()), "gpu_capture_sha256": digest(capture),
+             "prepared_manifest_sha256": digest((directory / "manifest.json").read_bytes()),
+             "scope": "Offline GPU bypass with carried state; captured window only, not live offload or FPS"}
+    proof_path.write_text(json.dumps(proof, indent=2))
+    return result.returncode
 
 
 if __name__ == "__main__":
@@ -187,8 +265,19 @@ if __name__ == "__main__":
     compare.add_argument("--prepared", type=Path, required=True)
     compare.add_argument("--dll", type=Path, required=True)
     compare.add_argument("--report", type=Path, required=True)
+    compare.add_argument("--gpu-capture", type=Path)
+    bypass = commands.add_parser("replay")
+    bypass.add_argument("--prepared", type=Path, required=True)
+    bypass.add_argument("--gpu-capture", type=Path, required=True)
+    bypass.add_argument("--gpu-report", type=Path, required=True)
+    bypass.add_argument("--fixtures", type=Path, required=True)
+    bypass.add_argument("--runner", type=Path, required=True)
+    bypass.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.fixtures, args.program_manifest, args.output)
+    elif args.command == "run":
+        raise SystemExit(run(args.prepared, args.dll, args.report, args.gpu_capture))
     else:
-        raise SystemExit(run(args.prepared, args.dll, args.report))
+        raise SystemExit(replay(args.prepared, args.gpu_capture, args.gpu_report,
+                               args.fixtures, args.runner, args.report))

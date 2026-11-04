@@ -38,11 +38,14 @@ foreach(INDEX RANGE ${LAST_FILE})
     endif()
 endforeach()
 include("${PACKAGE_DIR}/sources.cmake")
-add_executable(tf_vu1_replay replay.cpp ${PS2X_VU1_STATIC_SOURCES})
+set(DUAL_STATE "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native/tf_dual_state.cpp")
+add_executable(tf_vu1_replay replay.cpp "${DUAL_STATE}" ${PS2X_VU1_STATIC_SOURCES})
+set_source_files_properties("${DUAL_STATE}" PROPERTIES COMPILE_OPTIONS "/fp:strict")
 target_compile_features(tf_vu1_replay PRIVATE cxx_std_20)
 target_compile_definitions(tf_vu1_replay PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN NDEBUG)
 target_compile_options(tf_vu1_replay PRIVATE /O2 /Ob2 /fp:precise /arch:AVX2)
 target_include_directories(tf_vu1_replay PRIVATE
+    "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native"
     "${REPO_ROOT}/tools/vu1/toolchain/shim"
     "${PACKAGE_DIR}/native/include"
     "${PACKAGE_DIR}/native/src/lib/vu")

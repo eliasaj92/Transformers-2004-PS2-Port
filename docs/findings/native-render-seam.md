@@ -199,14 +199,46 @@ is zero and the manager input layout is the supported three-qword format.
 Of 916 captured continuations with that program chain, 776 qualify; clipped
 and alternate-layout inputs remain outside the implementation. They contain
 18,568 source vertices, each transformed twice. All 37,136 resulting 32-byte
-`GSVertex` records match captured accelerated output exactly on the RTX 3080
+`GSVertex` records now match captured accelerated output exactly on the RTX 3080
 Laptop GPU. Ordinary shader arithmetic initially changed 850 packed XY words
 by at most one GS subpixel, plus STQ and depth values; explicit toward-zero
 arithmetic removed every mismatch in this set.
 
-This is a GPU arithmetic and output-format gate. The comparison packs captured
-GIF attributes into `GSVertex`; it does not compare surrounding GS state,
-strip restart indices, VU scratch/register results or cycles. The test uses a
-diagnostic GPU readback; production drawing must retain the output buffer on
-the GPU through submission and completion. No live offload or performance
-improvement is claimed from this offline result.
+The first test packed depth incorrectly by retaining the VU fixed-four-bit Z
+and omitted fog. The corrected version implements PACKED XYZF2 decoding and
+checks its expected format with the renderer's native register declarations.
+All records still match, including raw transformed STQ/XYZ and restart words.
+Unused UV is canonicalized because this path uses STQ.
+
+## Dual-transform state preservation and bypass
+
+Dependency experiments across the same 5,000-call enhanced capture found two
+required tail registers: later clipped draws consume VF17/VF18. They also found
+observable color copies and ST.w padding. Omitting only transformed STQ.xyz
+and XYZ.xyz, plus registers other than VF17/VF18, preserved every packet and
+checked later memory write across the window. This is a bounded dependency
+observation, not proof that the omitted state is globally dead.
+
+The new `tf_dual_state.cpp` preservation model reproduces packet headers,
+colors, padding, restart words, VF17/VF18 and guest cycles for all 776 selected
+calls. It computes at most one retained vertex on the CPU; the bulk geometry
+stays unresolved. Counts 17 and 18 have distinct register tails, which the
+model handles explicitly. The game runtime does not yet invoke this model.
+
+The offline replay now **skips the 776 selected accelerated VU calls**, supplies
+their actual GPU-transformed geometry to diagnostic output packets, and carries
+the unresolved guest state forward. Before each replacement it requires the
+carried inputs/constants to equal those uploaded to the GPU. The remaining
+calls execute through the static VU package. All **5,000 calls passed**, with
+**11,998,416 identical framed packet bytes**, matching checked later memory
+writes and control/cycles, zero interpreter fallback and zero pending transfer.
+Full register state differs on 1,240 calls; it is intentionally not reported
+as an exact-state replay. Snapshot comparison also cannot identify equal-value
+external writes. An uncovered live reader needs state materialization or a
+proved engine ownership boundary before this can become a runtime bypass.
+
+See [the GPU build instructions](../../deps/hwgs/GPU_GEOMETRY.md) for the hashed
+private GPU capture and replay workflow. The diagnostic reads back GPU results
+for comparison; production drawing must keep them on the GPU. GS state,
+textures, bounds, actual strip indices, ordered submission and buffer lifetime
+remain integration work. No live offload or FPS gain is claimed from this replay.

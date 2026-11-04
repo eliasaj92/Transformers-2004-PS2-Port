@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Unclipped DualTransform mesh batches. No VU bytecode or captured game data.
 // Inputs: position.xyz/batch index, raw STQ/packed RGBA (32 bytes per vertex).
-// Batch: two column-major matrices, STQ bias/padding (144 bytes).
+// Batch: two column-major matrices, STQ bias, two restart masks and the first
+// source vertex index (144 bytes). Output uses PACKED XYZF2 depth/fog semantics.
 ByteAddressBuffer inputs : register(t0);
 ByteAddressBuffer batches : register(t1);
 RWByteAddressBuffer vertices : register(u0);
@@ -103,6 +104,9 @@ void main(uint3 id : SV_DispatchThreadID)
     const uint4 attributes = inputs.Load4(id.x * 32 + 16);
     const uint batch = positionWords.w * 144;
     const float bias = asfloat(batches.Load(batch + 128));
+    const uint vertex = id.x - batches.Load(batch + 140);
+    const uint mask = batches.Load(batch + 132 + (vertex / 16) * 4);
+    const uint flags = (mask << (vertex % 16)) & 65535;
     const float3 raw = asfloat(attributes.xyz);
     const float3 stq = float3(add_rtz(raw.x, -bias), add_rtz(raw.y, -bias), add_rtz(raw.z, -bias));
     [unroll] for (uint field = 0; field < 2; ++field)
@@ -113,7 +117,17 @@ void main(uint3 id : SV_DispatchThreadID)
         const float3 uvq = float3(mul_rtz(stq.x, q), mul_rtz(stq.y, q), mul_rtz(stq.z, q));
         const int3 xyz = int3(screen * 16.0f);
         const uint address = (id.x * 2 + field) * 32;
-        vertices.Store4(address, uint4(asuint(uvq.xy), attributes.w, asuint(uvq.z)));
-        vertices.Store4(address + 16, uint4((uint(xyz.x) & 65535) | (uint(xyz.y) << 16), uint(xyz.z), 0, 0));
+        const uint qword = asuint(uvq.z) == 0 ? 0x00800000u : asuint(uvq.z);
+        vertices.Store4(address, uint4(asuint(uvq.xy), attributes.w, qword));
+        vertices.Store4(address + 16, uint4((uint(xyz.x) & 65535) | (uint(xyz.y) << 16),
+            (uint(xyz.z) >> 4) & 0x00ffffffu, 0, (flags >> 4) & 255));
+#ifdef TF_GPU_DUAL_CAPTURE
+        // Offline replay also needs the original packed GIF values. The native
+        // vertex view uses only the first region; production omits this block.
+        const uint rawAddress = count * 64 + address;
+        const uint signedFlags = (flags & 32768) != 0 ? flags | 0xffff0000u : flags;
+        vertices.Store4(rawAddress, uint4(asuint(uvq), 0));
+        vertices.Store4(rawAddress + 16, uint4(uint3(xyz), signedFlags));
+#endif
     }
 }

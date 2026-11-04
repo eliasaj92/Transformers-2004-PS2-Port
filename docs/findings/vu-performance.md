@@ -88,3 +88,11 @@ including one physics sample at every field 2697..4977: 48.323659 seconds for
 the run. This single desktop result is not a paired speedup claim, a distinct
 rendered-frame count, or 60 fps. The private prototype has not replaced the
 normal launcher. Subsequent performance work focuses on GPU geometry batches.
+
+The next GPU step replaced 776 selected dual-transform VU calls in a 5,000-call
+offline enhanced replay. Real GPU output plus a small CPU preservation model
+retained all 11,998,416 packet bytes and checked later memory/control effects.
+This establishes a captured-window bypass, not a game FPS result: GPU dispatch
+was performed separately, unresolved registers remain, and the live renderer
+does not yet submit these batches. Details and limitations are recorded in
+[the native-render investigation](native-render-seam.md#dual-transform-state-preservation-and-bypass).
