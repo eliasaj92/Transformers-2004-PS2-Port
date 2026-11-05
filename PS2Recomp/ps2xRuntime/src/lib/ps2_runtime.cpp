@@ -51,6 +51,8 @@ extern "C" void iopIdleStatsAdvance(unsigned long long) noexcept;
 #include <array>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <new>
 #include <chrono>
 #include <atomic>
 #include <thread>
@@ -1679,20 +1681,79 @@ void tfFullSimulationRate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
     WRITE8(0x006CF654u,0);
     ctx->pc=GPR_U32(ctx,31);
 }
+struct TfTimingTrace
+{
+    struct Record {
+        uint64_t hostUs, vs, pads;
+        const char* function; // Only the static "physics" and "slot" labels.
+        uint32_t slot;
+        float delta;
+        uint32_t caller;
+    };
+    static constexpr size_t Capacity = 262144;
+    FILE* file = nullptr;
+    std::unique_ptr<Record[]> records;
+    size_t count = 0;
+    uint64_t dropped = 0;
+
+    TfTimingTrace()
+    {
+        const char* path = std::getenv("PS2X_TF_TIMING_TRACE");
+        if (!path || !*path)
+            return;
+        // Allocate and touch the bounded buffer before installing the hooks.
+        // No allocation, formatting or file writes occur while recording.
+        records.reset(new (std::nothrow) Record[Capacity]{});
+        if (!records || !(file = std::fopen(path, "wb")))
+        {
+            records.reset();
+            std::fprintf(stderr, "[timing-trace] initialization failed\n");
+        }
+    }
+
+    void finish()
+    {
+        if (!file)
+            return;
+        // The EE producer has stopped before normal process shutdown.
+        bool failed = std::fprintf(file, "host_us,function,vs,pads,slot,delta,caller\n") < 0;
+        for (size_t i = 0; i < count && !failed; ++i)
+        {
+            const Record& row = records[i];
+            failed = std::fprintf(file, "%llu,%s,%llu,%llu,%u,%.9g,%08x\n",
+                static_cast<unsigned long long>(row.hostUs), row.function,
+                static_cast<unsigned long long>(row.vs), static_cast<unsigned long long>(row.pads),
+                row.slot, static_cast<double>(row.delta), row.caller) < 0;
+        }
+        failed |= std::fclose(file) != 0;
+        file = nullptr;
+        std::fprintf(stderr, "[timing-trace] rows=%zu dropped=%llu write_error=%u\n",
+            count, static_cast<unsigned long long>(dropped), unsigned(failed));
+    }
+
+    ~TfTimingTrace() { finish(); }
+};
+
+static TfTimingTrace& tfTimingTrace()
+{
+    static TfTimingTrace trace;
+    return trace;
+}
+
 static void tfTimingRecord(const char* function, uint32_t slot, R5900Context* ctx, PS2Runtime* runtime)
 {
-    struct Trace {
-        FILE* file=nullptr;
-        Trace(){const char* p=std::getenv("PS2X_TF_TIMING_TRACE");if(p&&*p)file=std::fopen(p,"wb");
-            if(file)std::fprintf(file,"host_us,function,vs,pads,slot,delta,caller\n");}
-        ~Trace(){if(file)std::fclose(file);}
-    };
-    static Trace trace;
-    if(trace.file) {
-        const auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        std::fprintf(trace.file,"%lld,%s,%llu,%llu,%u,%.9g,%08x\n",static_cast<long long>(us),function,
-            static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()),static_cast<unsigned long long>(ps2dbg::padReads.load()),slot,ctx->f[12],GPR_U32(ctx,31));
+    TfTimingTrace& trace = tfTimingTrace();
+    if (!trace.file)
+        return;
+    if (trace.count == TfTimingTrace::Capacity)
+    {
+        ++trace.dropped;
+        return;
     }
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    trace.records[trace.count++] = {static_cast<uint64_t>(us), runtime->eeScheduler().currentVSyncTick(),
+        ps2dbg::padReads.load(), function, slot, ctx->f[12], GPR_U32(ctx, 31)};
 }
 void tfPhysicsTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
@@ -3450,6 +3511,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         std::cerr << "[transformers] native simulation half-rate disabled" << std::endl;
     }
     if(elfCrc32Valid && elfCrc32==0x74c982c0u && std::getenv("PS2X_TF_TIMING_TRACE") && hasFunction(0x00230100u) && hasFunction(0x00203010u)) {
+        tfTimingTrace();
         g_tfPhysicsOrig=lookupFunction(0x00230100u);replaceFunction(0x00230100u,&tfPhysicsTrace);
         g_tfTimeSlotOrig=lookupFunction(0x00203010u);replaceFunction(0x00203010u,&tfTimeSlotTrace);
     }
@@ -6049,6 +6111,9 @@ void PS2Runtime::run()
     {
         gameThread.join();
     }
+    // Flush only after the EE producer stops. The runner uses _Exit, so a
+    // static destructor alone would lose the buffered diagnostic records.
+    tfTimingTrace().finish();
     if (ps2HwgsDirectEnabled() || ps2x::settings::get("renderer.backend") == "hwgs")
     {
         ps2HwgsDirectShutdown();

@@ -120,9 +120,12 @@ namespace
 
     // PS2X_EE_IDLESKIP=0 disables the WaitVSync busy-wait fast-forward (see EeScheduler::checkpointDue).
     const bool g_eeIdleSkip = eetrimEnvFlag("PS2X_EE_IDLESKIP", true);
-    // TEMP(transformers): PS2X_EETRIM_STATS=1 prints an "[eetrim]" line after every "[perf]" line: host ms spent in
+    // TEMP(transformers): PS2X_EETRIM_STATS=1 prints an "[eetrim]" line every 1M checkpoints: host ms spent in
     // the WaitVSync spin, spin checkpoint calls, fast-forwarded iterations, dispatcher loops.
     const bool g_eetrimStats = eetrimEnvFlag("PS2X_EETRIM_STATS", false);
+    // Synchronous console writes can stall the game thread. Keep the recurring
+    // checkpoint report diagnostic-only; checkpoint accounting is unchanged.
+    const bool g_perfProbeLog = eetrimEnvFlag("PS2X_EE_PERF_LOG", false);
     const bool g_vu1IdleSkipPending = eetrimEnvFlag("PS2X_VU1_IDLESKIP_PENDING", false); // TEMP(transformers) qualification
     const uint32_t g_vu1CkptDrainMin = []{const char *p=std::getenv("PS2X_VU1_CKPT_DRAIN_MIN");const long v=p?std::strtol(p,nullptr,10):1;return static_cast<uint32_t>(v<1?1:v);}(); // TEMP(transformers) qualification
     const bool g_idleSpinDetect = g_eeIdleSkip || g_eetrimStats;
@@ -729,8 +732,11 @@ namespace
     {
         const auto now = std::chrono::steady_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(now - g_perfT0).count();
-        std::cerr << "[perf] 1M checkpoints in " << ms << " ms, yields=" << (yields - g_perfLastYields)
-                  << " eeCycle=" << eeCycle << " vsync=" << vsync << std::endl;
+        if (g_perfProbeLog)
+        {
+            std::cerr << "[perf] 1M checkpoints in " << ms << " ms, yields=" << (yields - g_perfLastYields)
+                      << " eeCycle=" << eeCycle << " vsync=" << vsync << std::endl;
+        }
         g_perfT0 = now;
         g_perfLastYields = yields;
         if (g_eetrimStats)
@@ -815,7 +821,7 @@ bool EeScheduler::checkpointDueFull(uint32_t cycles)
         }
     }
 
-    if (((++g_perfCheckpointCalls) & 0xFFFFFu) == 0u)
+    if (((++g_perfCheckpointCalls) & 0xFFFFFu) == 0u && (g_perfProbeLog || g_eetrimStats))
     {
         perfProbeLine(m_checkpointYields, m_eeCycle, currentVSyncTick());
     }

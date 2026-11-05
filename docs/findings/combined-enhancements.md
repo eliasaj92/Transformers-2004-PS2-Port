@@ -1,8 +1,14 @@
 # Combined enhanced play preset
 
+The current private launcher selects `game-65`, which adds optional checkpoint
+logging and buffered timing capture to the combined preview below. Its single
+windowed run reduced frequent spikes but retained a worse isolated simulation
+outlier; see [the logging-fix comparison](spike-attribution.md#one-windowed-run-after-the-fix).
+Saves and video/trainer settings remain unchanged.
+
 The private play launcher was still selecting `game-24`, while newer PGO,
 GPU geometry and frame-ready presentation builds were used only by the test
-drivers. The user's launcher now selects the combined `game-63` preview through
+drivers. The initial integration selected the combined `game-63` preview through
 `launch/play.ps1 -Enhanced`. Saves, trainer settings, input preferences and
 objective guidance retain their existing locations and values. The old private
 launcher and settings were backed up before changing the selection.
