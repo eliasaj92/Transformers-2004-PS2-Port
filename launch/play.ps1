@@ -2,11 +2,29 @@ param(
     [Parameter(Mandatory=$true)][string]$GameFolder,
     [ValidateSet('normal','trainer')][string]$Profile,
     [ValidateSet('pgs','hwgs','cpu')][string]$Backend,
-    [ValidateSet('direct','readback')][string]$Presentation
+    [ValidateSet('direct','readback')][string]$Presentation,
+    [switch]$Enhanced
 )
 $ErrorActionPreference='Stop'
 $folder=(Resolve-Path $GameFolder).Path
 $disc=Get-Content (Join-Path $folder 'disc.json') -Raw | ConvertFrom-Json
+if ($Enhanced) {
+    if (($Backend -and $Backend -ne 'hwgs') -or ($Presentation -and $Presentation -ne 'direct')) {
+        throw 'The combined enhanced preset requires hardware GS with direct presentation'
+    }
+    $build=Get-Content -LiteralPath (Join-Path $folder 'local-build.json') -Raw | ConvertFrom-Json
+    if (-not $disc.static_vu1 -or -not $build.gpu_geometry_runtime_bypass_available -or
+        -not $build.gpu_grass_runtime_bypass_available -or -not $build.gpu_reflection_runtime_bypass_available -or
+        -not $build.frame_ready_wait) {
+        throw 'This private build does not contain the combined enhanced runtime and presenter'
+    }
+    foreach ($item in @(@('ps2EntryRunner.exe',$build.exe_sha256), @('tf_hwgs.dll',$build.dll_sha256))) {
+        if ((Get-FileHash -LiteralPath (Join-Path $folder $item[0]) -Algorithm SHA256).Hash -ne $item[1]) {
+            throw "Enhanced build provenance does not match $($item[0])"
+        }
+    }
+    $Backend='hwgs'; $Presentation='direct'
+}
 foreach($line in Get-Content "$PSScriptRoot/play_env.txt") {
     if ($line -match '^([A-Z0-9_]+)=(.*)$') {
         # These options belong to the persisted menu; CLI/environment overrides still win.
@@ -14,6 +32,21 @@ foreach($line in Get-Content "$PSScriptRoot/play_env.txt") {
             [Environment]::SetEnvironmentVariable($Matches[1],$Matches[2],'Process')
         }
     }
+}
+if ($Enhanced) {
+    foreach ($line in Get-Content -LiteralPath "$PSScriptRoot/enhanced_env.txt") {
+        if ($line -match '^([A-Z0-9_]+)=(.*)$') {
+            [Environment]::SetEnvironmentVariable($Matches[1],$Matches[2],'Process')
+        }
+    }
+    # Play never inherits an earlier diagnostic capture/profiling session.
+    foreach ($key in @('PS2X_TF_FRAME_PROFILE','PS2X_TF_SCENE_CAPTURE','PS2X_TF_SCENE_RANGE',
+                      'PS2X_PRESENT_TRACE','PS2X_FIELD60_LOG','PS2X_TF_TIMING_TRACE',
+                      'PS2X_TF_PRESENT_TRACE','PS2X_TF_GPU_DRAW_TRACE','PS2X_PCMENU_AUTOTEST',
+                      'PS2X_RESOPT2_HOST_SEQUENCE')) {
+        [Environment]::SetEnvironmentVariable($key,$null,'Process')
+    }
+    [Diagnostics.Process]::GetCurrentProcess().PriorityClass='Normal'
 }
 $env:PS2X_CD_IMAGE=$disc.iso
 if ($Presentation) {
