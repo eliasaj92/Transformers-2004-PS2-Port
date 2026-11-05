@@ -151,13 +151,16 @@ struct Live
                      "grouped_dispatches=%llu grouped_packets=%llu grouped_draws=%llu group_declined=%llu "
                      "merged_groups=%llu merged_packets=%llu merged_draws=%llu merge_declined=%llu "
                      "merge_state_declined=%llu merge_feedback_declined=%llu merge_bounds_declined=%llu "
-                     "bounds_queries=%llu bounds_cache_hits=%llu bounds_cache_rejected_hits=%llu largest_merge=%llu\n",
+                     "bounds_queries=%llu bounds_cache_hits=%llu bounds_cache_rejected_hits=%llu largest_merge=%llu "
+                     "native_batches=%llu prepared_packets=%llu prepared_reuses=%llu prepared_rejects=%llu "
+                     "batch_fallback_packets=%llu largest_compute_group=%llu\n",
                      grass.packets, grass.gpuDraws, grass.materializations, grass.declinedFields, grass.boundsDeclined,
                      grass.outputDeclined, s.grassDispatches, s.grassBatches, grass.groupedDispatches,
                      grass.groupedPackets, grass.groupedDraws, grass.groupDeclined, grass.mergedGroups,
                      grass.mergedPackets, grass.mergedDraws, grass.mergeDeclined, grass.mergeStateDeclined,
                      grass.mergeFeedbackDeclined, grass.mergeBoundsDeclined, grass.boundsQueries, grass.boundsCacheHits,
-                     grass.boundsCacheRejectedHits, grass.largestMerge);
+                     grass.boundsCacheRejectedHits, grass.largestMerge, grass.nativeBatches, grass.preparedPackets,
+                     grass.preparedReuses, grass.preparedRejects, grass.batchFallbackPackets, grass.largestComputeGroup);
     }
 };
 // Accessed/destroyed only on the owning GS thread, before device shutdown.
@@ -471,13 +474,17 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
 void executeGrassWide(const kzgs::PacketView *views, uint32_t count)
 {
     static_assert(tf_gpu::MaxMergedGrassPackets <= kzgs::MaxPacketGroup);
+    static const bool nativeBatches = [] {
+        const char *value = std::getenv("PS2X_TF_GPU_GRASS_BATCHES");
+        return value && !std::strcmp(value, "1");
+    }();
     if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12)
     {
         for (unsigned i = 0; i < count; ++i)
             execute(views[i].data, views[i].bytes);
         return;
     }
-    if (count <= 8)
+    if (count <= 8 && !nativeBatches)
     {
         executeGroup(views, count);
         return;
@@ -497,6 +504,13 @@ void executeGrassWide(const kzgs::PacketView *views, uint32_t count)
         valid = payload.path == 1 && payload.bytes == views[i].bytes - sizeof(Payload) &&
                 payload.geometry.kind == gsnative::GeometryKind::GrassSprites;
         packets[i] = {&payload.geometry, views[i].data + sizeof(Payload), payload.bytes};
+    }
+    if (valid && nativeBatches && tf_gpu::drawGrassBatch(live->pool, packets.data(), count, live->grass))
+        return;
+    if (nativeBatches && count <= 8)
+    {
+        executeGroup(views, count);
+        return;
     }
     if (valid && tf_gpu::drawGrassGroup(live->pool, packets.data(), count, live->grass))
         return;

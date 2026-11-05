@@ -15,6 +15,8 @@ struct GrassLiveStats
     uint64_t mergeStateDeclined = 0, mergeFeedbackDeclined = 0, mergeBoundsDeclined = 0;
     uint64_t boundsQueries = 0, boundsCacheHits = 0, boundsCacheRejectedHits = 0;
     uint64_t largestMerge = 0;
+    uint64_t nativeBatches = 0, preparedPackets = 0, preparedReuses = 0, preparedRejects = 0;
+    uint64_t batchFallbackPackets = 0, largestComputeGroup = 0;
 };
 struct GrassPacketView
 {
@@ -31,6 +33,9 @@ struct PreparedGrass
     std::array<DualDrawBounds, 2> bounds{};
     DualGeometry::Batch batch;
     uint32_t firstSource = 0;
+    // Valid only for the immutable owned packet and the current GS callback.
+    // Remember rejected bounds too, so fallback does not repeat preparation.
+    bool framingValid = false, boundsValid = false;
 };
 bool grassPacketFraming(const gsnative::DualPacket &geometry, const uint8_t *packet, uint32_t bytes);
 // Prepare 2..8 consecutive grass packets without consuming GS state. Initial
@@ -42,6 +47,11 @@ bool prepareGrassGroup(DualGeometry &pool, const GrassPacketView *views, uint32_
 // the same nonaliasing targets, and no sampled texture/CLUT overlaps either
 // target. False consumes no state; true owns the entire group and its fallbacks.
 bool drawGrassGroup(DualGeometry &pool, const GrassPacketView *views, uint32_t count, GrassLiveStats &stats,
+                    bool forceFallback = false, const PreparedGrass *prepared = nullptr);
+// Prepare once, merge consecutive compatible runs, and share compute output
+// across separate draws when a merge is unsafe. False consumes no GS state.
+// True owns every packet, including ordinary fallback, in original order.
+bool drawGrassBatch(DualGeometry &pool, const GrassPacketView *views, uint32_t count, GrassLiveStats &stats,
                     bool forceFallback = false);
 // Diagnostic only: verify conservative ranges against the GS swizzle page
 // enumerator, including indexed/depth formats, unaligned bases and VRAM wrap.

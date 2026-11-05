@@ -117,7 +117,7 @@ void materialize(void *context, GSVertex *vertices, uint32_t count)
 void packetScene(const void *inputs, const void *packets, unsigned count, unsigned side, unsigned mode, GIFRegPRIM prim,
                  GIFRegXYOFFSET xy, GIFRegSCISSOR scissor, tf_gpu::DualGeometry &pool,
                  tf_gpu::GrassLiveStats &packetStats, std::vector<GSVertex> &latches, std::vector<bool> &latchEnds,
-                 uint64_t *stats, bool merge)
+                 uint64_t *stats, bool merge, bool batches)
 {
     auto *renderer = GSRendererHW::GetInstance();
     const char *option = std::getenv("PS2X_TF_GPU_GROUPS");
@@ -139,6 +139,25 @@ void packetScene(const void *inputs, const void *packets, unsigned count, unsign
             auto fieldScissor = scissor;
             fieldScissor.SCAY0 = field ? 224 : 0;
             fieldScissor.SCAY1 = field ? 447 : 223;
+            if (batches && mode == 1)
+            {
+                // Overlapping fields prohibit draw merging, but must still
+                // admit a wide compute batch with ordered individual draws.
+                fieldScissor.SCAY0 = 0;
+                fieldScissor.SCAY1 = 447;
+            }
+            if (batches && mode == 2)
+            {
+                // State boundaries deliberately do not align to binary splits.
+                fieldScissor.SCAX0 = (packet / 13) % 3;
+                if (packet % 31 == 19)
+                {
+                    // Source bounds must reject this packet once, then replay
+                    // the original GIF without poisoning the neighboring run.
+                    fieldScissor.SCAX0 = 511;
+                    fieldScissor.SCAX1 = 0;
+                }
+            }
             std::memcpy(part + 16, &fieldScissor, 8);
             std::memcpy(part + 32, &fieldXY, 8);
             for (unsigned tag : {48u, 80u})
@@ -185,6 +204,19 @@ void packetScene(const void *inputs, const void *packets, unsigned count, unsign
                     !std::memcmp(&latch, &renderer->GetNativeVertexLatch(), sizeof(latch)),
                 "Declined grass group changed GPU output or GS state");
         stats[16] += 3;
+        if (batches)
+        {
+            const auto before = renderer->m_env;
+            require(!tf_gpu::drawGrassBatch(pool, invalidViews, 2, packetStats) &&
+                        !tf_gpu::drawGrassBatch(pool, views.data(), 0, packetStats) &&
+                        !tf_gpu::drawGrassBatch(pool, views.data(), tf_gpu::MaxMergedGrassPackets + 1, packetStats),
+                    "Invalid prepared batch was accepted");
+            require(pool.stats().dispatches == dispatches &&
+                        !std::memcmp(&latch, &renderer->GetNativeVertexLatch(), sizeof(latch)) &&
+                        !std::memcmp(&before, &renderer->m_env, sizeof(before)),
+                    "Rejected prepared batch consumed state or dispatched GPU work");
+            stats[16] += 3;
+        }
         if (merge)
         {
             const auto unchangedDecline = [&](const tf_gpu::GrassPacketView *v, unsigned n) {
@@ -234,6 +266,21 @@ void packetScene(const void *inputs, const void *packets, unsigned count, unsign
         const char *wide = std::getenv("PS2X_TF_GPU_GRASS_GROUPS");
         const unsigned maximum = merge && wide && !std::strcmp(wide, "64") ? tf_gpu::MaxMergedGrassPackets : 8;
         const auto drawRange = [&](auto &&self, unsigned begin, unsigned length) -> void {
+            if (batches)
+            {
+                const auto queries = packetStats.boundsQueries;
+                const auto fallbacks = packetStats.batchFallbackPackets;
+                require(tf_gpu::drawGrassBatch(pool, views.data() + begin, length, packetStats, mode == 3),
+                        "Prepared grass batch rejected authenticated packets");
+                require(packetStats.boundsQueries - queries <= length,
+                        "Prepared grass batch repeated source bounds work");
+                stats[17] += packetStats.batchFallbackPackets - fallbacks;
+                const unsigned end = begin + length - 1;
+                latchEnds[end] = true;
+                latches[end] = renderer->GetNativeVertexLatch();
+                require(renderer->m_path[0].nloop == 0, "Prepared grass batch left an unfinished GIF transfer");
+                return;
+            }
             if (merge && length > 1 &&
                 tf_gpu::drawGrassGroup(pool, views.data() + begin, length, packetStats, mode == 3))
             {
@@ -294,7 +341,7 @@ void packetScene(const void *inputs, const void *packets, unsigned count, unsign
 } // namespace
 
 static int grassFrontendProbe(const void *inputs, uint32_t count, const void *expected, const void *packets,
-                              uint64_t *stats, char *error, uint32_t capacity, bool merge = false)
+                              uint64_t *stats, char *error, uint32_t capacity, bool merge = false, bool batches = false)
 {
     if (!inputs || !expected || !stats || !count || count > 1024)
         return 0;
@@ -459,7 +506,7 @@ static int grassFrontendProbe(const void *inputs, uint32_t count, const void *ex
                         if (packets)
                         {
                             packetScene(inputs, packets, count, side, mode, prim, xy, scissor, pool, packetStats,
-                                        packetLatches, packetLatchEnds, stats, merge);
+                                        packetLatches, packetLatchEnds, stats, merge, batches);
                             continue;
                         }
                         for (unsigned packet = 0; packet < count; ++packet)
@@ -599,6 +646,18 @@ static int grassFrontendProbe(const void *inputs, uint32_t count, const void *ex
                     stats[28] = packetStats.boundsCacheRejectedHits;
                     stats[29] = packetStats.largestMerge;
                 }
+                if (batches)
+                {
+                    stats[30] = packetStats.nativeBatches;
+                    stats[31] = packetStats.preparedPackets;
+                    stats[32] = packetStats.preparedReuses;
+                    stats[33] = packetStats.preparedRejects;
+                    stats[34] = packetStats.batchFallbackPackets;
+                    stats[35] = packetStats.largestComputeGroup;
+                    require(packetStats.preparedPackets == count * 4 && packetStats.preparedRejects > 0 &&
+                                packetStats.largestComputeGroup > 8 && packetStats.mergedGroups > 0,
+                            "Batch diagnostic missed prepared rejects, wide compute or merged draws");
+                }
                 std::fprintf(stderr,
                              "[gpu:grass-packets] grouped_dispatches=%llu grouped_packets=%llu grouped_draws=%llu "
                              "group_declined=%llu\n",
@@ -643,4 +702,12 @@ extern "C" TF_HWGS_API int tf_gs_gpu_grass_merged_probe(const void *inputs, uint
                                                         uint32_t capacity)
 {
     return packets ? grassFrontendProbe(inputs, count, expected, packets, stats, error, capacity, true) : 0;
+}
+// Separate 36-counter ABI: exercises the production prepared-batch scheduler,
+// overlapping fields, irregular state boundaries, invalid bounds and fallback.
+extern "C" TF_HWGS_API int tf_gs_gpu_grass_batch_probe(const void *inputs, uint32_t count, const void *expected,
+                                                       const void *packets, uint64_t *stats, char *error,
+                                                       uint32_t capacity)
+{
+    return packets ? grassFrontendProbe(inputs, count, expected, packets, stats, error, capacity, true, true) : 0;
 }

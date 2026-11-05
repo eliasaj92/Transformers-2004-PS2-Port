@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <immintrin.h>
+#include <optional>
 #include <stdexcept>
 
 namespace tf_gpu
@@ -186,7 +187,13 @@ bool prepare(const gsnative::DualPacket &geometry, const uint8_t *packet, const 
 {
     result.geometry = &geometry;
     result.packet = packet;
+    result.framingValid = true; // Caller has authenticated the owned framing.
+    result.boundsValid = false;
+    result.batch = {};
+    result.firstSource = 0;
     std::memcpy(result.inputs.data(), geometry.inputs.data(), 256);
+    std::memcpy(result.inputs.data() + 288, incoming, 16);
+    std::memcpy(result.inputs.data() + 304, packet + 36 * 16, 16);
     for (unsigned field = 0; field < 2; ++field)
     {
         const auto *f = packet + field * 608;
@@ -201,9 +208,26 @@ bool prepare(const gsnative::DualPacket &geometry, const uint8_t *packet, const 
                                         int(scissor.SCAX1) * 16 + 8, int(scissor.SCAY1) * 16 + 8};
         result.raster.offset[field] = {int(offset.OFX), int(offset.OFY), 0, 1};
     }
-    std::memcpy(result.inputs.data() + 288, incoming, 16);
-    std::memcpy(result.inputs.data() + 304, packet + 36 * 16, 16);
-    return cachedBounds(result.inputs, result.bounds, stats);
+    result.boundsValid = cachedBounds(result.inputs, result.bounds, stats);
+    return result.boundsValid;
+}
+
+bool matches(const PreparedGrass &prepared, const GrassPacketView &view)
+{
+    return prepared.framingValid && prepared.geometry == view.geometry && prepared.packet == view.packet &&
+           view.bytes == 1216;
+}
+
+bool sameGrassState(const GrassPacketView &a, const GrassPacketView &b)
+{
+    for (unsigned field = 0; field < 2; ++field)
+    {
+        const auto *x = a.packet + field * 608, *y = b.packet + field * 608;
+        if (wide(x + 16) != wide(y + 16) || wide(x + 32) != wide(y + 32) ||
+            ((wide(x + 80) ^ wide(y + 80)) & (0x7ffull << 47)))
+            return false;
+    }
+    return true;
 }
 
 void restoreTail(const uint8_t *field)
@@ -283,7 +307,7 @@ bool probeGrassMergeRanges(uint64_t &checks)
 
 template <unsigned Capacity>
 static bool drawGrassGroupImpl(DualGeometry &pool, const GrassPacketView *views, uint32_t count, GrassLiveStats &stats,
-                               bool forceFallback)
+                               bool forceFallback, const PreparedGrass *prepared)
 {
     const auto decline = [&](uint64_t &reason) {
         ++stats.mergeDeclined;
@@ -297,7 +321,9 @@ static bool drawGrassGroupImpl(DualGeometry &pool, const GrassPacketView *views,
     if (!renderer->m_env.PRMODECONT.AC || renderer->m_env.SCANMSK.MSK)
         return decline(stats.mergeStateDeclined);
     for (unsigned i = 0; i < count; ++i)
-        if (!views[i].geometry || !grassPacketFraming(*views[i].geometry, views[i].packet, views[i].bytes))
+        if (!views[i].geometry ||
+            (prepared ? !matches(prepared[i], views[i])
+                      : !grassPacketFraming(*views[i].geometry, views[i].packet, views[i].bytes)))
             return decline(stats.mergeStateDeclined);
     const auto *first = views[0].packet;
     GIFRegPRIM prim{};
@@ -324,7 +350,14 @@ static bool drawGrassGroupImpl(DualGeometry &pool, const GrassPacketView *views,
     const auto &context = renderer->m_env.CTXT[prim.CTXT];
     if (!noFieldTextureFeedback(context, scissor[0], scissor[1]))
         return decline(stats.mergeFeedbackDeclined);
-    std::array<PreparedGrass, Capacity> prepared;
+    // A prepared batch owns this data already; avoid constructing a second
+    // array of packet snapshots every time a draw merge is attempted.
+    std::optional<std::array<PreparedGrass, Capacity>> local;
+    if (!prepared)
+    {
+        local.emplace();
+        prepared = local->data();
+    }
     std::array<uint8_t, Capacity * 320> inputs;
     std::array<GrassRasterState, Capacity> raster;
     std::array<DualDrawBounds, 2> bounds;
@@ -334,8 +367,11 @@ static bool drawGrassGroupImpl(DualGeometry &pool, const GrassPacketView *views,
     for (unsigned i = 0; i < count; ++i)
     {
         const auto &view = views[i];
-        if (!prepare(*view.geometry, view.packet, incoming, prepared[i], stats))
+        if (local)
+            prepare(*view.geometry, view.packet, incoming, (*local)[i], stats);
+        if (!prepared[i].boundsValid || std::memcmp(prepared[i].inputs.data() + 288, incoming, 16))
             return decline(stats.mergeBoundsDeclined);
+        stats.preparedReuses += !local;
         std::memcpy(inputs.data() + i * 320, prepared[i].inputs.data(), 320);
         raster[i] = prepared[i].raster;
         Draw witness{pool, *view.geometry, view.packet, stats, false};
@@ -364,7 +400,7 @@ static bool drawGrassGroupImpl(DualGeometry &pool, const GrassPacketView *views,
     auto batch = pool.prepareGrass(inputs.data(), count, raster.data(), true);
     if (!batch)
         return decline(stats.outputDeclined);
-    MergedDraw draw{pool, views, prepared.data(), count, stats, forceFallback, std::move(batch)};
+    MergedDraw draw{pool, views, prepared, count, stats, forceFallback, std::move(batch)};
     std::array<uint16_t, Capacity * 16> indices;
     for (unsigned i = 0; i < count * 16; ++i)
         indices[i] = uint16_t(i);
@@ -392,17 +428,17 @@ static bool drawGrassGroupImpl(DualGeometry &pool, const GrassPacketView *views,
 }
 
 bool drawGrassGroup(DualGeometry &pool, const GrassPacketView *views, uint32_t count, GrassLiveStats &stats,
-                    bool forceFallback)
+                    bool forceFallback, const PreparedGrass *prepared)
 {
     // Keep scratch initialization proportional to the attempted group. Most
     // rejected wide batches eventually reach the small existing fallback.
     if (count <= 8)
-        return drawGrassGroupImpl<8>(pool, views, count, stats, forceFallback);
+        return drawGrassGroupImpl<8>(pool, views, count, stats, forceFallback, prepared);
     if (count <= 16)
-        return drawGrassGroupImpl<16>(pool, views, count, stats, forceFallback);
+        return drawGrassGroupImpl<16>(pool, views, count, stats, forceFallback, prepared);
     if (count <= 32)
-        return drawGrassGroupImpl<32>(pool, views, count, stats, forceFallback);
-    return drawGrassGroupImpl<MaxMergedGrassPackets>(pool, views, count, stats, forceFallback);
+        return drawGrassGroupImpl<32>(pool, views, count, stats, forceFallback, prepared);
+    return drawGrassGroupImpl<MaxMergedGrassPackets>(pool, views, count, stats, forceFallback, prepared);
 }
 
 bool grassPacketFraming(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes)
@@ -473,13 +509,92 @@ bool prepareGrassGroup(DualGeometry &pool, const GrassPacketView *views, uint32_
     }
     ++stats.groupedDispatches;
     stats.groupedPackets += count;
+    stats.largestComputeGroup = std::max(stats.largestComputeGroup, uint64_t(count));
+    return true;
+}
+
+bool drawGrassBatch(DualGeometry &pool, const GrassPacketView *views, uint32_t count, GrassLiveStats &stats,
+                    bool forceFallback)
+{
+    if (!views || !count || count > MaxMergedGrassPackets || !g_gs_device ||
+        g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || g_gs_renderer->m_path[0].nloop ||
+        GSRendererHW::GetInstance()->GetUpscaleMultiplier() <= 1.0f)
+        return false;
+    // Authenticate the entire owned command before preparing or consuming it.
+    // No pointer/metadata cache survives this callback.
+    for (unsigned i = 0; i < count; ++i)
+        if (!views[i].geometry || !grassPacketFraming(*views[i].geometry, views[i].packet, views[i].bytes))
+            return false;
+    std::array<PreparedGrass, MaxMergedGrassPackets> prepared;
+    const auto &rgba = GSRendererHW::GetInstance()->GetNativeVertexLatch().RGBAQ;
+    uint32_t incoming[] = {rgba.R, rgba.G, rgba.B, rgba.A};
+    for (unsigned i = 0; i < count; ++i)
+    {
+        prepare(*views[i].geometry, views[i].packet, incoming, prepared[i], stats);
+        ++stats.preparedPackets;
+        for (unsigned channel = 0; channel < 4; ++channel)
+            incoming[channel] = word(views[i].packet + 74 * 16 + channel * 4) & 255;
+    }
+    ++stats.nativeBatches;
+    for (unsigned begin = 0; begin < count;)
+    {
+        unsigned end = begin + 1;
+        if (prepared[begin].boundsValid)
+            while (end < count && prepared[end].boundsValid && sameGrassState(views[begin], views[end]))
+                ++end;
+        const unsigned length = end - begin;
+        if (length > 1 && drawGrassGroup(pool, views + begin, length, stats, forceFallback, prepared.data() + begin))
+        {
+            begin = end;
+            continue;
+        }
+        // A rejected draw merge need not split the compute dispatch. It uses
+        // packet-major output, then submits the original draws in their order.
+        if (length > 1)
+        {
+            std::array<uint8_t, MaxMergedGrassPackets * 320> inputs;
+            std::array<GrassRasterState, MaxMergedGrassPackets> raster;
+            for (unsigned i = 0; i < length; ++i)
+            {
+                std::memcpy(inputs.data() + i * 320, prepared[begin + i].inputs.data(), 320);
+                raster[i] = prepared[begin + i].raster;
+            }
+            const auto batch = pool.prepareGrass(inputs.data(), length, raster.data());
+            if (batch)
+            {
+                ++stats.groupedDispatches;
+                stats.groupedPackets += length;
+                stats.largestComputeGroup = std::max(stats.largestComputeGroup, uint64_t(length));
+                for (unsigned i = 0; i < length; ++i)
+                {
+                    prepared[begin + i].batch = batch;
+                    prepared[begin + i].firstSource = i * 16;
+                }
+            }
+            else
+                ++stats.groupDeclined;
+        }
+        for (unsigned i = begin; i < end; ++i)
+        {
+            const auto &view = views[i];
+            if (!drawGrassPacket(pool, *view.geometry, view.packet, view.bytes, stats, forceFallback, &prepared[i]))
+            {
+                ++stats.batchFallbackPackets;
+                Draw draw{pool, *view.geometry, view.packet, stats, true};
+                kzgs::ExecuteGIFOnGSThread(1, fullPacket(draw), view.bytes);
+            }
+        }
+        begin = end;
+    }
     return true;
 }
 
 bool drawGrassPacket(DualGeometry &pool, const gsnative::DualPacket &geometry, const uint8_t *packet, uint32_t bytes,
                      GrassLiveStats &stats, bool forceFallback, const PreparedGrass *prepared)
 {
-    if (!grassPacketFraming(geometry, packet, bytes) || !g_gs_device ||
+    if (prepared && !matches(*prepared, {&geometry, packet, bytes}))
+        prepared = nullptr;
+    if ((!prepared && !grassPacketFraming(geometry, packet, bytes)) || !g_gs_device ||
         g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || g_gs_renderer->m_path[0].nloop)
         return false;
     auto *renderer = GSRendererHW::GetInstance();
@@ -488,9 +603,18 @@ bool drawGrassPacket(DualGeometry &pool, const gsnative::DualPacket &geometry, c
     PreparedGrass local;
     const auto &rgba = renderer->GetNativeVertexLatch().RGBAQ;
     const uint32_t incoming[] = {rgba.R, rgba.G, rgba.B, rgba.A};
-    if (prepared && (prepared->geometry != &geometry || prepared->packet != packet || !prepared->batch ||
-                     std::memcmp(prepared->inputs.data() + 288, incoming, 16)))
+    if (prepared && std::memcmp(prepared->inputs.data() + 288, incoming, 16))
         prepared = nullptr;
+    if (prepared)
+    {
+        ++stats.preparedReuses;
+        if (!prepared->boundsValid)
+        {
+            ++stats.preparedRejects;
+            ++stats.boundsDeclined;
+            return false;
+        }
+    }
     if (!prepared && !prepare(geometry, packet, incoming, local, stats))
     {
         ++stats.boundsDeclined;
