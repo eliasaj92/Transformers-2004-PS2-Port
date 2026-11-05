@@ -639,3 +639,12 @@ the reflection iteration, but remains below the saved enhanced result and does
 not establish true 60 fps. Its separate 32-frame gameplay capture again matches
 all 117,178,368 pixels of the saved enhanced images, without duplicated images.
 The reflection path remains opt-in. See [the live contract and diagnostics](../../deps/hwgs/GPU_GEOMETRY.md#live-reflection-lighting-and-projection-hooks).
+
+Vectorized reflection bounds retain identical metadata on all 706 captured
+strips and bring the enhanced level to 57.40 updates/s. Packed binary32 grass
+bounds then preserve all 17,096 captured batches and 5,472 arithmetic edge
+mutations, reducing that isolated CPU routine's cost by about 37%. The combined
+level result is 57.46 updates/s and 56.69 direct handoffs/s, with 31 skipped
+handoffs. The latter change does not demonstrate an overall FPS gain. A separate
+32-frame capture still matches every saved enhanced pixel at 2048x1788. Further
+work is required to reach sustained 60 fps.

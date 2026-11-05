@@ -321,11 +321,22 @@ bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &resul
         return false;
     _mm_setcsr(_mm_getcsr() | 0x8040u); // Match VU input/output denormal flushing.
     const auto *data = static_cast<const uint8_t *>(inputs);
-    double vectors[16][4];
+    struct BinaryRange
+    {
+        float low = 0, high = 0;
+    };
+    const auto valid = [](BinaryRange value) {
+        return std::isfinite(value.low) && std::isfinite(value.high) && value.low <= value.high &&
+               std::max(std::abs(value.low), std::abs(value.high)) < std::numeric_limits<float>::max();
+    };
+    float vectors[16][4];
     for (unsigned vector = 0; vector < 16; ++vector)
         for (unsigned axis = 0; axis < 4; ++axis)
         {
-            vectors[vector][axis] = normal(word(data + vector * 16 + axis * 4));
+            uint32_t bits = word(data + vector * 16 + axis * 4);
+            if (!(bits & 0x7f800000u))
+                bits &= 0x80000000u;
+            vectors[vector][axis] = std::bit_cast<float>(bits);
             if (!std::isfinite(vectors[vector][axis]))
                 return false;
         }
@@ -341,26 +352,35 @@ bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &resul
         if (word(stq + 8) != 0x3f800000u)
             return false;
     }
-    const auto unite = [](DualRange a, DualRange b) {
-        return DualRange{std::min(a.low, b.low), std::max(a.high, b.high)};
+    const auto unite = [](BinaryRange a, BinaryRange b) {
+        return BinaryRange{std::min(a.low, b.low), std::max(a.high, b.high)};
     };
-    // Each endpoint is itself binary32. Separate volatile operations prevent
-    // contraction and honor the saved/restored RTZ/FTZ environment (/fp:strict).
-    const auto add = [](DualRange a, DualRange b) {
-        volatile float low = float(a.low) + float(b.low), high = float(a.high) + float(b.high);
-        return DualRange{low, high};
+    // Each endpoint remains binary32 in the strict RTZ/FTZ scope. Packed
+    // operations avoid scalar volatile stores and double conversions.
+    const auto add = [](BinaryRange a, BinaryRange b) {
+        const auto sums = _mm_add_ps(_mm_setr_ps(a.low, a.high, a.low, a.high),
+                                    _mm_setr_ps(b.low, b.high, b.low, b.high));
+        return BinaryRange{_mm_cvtss_f32(sums),
+                           _mm_cvtss_f32(_mm_shuffle_ps(sums, sums, _MM_SHUFFLE(1, 1, 1, 1)))};
     };
-    const auto product = [](DualRange a, DualRange b) {
-        volatile float aa = float(a.low) * float(b.low), ab = float(a.low) * float(b.high);
-        volatile float ba = float(a.high) * float(b.low), bb = float(a.high) * float(b.high);
-        const double values[] = {aa, ab, ba, bb};
-        return DualRange{*std::min_element(std::begin(values), std::end(values)),
-                         *std::max_element(std::begin(values), std::end(values))};
+    const auto product = [](BinaryRange a, BinaryRange b) {
+        const auto values = _mm_mul_ps(_mm_setr_ps(a.low, a.low, a.high, a.high),
+                                      _mm_setr_ps(b.low, b.high, b.low, b.high));
+        if (_mm_movemask_ps(_mm_cmpunord_ps(values, values)))
+            return BinaryRange{std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()};
+        // Keep the original first-endpoint tie behavior, including signed zero.
+        auto low = _mm_min_ss(_mm_shuffle_ps(values, values, _MM_SHUFFLE(1, 1, 1, 1)), values);
+        auto high = _mm_max_ss(_mm_shuffle_ps(values, values, _MM_SHUFFLE(1, 1, 1, 1)), values);
+        low = _mm_min_ss(_mm_shuffle_ps(values, values, _MM_SHUFFLE(2, 2, 2, 2)), low);
+        high = _mm_max_ss(_mm_shuffle_ps(values, values, _MM_SHUFFLE(2, 2, 2, 2)), high);
+        low = _mm_min_ss(_mm_shuffle_ps(values, values, _MM_SHUFFLE(3, 3, 3, 3)), low);
+        high = _mm_max_ss(_mm_shuffle_ps(values, values, _MM_SHUFFLE(3, 3, 3, 3)), high);
+        return BinaryRange{_mm_cvtss_f32(low), _mm_cvtss_f32(high)};
     };
     const auto scalar = [&](unsigned vector, unsigned axis) {
-        return DualRange{vectors[vector][axis], vectors[vector][axis]};
+        return BinaryRange{vectors[vector][axis], vectors[vector][axis]};
     };
-    DualRange weights[4];
+    BinaryRange weights[4];
     for (unsigned axis = 0; axis < 4; ++axis)
     {
         weights[axis] = scalar(12, axis);
@@ -378,7 +398,7 @@ bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &resul
     for (unsigned channel = 0; channel < 4; ++channel)
     {
         const auto range = interpolate(9, channel);
-        if (!finite(range) || range.low < 0)
+        if (!valid(range) || range.low < 0)
             return false;
         const uint32_t low = std::bit_cast<uint32_t>(float(range.low));
         const uint32_t high = std::bit_cast<uint32_t>(float(range.high));
@@ -389,18 +409,18 @@ bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &resul
     {
         auto &bounds = result[field];
         const auto w = interpolate(3 + field * 3, 3);
-        if (!finite(w) || w.low <= 0)
+        if (!valid(w) || w.low <= 0)
             return false;
         volatile float qLow = 1.0f / float(w.high), qHigh = 1.0f / float(w.low);
-        const DualRange reciprocal{qLow, qHigh};
-        if (!finite(reciprocal) || reciprocal.low <= 0)
+        const BinaryRange reciprocal{qLow, qHigh};
+        if (!valid(reciprocal) || reciprocal.low <= 0)
             return false;
         for (unsigned axis = 0; axis < 3; ++axis)
         {
             const auto origin = interpolate(3 + field * 3, axis);
             const auto corner = add(origin, scalar(2, axis));
             const auto screen = product(unite(origin, corner), reciprocal);
-            if (!finite(origin) || !finite(corner) || !finite(screen) || !packBounds(screen, axis, bounds))
+            if (!valid(origin) || !valid(corner) || !valid(screen) || !packBounds({screen.low, screen.high}, axis, bounds))
                 return false;
             bounds.stq[axis] = axis == 2 ? DualRange{1, 1} : DualRange{0, 1};
         }

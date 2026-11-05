@@ -1264,6 +1264,31 @@ still falls below the saved enhanced mesh/grass result; reflection stays opt-in.
 Its separate 32-frame gameplay capture again matches all 117,178,368 pixels of
 the saved enhanced images, with no adjacent or two-field duplicate images.
 
+The next source-bounds iteration packs the three reflection axes into SIMD
+lanes while preserving endpoint reduction and x+y+z order. All 706 captured
+strips retain identical admission, subdivision trees and final draw bounds;
+isolated bounds cost falls from 6.18 to 4.82 microseconds per strip. Its enhanced
+level run measures **57.4024 updates/s and 57.0741 direct handoffs/s**, with
+fourteen skipped handoffs.
+
+Grass source intervals also remain binary32 throughout their packed arithmetic,
+converting to the public double metadata only at the final bounds. Explicit NaN
+rejection and first-endpoint tie selection preserve conservative bounds and
+signed-zero behavior. All 17,096 captured batches retain identical admission
+and metadata; accepted bounds contain the captured coordinates and provoking
+sprite colors. Another 5,472 zero/denormal/extreme/non-finite mutations preserve
+admission and caller FP state. Isolated grass bounds cost falls from about
+1.14 to 0.71 microseconds. Both grass capture sets and reflection pass their
+rendered frontend checks.
+
+The combined enhanced Amazon run measures **57.4623 updates/s and 56.6931 direct
+handoffs/s**, with a 16.8095 ms median and 21.571 ms p95 interval. All deferred
+maps drain and no output allocation declines occur; 31 published frames are
+skipped by the host handoff. This is not a clear gameplay-rate improvement over
+the reflection-only metadata optimization. Its separate 32-frame capture again
+matches all 117,178,368 saved enhanced pixels exactly. These local CPU savings
+do not establish sustained 60 fps, and reflection remains opt-in.
+
 ## Bounded output-image cadence capture
 
 `PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;

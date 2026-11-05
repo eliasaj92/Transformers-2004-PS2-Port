@@ -36,10 +36,6 @@ Range unite(Range a, Range b)
 {
     return {std::min(a.low, b.low), std::max(a.high, b.high)};
 }
-Range negative(Range a)
-{
-    return {-a.high, -a.low};
-}
 bool finite(Range a)
 {
     return std::isfinite(a.low) && std::isfinite(a.high) && a.low <= a.high;
@@ -66,33 +62,104 @@ Range times(Range a, Range b)
     return {_mm_cvtss_f32(_mm_min_ss(low, _mm_shuffle_ps(low, low, _MM_SHUFFLE(1, 1, 1, 1)))),
             _mm_cvtss_f32(_mm_max_ss(high, _mm_shuffle_ps(high, high, _MM_SHUFFLE(1, 1, 1, 1))))};
 }
-Range squared(Range a)
+
+// Three independent axes share SIMD instructions; the fourth lane is unused.
+// Preserve the original endpoint and x+y+z reduction order in strict RTZ/FTZ.
+#if defined(_MSC_VER)
+#define TF_BOUNDS_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define TF_BOUNDS_INLINE inline __attribute__((always_inline))
+#else
+#define TF_BOUNDS_INLINE inline
+#endif
+struct PackedRange3
 {
-    const float low = a.low <= 0 && a.high >= 0 ? 0.0f : float(std::min(std::abs(a.low), std::abs(a.high)));
-    const float high = float(std::max(std::abs(a.low), std::abs(a.high)));
-    const __m128 values = _mm_setr_ps(low, high, low, high);
-    const __m128 squares = _mm_mul_ps(values, values);
-    return {_mm_cvtss_f32(squares), _mm_cvtss_f32(_mm_shuffle_ps(squares, squares, _MM_SHUFFLE(1, 1, 1, 1)))};
+    __m128 low, high;
+};
+TF_BOUNDS_INLINE PackedRange3 packRanges(const Vector &v)
+{
+    return {_mm_setr_ps(v[0].low, v[1].low, v[2].low, 0),
+            _mm_setr_ps(v[0].high, v[1].high, v[2].high, 0)};
 }
-Range dot(const Vector &a, const Vector &b)
+TF_BOUNDS_INLINE PackedRange3 pointRanges(const uint8_t *p)
 {
-    return plus(plus(times(a[0], b[0]), times(a[1], b[1])), times(a[2], b[2]));
+    const auto v = _mm_setr_ps(load(p), load(p + 4), load(p + 8), 0);
+    return {v, v};
 }
-bool normalize(const Vector &input, Vector &output)
+TF_BOUNDS_INLINE PackedRange3 splatRange(Range r)
 {
-    const auto length = plus(plus(squared(input[0]), squared(input[1])), squared(input[2]));
+    return {_mm_set1_ps(r.low), _mm_set1_ps(r.high)};
+}
+TF_BOUNDS_INLINE PackedRange3 addRanges(PackedRange3 a, PackedRange3 b)
+{
+    return {_mm_add_ps(a.low, b.low), _mm_add_ps(a.high, b.high)};
+}
+TF_BOUNDS_INLINE PackedRange3 negateRanges(PackedRange3 a)
+{
+    const auto sign = _mm_set1_ps(-0.0f);
+    return {_mm_xor_ps(a.high, sign), _mm_xor_ps(a.low, sign)};
+}
+TF_BOUNDS_INLINE PackedRange3 multiplyRanges(PackedRange3 a, PackedRange3 b)
+{
+    const auto p0 = _mm_mul_ps(a.low, b.low), p1 = _mm_mul_ps(a.low, b.high);
+    const auto p2 = _mm_mul_ps(a.high, b.low), p3 = _mm_mul_ps(a.high, b.high);
+    const auto unordered = _mm_or_ps(_mm_or_ps(_mm_cmpunord_ps(p0, p0), _mm_cmpunord_ps(p1, p1)),
+                                     _mm_or_ps(_mm_cmpunord_ps(p2, p2), _mm_cmpunord_ps(p3, p3)));
+    if (_mm_movemask_ps(unordered) & 7)
+    {
+        const auto invalid = _mm_set1_ps(std::numeric_limits<float>::quiet_NaN());
+        return {invalid, invalid};
+    }
+    // Match the existing endpoint reduction order, including zero ties.
+    return {_mm_min_ps(_mm_min_ps(p0, p2), _mm_min_ps(p1, p3)),
+            _mm_max_ps(_mm_max_ps(p0, p2), _mm_max_ps(p1, p3))};
+}
+TF_BOUNDS_INLINE PackedRange3 scaleRanges(PackedRange3 a, Range b)
+{
+    return multiplyRanges(a, splatRange(b));
+}
+TF_BOUNDS_INLINE float sumLanes(__m128 value)
+{
+    const auto xy = _mm_add_ss(value, _mm_shuffle_ps(value, value, _MM_SHUFFLE(1, 1, 1, 1)));
+    return _mm_cvtss_f32(_mm_add_ss(xy, _mm_shuffle_ps(value, value, _MM_SHUFFLE(2, 2, 2, 2))));
+}
+TF_BOUNDS_INLINE Range dotRanges(PackedRange3 a, PackedRange3 b)
+{
+    const auto product = multiplyRanges(a, b);
+    return {sumLanes(product.low), sumLanes(product.high)};
+}
+template <unsigned Axis> TF_BOUNDS_INLINE Range laneRange(PackedRange3 a)
+{
+    return {_mm_cvtss_f32(_mm_shuffle_ps(a.low, a.low, _MM_SHUFFLE(Axis, Axis, Axis, Axis))),
+            _mm_cvtss_f32(_mm_shuffle_ps(a.high, a.high, _MM_SHUFFLE(Axis, Axis, Axis, Axis)))};
+}
+TF_BOUNDS_INLINE bool normalizeRanges(PackedRange3 a, PackedRange3 &result)
+{
+    const auto absLow = _mm_andnot_ps(_mm_set1_ps(-0.0f), a.low);
+    const auto absHigh = _mm_andnot_ps(_mm_set1_ps(-0.0f), a.high);
+    const auto maximum = _mm_set1_ps(std::numeric_limits<float>::max());
+    const auto valid = _mm_and_ps(_mm_cmple_ps(a.low, a.high),
+                                 _mm_and_ps(_mm_cmple_ps(absLow, maximum), _mm_cmple_ps(absHigh, maximum)));
+    if ((_mm_movemask_ps(valid) & 7) != 7)
+        return false;
+    const auto zero = _mm_setzero_ps();
+    const auto crosses = _mm_and_ps(_mm_cmple_ps(a.low, zero), _mm_cmpge_ps(a.high, zero));
+    const auto low = _mm_andnot_ps(crosses, _mm_min_ps(absLow, absHigh));
+    const auto high = _mm_max_ps(absLow, absHigh);
+    const Range length{sumLanes(_mm_mul_ps(low, low)), sumLanes(_mm_mul_ps(high, high))};
     if (!finite(length) || length.low <= 0)
         return false;
-    const __m128 lengths = _mm_sqrt_ps(_mm_setr_ps(length.high, length.low, length.high, length.low));
-    const __m128 reciprocals = _mm_div_ps(_mm_set1_ps(1.0f), lengths);
-    const Range inverse{_mm_cvtss_f32(reciprocals),
-                        _mm_cvtss_f32(_mm_shuffle_ps(reciprocals, reciprocals, _MM_SHUFFLE(1, 1, 1, 1)))};
-    if (!finite(inverse))
+    const auto roots = _mm_sqrt_ps(_mm_setr_ps(length.high, length.low, length.high, length.low));
+    const auto inverse = _mm_div_ps(_mm_set1_ps(1.0f), roots);
+    const Range q{_mm_cvtss_f32(inverse),
+                  _mm_cvtss_f32(_mm_shuffle_ps(inverse, inverse, _MM_SHUFFLE(1, 1, 1, 1)))};
+    if (!finite(q))
         return false;
-    for (unsigned axis = 0; axis < 3; ++axis)
-        output[axis] = times(input[axis], inverse);
+    result = scaleRanges(a, q);
     return true;
 }
+
+#undef TF_BOUNDS_INLINE
 
 struct SourceBounds
 {
@@ -115,27 +182,27 @@ struct SourceBounds
             }
         }
         const auto evaluate = [&] {
-            Vector eye, view, reflected, transformed, direction;
-            for (unsigned axis = 0; axis < 3; ++axis)
-                eye[axis] = plus(scalar(load(constants + 64 + axis * 4)), negative(position[axis]));
-            if (!normalize(eye, view))
+            const auto pos = packRanges(position), nm = packRanges(normal);
+            const auto eye = addRanges(pointRanges(constants + 64), negateRanges(pos));
+            PackedRange3 view, direction;
+            if (!normalizeRanges(eye, view))
                 return false;
-            const auto facing = dot(normal, view);
-            for (unsigned axis = 0; axis < 3; ++axis)
-                reflected[axis] = plus(times(plus(normal[axis], normal[axis]), facing), negative(view[axis]));
-            for (unsigned axis = 0; axis < 3; ++axis)
-                transformed[axis] = plus(plus(times(scalar(load(constants + axis * 4)), reflected[0]),
-                                              times(scalar(load(constants + 16 + axis * 4)), reflected[1])),
-                                         times(scalar(load(constants + 32 + axis * 4)), reflected[2]));
-            if (!normalize(transformed, direction))
+            const auto facing = dotRanges(nm, view);
+            const auto reflected = addRanges(scaleRanges(addRanges(nm, nm), facing), negateRanges(view));
+            const auto transformed = addRanges(
+                addRanges(scaleRanges(pointRanges(constants), laneRange<0>(reflected)),
+                        scaleRanges(pointRanges(constants + 16), laneRange<1>(reflected))),
+                scaleRanges(pointRanges(constants + 32), laneRange<2>(reflected)));
+            if (!normalizeRanges(transformed, direction))
                 return false;
-            stq[2] = plus(direction[2], scalar(1.0f));
+            stq[2] = plus(laneRange<2>(direction), scalar(1.0f));
             if (!finite(stq[2]) || stq[2].low <= 0)
                 return false;
             volatile float low = 1.0f / float(stq[2].high), high = 1.0f / float(stq[2].low);
             const auto q = times(scalar(0.5f), {low, high});
-            for (unsigned axis = 0; axis < 2; ++axis)
-                stq[axis] = plus(times(direction[axis], q), scalar(0.5f));
+            const auto uv = addRanges(scaleRanges(direction, q), splatRange(scalar(0.5f)));
+            stq[0] = laneRange<0>(uv);
+            stq[1] = laneRange<1>(uv);
             return finite(stq[0]) && finite(stq[1]);
         };
         if (evaluate())
