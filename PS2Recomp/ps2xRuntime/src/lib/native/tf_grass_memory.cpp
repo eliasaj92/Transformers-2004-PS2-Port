@@ -62,6 +62,31 @@ void GrassDeferredMemory::record(uint8_t *data, unsigned base, gsnative::DualPac
     if (!data || base > 1024 - 76 || !source || source->kind != gsnative::GeometryKind::GrassSprites ||
         source->version != 2 || source->vertices != 8)
         throw std::runtime_error("Invalid deferred grass record");
+    // Repeated GPU emissions usually replace the same intact output buffers.
+    // Their 36 ownership cells already have the right slot/field/sprite layout;
+    // replacing only the source avoids discarding and rebuilding every cell.
+    const auto previousSlot = cells[base + 6].slot;
+    if (previousSlot != 255)
+    {
+        auto &previous = batches[previousSlot];
+        if (previous.remaining == 36 && previous.base == base)
+        {
+            bool overlaps = false;
+            for (const auto &other : batches)
+                overlaps |= &other != &previous && other.remaining && other.base < base + 76 && base < other.base + 76;
+            // Another packet can own the retained tail even when all 36 cells
+            // are intact. Any intersecting live range needs the ordinary path.
+            if (!overlaps)
+            {
+                previous.source = std::move(source);
+                previous.computed.reset();
+                overwrittenQwords += 36;
+                ++recorded;
+                ++reusedRecords;
+                return;
+            }
+        }
+    }
     overwrite(base, 76);
     unsigned slot = 0;
     while (slot < batches.size() && batches[slot].remaining)
@@ -73,6 +98,7 @@ void GrassDeferredMemory::record(uint8_t *data, unsigned base, gsnative::DualPac
     }
     auto &batch = batches[slot];
     batch.source = std::move(source);
+    batch.base = base;
     batch.computed.reset();
     batch.remaining = 36;
     dirtyQwords += batch.remaining;

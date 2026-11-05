@@ -1333,6 +1333,40 @@ pixels of the saved enhanced images, with no adjacent or two-field duplicate
 images. The result is a small improvement in this level, not sustained true
 60 fps or full-campaign validation. Reflection remains opt-in.
 
+## Reusing grass ownership records
+
+When a new GPU grass emission replaces the same untouched output buffer, its
+36 ownership cells still describe the correct slot, sprite and field. The VU
+owner can replace that slot's immutable source companion and reset its cached
+results instead of discarding and rebuilding every cell. Queued graphics
+packets retain their own shared source references. This changes neither GPU
+geometry nor the point at which guest reads reconstruct omitted output.
+
+Reuse requires all 36 cells to remain owned and every other live batch's range
+to be disjoint. A neighboring packet can own a retained-tail word without
+consuming any of those 36 cells, so checking only the count would be incorrect.
+Partial reads, writes and overlapping ranges retain the ordinary ownership
+path. The `reused_records` counter reports successful replacements.
+
+Both accelerated replays preserve all 5,374 enclosing calls and reuse 16,675
+of 17,096 grass records (97.54%). Separate checks compare complete memory with
+captured packets through 20,000 mixed operations and 2,000 repeated-buffer
+records, including explicit partial-read and retained-tail overlap cases.
+All 273,536 raw sprites and 17,096 partial writes still match their captures.
+Use `replay_gpu_grass.py --defer-memory --require-prologue --require-record-reuse`
+to require this path. These checks establish correctness, not a gameplay-rate
+improvement.
+
+The enhanced level run reused 4,446,300 of 4,583,382 records (97.01%). It
+measured 57.9899 physics updates/s and 57.2993 direct handoffs/s, compared with
+58.1459 and 57.6746 in the preceding saved enhanced run. This does not
+demonstrate an additional frame-rate improvement. A separate CPU sample
+attributes 0.23% of VU samples to `GrassDeferredMemory::record`, down from
+2.67%. The change is retained as a reduction in CPU ownership work. All
+117,178,368 pixels across 32 output images remain identical to the saved
+enhanced capture, without adjacent or two-field duplicates. GPU output stays
+at 2048 x 1788 for 1920 x 1080 presentation, with no full-frame CPU transfer.
+
 ## Bounded output-image cadence capture
 
 `PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;

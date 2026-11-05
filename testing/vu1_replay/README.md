@@ -86,6 +86,11 @@ guards. The private reports record skipped prologues and require complete
 state, memory, guest-cycle and packet equality. See the
 [earlier handoff contract](../../deps/hwgs/GPU_GEOMETRY.md#earlier-grass-emission-handoff).
 
+Add `--require-record-reuse` to require intact output buffers to reuse their
+ownership records. The `tf_grass_memory` target also checks repeated buffers,
+partial reads/writes and retained-tail overlaps against captured complete
+packets, including a deterministic sequence of mixed memory operations.
+
 ## Reflection input capture and GPU tail experiment
 
 Configure a separate private build with `-DTF_REPLAY_REFLECTION_CAPTURE=ON`

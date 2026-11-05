@@ -309,3 +309,13 @@ for 4.95%. The runtime GS submission thread waits in 94.25% of samples. EE's
 known frame-wait routine remains at 7.59%, with full scheduler checkpoints at
 6.21%. These instrumented results guide further removal of CPU work around
 resident GPU geometry; they are not a separate frame-rate measurement.
+
+An instrumented accelerated replay subsequently tracks actual deferred-memory
+reads, excluding diagnostic clones. All 5,000 captured calls still match. Of
+4,493 vertices whose lighting is reconstructed, 4,465 eventually require a
+lighting-dependent result (99.38%); merely avoiding lighting for XYZ-only reads
+would therefore remove little work in this capture. The reads require 6,819
+distinct vertex/field projections, while the current path performs 11,043
+section projections. Sharing position/reciprocal results between reflection
+and base-texture sections is a more promising next candidate. This is measured
+read demand, not an implemented optimization or a gameplay-rate result.

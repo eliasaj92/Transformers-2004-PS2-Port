@@ -339,6 +339,7 @@ void grassReplayFinish()
                     deferredPackets, deferred.recorded, deferred.overwrittenQwords, deferred.materializedSprites,
                     deferred.materializedQwords, deferred.dirtyQwords);
         std::printf("GRASS_PROLOGUE skipped=%llu guard_checks=%u\n", deferred.skippedPrologues, prologueGuardChecks);
+        std::printf("GRASS_REUSE records=%llu\n", deferred.reusedRecords);
     }
     std::printf("GRASS_TAIL calls=%llu active_transfers=%llu emitted=%llu gpu_replaced=%llu skipped_iterations=%llu\n",
                 calls, active, captured, replaced, replaced * 2);

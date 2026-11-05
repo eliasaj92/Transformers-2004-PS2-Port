@@ -148,6 +148,7 @@ Stats stats()
 {
     auto result = state.counts;
     result.recorded = state.memory.recorded;
+    result.reusedRecords = state.memory.reusedRecords;
     result.overwrittenQwords = state.memory.overwrittenQwords;
     result.materializedSprites = state.memory.materializedSprites;
     result.materializedQwords = state.memory.materializedQwords;
@@ -162,8 +163,8 @@ void finish()
     std::fprintf(stderr,
                  "[gpu-grass] selected=%llu attached=%llu declined=%llu overlapping=%llu "
                  "skipped_iterations=%llu skipped_prologues=%llu recorded=%llu overwritten_qwords=%llu materialized_sprites=%llu "
-                 "materialized_qwords=%llu dirty=%u\n",
+                 "materialized_qwords=%llu dirty=%u reused_records=%llu\n",
                  s.selected, s.attached, s.declined, s.overlapping, s.selected * 2, s.skippedPrologues, s.recorded, s.overwrittenQwords,
-                 s.materializedSprites, s.materializedQwords, s.dirtyQwords);
+                 s.materializedSprites, s.materializedQwords, s.dirtyQwords, s.reusedRecords);
 }
 } // namespace tf_gpu_grass

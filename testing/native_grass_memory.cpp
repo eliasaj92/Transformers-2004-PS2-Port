@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Compare handwritten fallback/memory ownership with enhanced captured output.
 #include "tf_grass_memory.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -35,6 +36,90 @@ void poison(uint8_t *packet)
             std::memset(p + 32, 0xcd, 32);
         }
 }
+
+void checkOwnershipSequences(const std::vector<uint8_t> &inputs, const std::vector<uint8_t> &packets)
+{
+    const size_t count = inputs.size() / 256, samples = std::min<size_t>(64, count);
+    std::vector<gsnative::DualPacketPtr> sources;
+    std::vector<size_t> indices;
+    for (size_t i = 0; i < samples; ++i)
+    {
+        const size_t index = samples == 1 ? 0 : i * (count - 1) / (samples - 1);
+        auto p = std::make_shared<gsnative::DualPacket>();
+        p->kind = gsnative::GeometryKind::GrassSprites;
+        p->version = 2;
+        p->vertices = 8;
+        std::memcpy(p->inputs.data(), inputs.data() + index * 256, 256);
+        sources.push_back(p);
+        indices.push_back(index);
+    }
+    tf_native::GrassDeferredMemory memory;
+    std::array<uint8_t, 16384> data, expected;
+    data.fill(0x5a);
+    expected = data;
+    const auto record = [&](unsigned base, size_t source) {
+        source %= samples;
+        const auto *packet = packets.data() + indices[source] * 1216;
+        std::memcpy(data.data() + base * 16, packet, 1216);
+        std::memcpy(expected.data() + base * 16, packet, 1216);
+        poison(data.data() + base * 16);
+        memory.record(data.data(), base, sources[source]);
+    };
+    const auto resolve = [&]() {
+        memory.read(data.data());
+        require(data == expected && !memory.dirtyQwords, "Grass ownership sequence differs from captured output");
+    };
+    for (unsigned i = 0; i < 1000; ++i)
+        record(128 + (i % 3) * 128, i);
+    require(memory.reusedRecords == 997, "Intact repeated grass buffers did not reuse their ownership cells");
+    resolve();
+
+    record(128, 0);
+    memory.read(data.data(), 134, 1);
+    const auto partialReuse = memory.reusedRecords;
+    record(128, 1);
+    require(memory.reusedRecords == partialReuse, "Partly consumed grass ownership was reused");
+    resolve();
+
+    // The neighbor only owns qword 202 inside the first packet's range. None
+    // of the first packet's 36 deferred cells have been consumed, but replacing
+    // that packet must still discard the neighbor's overlapping tail cell.
+    record(128, 0);
+    record(196, 1);
+    const auto overlappingReuse = memory.reusedRecords;
+    record(128, 2);
+    require(memory.reusedRecords == overlappingReuse, "Overlapping grass ownership was reused");
+    resolve();
+
+    uint32_t random = 0x4b93f71;
+    const auto next = [&]() { random ^= random << 13; random ^= random >> 17; random ^= random << 5; return random; };
+    for (unsigned step = 0; step < 10000; ++step)
+    {
+        const unsigned mode = next() % 10, first = next() % 1024, words = std::min(1 + next() % 16, 1024 - first);
+        if (mode < 7)
+            record(mode < 6 ? 128 + (next() % 3) * 128 : next() % 949, next());
+        else if (mode < 9)
+        {
+            memory.read(data.data(), first, words);
+            require(!std::memcmp(data.data() + first * 16, expected.data() + first * 16, words * 16),
+                    "Partial grass read differs from captured output");
+            const uint32_t xyz[] = {next(), next(), next()};
+            std::memcpy(data.data() + first * 16, xyz, 12);
+            std::memcpy(expected.data() + first * 16, xyz, 12);
+        }
+        else
+        {
+            memory.overwrite(first, words);
+            std::memset(data.data() + first * 16, 0x37, words * 16);
+            std::memset(expected.data() + first * 16, 0x37, words * 16);
+        }
+        if (step % 257 == 0)
+            resolve();
+    }
+    resolve();
+    std::printf("GRASS_SEQUENCE mixed_operations=10000 repeated_records=1000 partial_and_overlap_checks=2 "
+                "recorded=%llu reused=%llu PASS\n", memory.recorded, memory.reusedRecords);
+}
 } // namespace
 int main(int argc, char **argv)
 {
@@ -45,6 +130,7 @@ int main(int argc, char **argv)
         const size_t count = inputs.size() / 256;
         require(count && inputs.size() == count * 256 && packets.size() == count * 1216,
                 "Grass fixture framing mismatch");
+        checkOwnershipSequences(inputs, packets);
         uint64_t rawSprites = 0, partialWrites = 0, discarded = 0;
         for (size_t index = 0; index < count; ++index)
         {

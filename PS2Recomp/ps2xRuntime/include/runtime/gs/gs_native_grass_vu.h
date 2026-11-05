@@ -15,6 +15,7 @@ struct Stats
     uint64_t selected = 0, attached = 0, declined = 0, overlapping = 0;
     uint64_t skippedPrologues = 0;
     uint64_t recorded = 0, overwrittenQwords = 0, materializedSprites = 0, materializedQwords = 0;
+    uint64_t reusedRecords = 0;
     unsigned dirtyQwords = 0;
 };
 void install(uint32_t crc, bool acceleratedGpuBypass);

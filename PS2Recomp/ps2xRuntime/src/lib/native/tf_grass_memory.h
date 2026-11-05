@@ -17,7 +17,7 @@ class GrassDeferredMemory
     struct Batch
     {
         gsnative::DualPacketPtr source;
-        unsigned remaining = 0;
+        unsigned remaining = 0, base = 0;
         std::bitset<16> computed;
         std::array<gsnative::GrassRawSprite, 16> cache;
     };
@@ -27,6 +27,7 @@ class GrassDeferredMemory
 
   public:
     uint64_t recorded = 0, overwrittenQwords = 0, materializedSprites = 0, materializedQwords = 0;
+    uint64_t reusedRecords = 0;
     unsigned dirtyQwords = 0;
     void read(uint8_t *data, unsigned firstQword = 0, unsigned count = 1024);
     void overwrite(unsigned firstQword, unsigned count);
