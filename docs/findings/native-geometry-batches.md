@@ -131,6 +131,10 @@ launcher still selects `game-65`.
 
 ## Remaining work identified by this result
 
+The subsequent user direction prioritizes the
+[engine-level native renderer](engine-native-renderer.md). The fallback-dispatch
+experiment below is recorded as a finding and is deferred, not the next task.
+
 The present trace does not re-profile the critical CPU/GPU stage. It shows that
 moving through the scene still misses the delivery budget despite the 60 Hz cap;
 it cannot attribute the remaining time to a specific function. The earlier

@@ -2,6 +2,12 @@
 
 Status: live GPU mesh/grass drawing and experimental reflection lighting/projection offload, November 2026. The guarded CPU-tail bypasses have captured-state, geometry and deferred-memory checks; whole-game reliability and sustained rendered 60 fps remain unverified. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Earlier sections retain the evidence and limitations of each preceding stage.
 
+The next direction is the [engine-level native renderer](engine-native-renderer.md):
+complete mesh/material/pose submissions into native D3D12 passes, with a design
+target above 60 Hz. Further per-packet grass tuning is deferred. The existing
+GPU paths below still use the GS frontend and should not be described as an
+independent native scene renderer.
+
 ## Why this boundary
 
 [BT3-Recomp's native render seam](https://github.com/z3xox/BT3-Recomp/blob/main/docs/NATIVE-RENDER-SEAM.md) captures an engine mesh batch, imports its prebuilt VIF list, verifies a host transform against VU output, then moves that transform into a vertex shader. Its [Phase 0 measurements](https://github.com/z3xox/BT3-Recomp/blob/main/docs/SEAM-PHASE0-BATCHES.md) attribute constant uploads and VU launches to batch builders. This is the useful architectural reference; BT3's addresses, mesh layouts and rendering effects are game-specific.
