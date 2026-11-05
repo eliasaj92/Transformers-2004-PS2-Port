@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "runtime/gs/gs_native_dual_math.h"
+#include "gs_native_math_inline.h"
 #include <bit>
 #include <cstring>
 #include <stdexcept>
@@ -29,7 +30,7 @@ DualFloatScope::~DualFloatScope()
 }
 namespace
 {
-float normal(float value)
+GS_NATIVE_FORCEINLINE float normal(float value)
 {
     uint32_t bits = std::bit_cast<uint32_t>(value);
     const uint32_t exponent = bits & 0x7f800000u;
@@ -39,21 +40,21 @@ float normal(float value)
         bits = (bits & 0x80000000u) | 0x7f7fffffu;
     return std::bit_cast<float>(bits);
 }
-float load(const uint8_t *p)
+GS_NATIVE_FORCEINLINE float load(const uint8_t *p)
 {
     float value;
     std::memcpy(&value, p, 4);
     return normal(value);
 }
-float add(float a, float b)
+GS_NATIVE_FORCEINLINE float add(float a, float b)
 {
     return normal(normal(a) + normal(b));
 }
-float multiply(float a, float b)
+GS_NATIVE_FORCEINLINE float multiply(float a, float b)
 {
     return normal(normal(a) * normal(b));
 }
-uint32_t fixed4(float value)
+GS_NATIVE_FORCEINLINE uint32_t fixed4(float value)
 {
     value *= 16.0f;
     if (value >= 2147483648.0f)

@@ -32,8 +32,22 @@ void reflectionReplayInitialize();
 void reflectionReplayFinish();
 bool reflectionTailCapture(uint32_t, const uint8_t*, uint32_t, bool, bool);
 #endif
+#ifdef TF_REPLAY_REFLECTION_LIVE
+void reflectionLiveInitialize();
+void reflectionLiveFinish();
+void reflectionLiveBegin(uint32_t, bool, unsigned, uint64_t, const void*, const uint8_t*, uint8_t*);
+void reflectionLivePacket(uint32_t, const uint8_t*&, uint32_t, bool, bool);
+void reflectionLiveResolve(bool, bool, bool);
+void reflectionLiveExternalWrites(uint8_t*, const uint8_t*, const uint8_t*);
+bool reflectionLiveMatches(const uint8_t*, const uint8_t*);
+#endif
 namespace fs = std::filesystem;
 namespace {
+#ifdef TF_REPLAY_REFLECTION_LIVE
+constexpr bool reflectionCarry = true;
+#else
+constexpr bool reflectionCarry = false;
+#endif
 std::vector<uint8_t> packets;
 struct Dump {
     std::array<uint32_t, 4> header;
@@ -116,6 +130,9 @@ void GS::processGIFPacket(const uint8_t*, uint32_t) {
     throw std::runtime_error("Unexpected unframed GS output");
 }
 void PS2Memory::submitGifPacket(GifPathId path, const uint8_t* bytes, uint32_t count, bool drain, bool direct) {
+#ifdef TF_REPLAY_REFLECTION_LIVE
+    reflectionLivePacket(uint32_t(path), bytes, count, drain, direct);
+#endif
 #ifdef TF_REPLAY_GRASS_TAIL
     if (grassTailCapture(uint32_t(path), bytes, count, drain, direct)) return;
 #endif
@@ -133,6 +150,9 @@ void PS2Memory::submitGifPacket(GifPathId path, const uint8_t* bytes, uint32_t c
 
 int main(int argc, char** argv) {
     try {
+#ifdef TF_REPLAY_REFLECTION_LIVE
+        reflectionLiveInitialize();
+#endif
 #ifdef TF_REPLAY_GRASS_TAIL
         grassReplayInitialize();
 #endif
@@ -178,7 +198,7 @@ int main(int argc, char** argv) {
             if (!name.ends_with("-pre.bin")) throw std::runtime_error("Expected a -pre.bin fixture");
             const std::string stem = name.substr(0, name.size()-7);
             Dump before(name), expected(stem+"post.bin");
-            if ((restoreMask || dual) && total) {
+            if ((restoreMask || dual || reflectionCarry) && total) {
                 // Require consecutive tickets. The caller must also verify an
                 // unfiltered capture: filenames cannot reveal omitted programs.
                 const auto currentPath = fs::path(name);
@@ -212,8 +232,11 @@ int main(int argc, char** argv) {
             if (!ps2Vu1StaticPrepare(resident.data(), resident.size(), &memory, memory.gen1, entry))
                 throw std::runtime_error("Accelerated package does not admit fixture: " + name);
             auto actual = before;
-            if (restoreMask || dual) actual.state = carry;
-            if (dual) actual.data = carriedData;
+            if (restoreMask || dual || reflectionCarry) actual.state = carry;
+            if (dual || reflectionCarry) actual.data = carriedData;
+#ifdef TF_REPLAY_REFLECTION_LIVE
+            if (total) reflectionLiveExternalWrites(actual.data.data(), before.data.data(), previousData.data());
+#endif
             const auto callInput = actual.state;
             const auto dataInput = actual.data;
             packets.clear();
@@ -222,11 +245,17 @@ int main(int argc, char** argv) {
             if (!QueryThreadCycleTime(GetCurrentThread(), &start)) throw std::runtime_error("Cannot read thread cycles");
             std::bitset<1024> geometry;
             const bool native = dual && dual->replace(name, actual, memory, geometry);
+#ifdef TF_REPLAY_REFLECTION_LIVE
+            reflectionLiveBegin(entry, continuing, before.header[2], memory.gen1, &memory, resident.data(), actual.data.data());
+#endif
 #ifdef TF_REPLAY_GRASS_TAIL
             grassReplayBegin(&memory, resident.data(), actual.data.data(), memory.gen1);
 #endif
             const bool pending = !native && ps2Vu1StaticRun(0, &actual.state, continuing, resident.data(), actual.data.data(),
                 gs, &memory, entry, before.header[1], before.header[2], 40000000, transfer.data());
+#ifdef TF_REPLAY_REFLECTION_LIVE
+            reflectionLiveResolve(pending, ps2Vu1StaticFallbackCalls() != fallback, list.peek() == EOF);
+#endif
 #ifdef TF_REPLAY_GRASS_TAIL
             grassReplayResolve(pending, ps2Vu1StaticFallbackCalls() != fallback);
 #endif
@@ -234,6 +263,9 @@ int main(int argc, char** argv) {
             if (pending || ps2Vu1StaticFallbackCalls() != fallback)
                 throw std::runtime_error("Replay transferred pending work or fell back: " + name);
             bool dataOk = actual.data == expected.data;
+#ifdef TF_REPLAY_REFLECTION_LIVE
+            dataOk = reflectionLiveMatches(actual.data.data(), expected.data.data());
+#endif
             if (dual) {
                 dataOk = true;
                 for (size_t offset = 0; offset < 16384; offset += 4) {
@@ -266,7 +298,7 @@ int main(int argc, char** argv) {
                         }
                     std::fprintf(stderr, " (total %u)\n", count);
                 }
-                if (restoreMask || dual) break; // First affected successor is the actionable boundary.
+                if (restoreMask || dual || reflectionCarry) break; // First affected successor is the actionable boundary.
             }
             if (restore) {
                 ++restored;
@@ -278,6 +310,9 @@ int main(int argc, char** argv) {
             if ((total & 255) == 0) { std::printf("REPLAY progress fixtures=%zu failures=%zu\n", total, failures); std::fflush(stdout); }
         }
         if (!total) throw std::runtime_error("Empty fixture list");
+#ifdef TF_REPLAY_REFLECTION_LIVE
+        if (!failures) reflectionLiveFinish();
+#endif
         if (dual && !failures) dual->finish();
 #ifdef TF_REPLAY_GRASS_TAIL
         if (!failures) grassReplayFinish();

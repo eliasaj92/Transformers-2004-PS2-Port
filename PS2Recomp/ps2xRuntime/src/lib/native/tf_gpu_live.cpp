@@ -5,6 +5,7 @@
 #include "tf_dual_state.h"
 #include "tf_dual_memory.h"
 #include "runtime/gs/gs_native_grass_vu.h"
+#include "runtime/gs/gs_native_reflection_vu.h"
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -125,16 +126,23 @@ void install(uint32_t crc)
     }
     std::fprintf(stderr, "[gpu-dual] ordered live renderer enabled; CPU geometry bypass=%u\n", unsigned(bypassEnabled));
     tf_gpu_grass::install(crc, bypassEnabled);
+    tf_gpu_reflection::install(crc, bypassEnabled);
 }
 
 void readMemory(const void *owner, uint8_t *data, unsigned first, unsigned count, ReadReason reason)
 {
+    tf_gpu_reflection::readMemory(owner, data, first, count);
     if (bypassEnabled && memoryState.owner == owner && memoryState.data == data && memoryState.deferred)
     {
         const auto before = memoryState.deferred->materializedVertices;
         memoryState.deferred->read(data, first, count);
         readVertices[reason] += memoryState.deferred->materializedVertices - before;
     }
+}
+void overwriteCoordinates(const void *owner, uint8_t *data, unsigned first, unsigned count)
+{
+    if (bypassEnabled && memoryState.owner == owner && memoryState.data == data && memoryState.deferred)
+        memoryState.deferred->overwrite(first, count);
 }
 bool prepareSetup(uint32_t entry, bool continuing, const void *owner, const uint8_t *code, uint8_t *data)
 {
@@ -148,20 +156,26 @@ bool prepareSetup(uint32_t entry, bool continuing, const void *owner, const uint
 void unpackMemory(const void *owner, uint8_t *data, unsigned address, unsigned count, unsigned cl, unsigned wl,
                   bool overwritesXYZ)
 {
-    if (!bypassEnabled || memoryState.owner != owner || memoryState.data != data || !memoryState.deferred ||
-        !memoryState.deferred->dirtyQwords)
+    const bool dual = bypassEnabled && memoryState.owner == owner && memoryState.data == data &&
+        memoryState.deferred && memoryState.deferred->dirtyQwords;
+    const bool reflection = tf_gpu_reflection::hasDeferred(owner, data);
+    if (!dual && !reflection)
         return;
     for (unsigned i = 0; i < count; ++i)
     {
         const unsigned qword = (address + (cl >= wl ? (i / wl) * cl + i % wl : i)) & 1023;
         if (overwritesXYZ)
-            memoryState.deferred->overwrite(qword, 1);
+        {
+            if (dual) memoryState.deferred->overwrite(qword, 1);
+            if (reflection) tf_gpu_reflection::overwriteXYZ(owner, data, qword, 1);
+        }
         else
             readMemory(owner, data, qword, 1, UnpackRead);
     }
 }
 void resetMemory(const void *owner)
 {
+    tf_gpu_reflection::resetMemory(owner);
     if (memoryState.owner == owner)
         memoryState = {};
 }
@@ -258,6 +272,9 @@ bool begin(uint32_t pc, bool continuing, uint32_t itop, uint64_t generation, con
 }
 gsnative::DualPacketPtr packet(uint32_t path, const uint8_t *data, uint32_t bytes)
 {
+    if (tf_gpu_reflection::enabled)
+        if (auto reflection = tf_gpu_reflection::packet(path, data, bytes))
+            return reflection;
     if (tf_gpu_grass::enabled)
         if (auto grass = tf_gpu_grass::packet(path, data, bytes))
             return grass;
@@ -338,6 +355,9 @@ bool tryTail(uint8_t *code, uint8_t *data, VU1State &state, GS &gs, PS2Memory *m
     const unsigned count = pending.packet->vertices;
     if (count <= 4 || count == 17 || count == 18)
         return false;
+    // Dual projection retains fourth lanes. Resolve those from the preceding
+    // reflection source before taking the scratch snapshot; no geometry math.
+    tf_gpu_reflection::readW(memory, data, itop - 3, 6 * count + 8);
     static thread_local tf_native::DualTail tail;
     if (!tf_native::prepareUnclippedDualTail(data, state, itop, word(data + 84), entry, tail))
         return false;
@@ -409,6 +429,7 @@ bool tryTail(uint8_t *code, uint8_t *data, VU1State &state, GS &gs, PS2Memory *m
     if (memoryState.owner != memory || memoryState.data != data)
         throw std::runtime_error("GPU geometry VU-memory owner changed without reset");
     std::memcpy(data, tail.preserved.data(), 16384);
+    tf_gpu_reflection::overwriteXYZ(memory, data, itop - 3, 6 * count + 8);
     memoryState.deferred->record(data, itop, tail.tailVertices, companion);
     state = after;
     ++bypassed;
@@ -427,6 +448,7 @@ void end(bool transferred, bool fellBack)
 }
 void finish()
 {
+    tf_gpu_reflection::finish();
     tf_gpu_grass::finish();
     if (enabled)
         std::fprintf(stderr,

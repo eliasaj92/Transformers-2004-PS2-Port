@@ -42,8 +42,10 @@ set(DUAL_STATE "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native/tf_dual_state.
 option(TF_REPLAY_DUAL_TAIL "Check the short CPU tail and deferred memory against private captures" OFF)
 option(TF_REPLAY_GRASS_TAIL "Check grass emission state and actual GPU outputs against private captures" OFF)
 option(TF_REPLAY_REFLECTION_CAPTURE "Capture first-pass reflection inputs and outputs during accelerated replay" OFF)
+option(TF_REPLAY_REFLECTION_LIVE "Check the shared live reflection hooks against enhanced captures" OFF)
 if((TF_REPLAY_DUAL_TAIL AND TF_REPLAY_GRASS_TAIL) OR
-   (TF_REPLAY_REFLECTION_CAPTURE AND (TF_REPLAY_DUAL_TAIL OR TF_REPLAY_GRASS_TAIL)))
+   (TF_REPLAY_REFLECTION_CAPTURE AND (TF_REPLAY_DUAL_TAIL OR TF_REPLAY_GRASS_TAIL)) OR
+   (TF_REPLAY_REFLECTION_LIVE AND (TF_REPLAY_DUAL_TAIL OR TF_REPLAY_GRASS_TAIL OR TF_REPLAY_REFLECTION_CAPTURE)))
     message(FATAL_ERROR "Use separate private builds for geometry diagnostics")
 endif()
 if(TF_REPLAY_DUAL_TAIL)
@@ -81,13 +83,30 @@ elseif(TF_REPLAY_GRASS_TAIL)
     target_compile_definitions(${REPLAY_TARGET} PRIVATE TF_REPLAY_GRASS_TAIL=1
         "TF_GRASS_LOOP=${GRASS_LOOP}" "TF_GRASS_EPILOGUE=${GRASS_EPILOGUE}")
     target_include_directories(${REPLAY_TARGET} PRIVATE "${PACKAGE_DIR}/generated")
-elseif(TF_REPLAY_REFLECTION_CAPTURE)
+elseif(TF_REPLAY_REFLECTION_CAPTURE OR TF_REPLAY_REFLECTION_LIVE)
+    set(REFLECTION_MATH "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_reflection_math.cpp")
+    set(DUAL_MATH "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_dual_math.cpp")
+    add_executable(tf_reflection_memory ../native_reflection_memory.cpp "${REFLECTION_MATH}" "${DUAL_MATH}"
+        "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native/tf_reflection_memory.cpp")
+    target_compile_features(tf_reflection_memory PRIVATE cxx_std_20)
+    target_compile_options(tf_reflection_memory PRIVATE /O2 /Ob2 /fp:strict /arch:AVX2)
+    target_include_directories(tf_reflection_memory PRIVATE "${REPO_ROOT}/PS2Recomp/ps2xRuntime/include"
+        "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native")
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS prepare_reflection_chain.py)
-    execute_process(COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/prepare_reflection_chain.py"
+    if(TF_REPLAY_REFLECTION_LIVE)
+        set(REFLECTION_SCRIPT "${REPO_ROOT}/tools/vu1/prepare_reflection_hooks.py")
+    else()
+        set(REFLECTION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/prepare_reflection_chain.py")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${REFLECTION_SCRIPT}")
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -B "${REFLECTION_SCRIPT}"
         --package "${PACKAGE_DIR}" --output "${CMAKE_BINARY_DIR}/reflection"
         COMMAND_ERROR_IS_FATAL ANY)
-    include("${CMAKE_BINARY_DIR}/reflection/reflection_chain.cmake")
+    if(TF_REPLAY_REFLECTION_LIVE)
+        include("${CMAKE_BINARY_DIR}/reflection/reflection_chains.cmake")
+    else()
+        include("${CMAKE_BINARY_DIR}/reflection/reflection_chain.cmake")
+    endif()
     foreach(CHAIN IN LISTS REFLECTION_ORIGINAL_CHAINS)
         list(FIND PS2X_VU1_STATIC_SOURCES "${CHAIN}" REFLECTION_CHAIN_INDEX)
         if(REFLECTION_CHAIN_INDEX LESS 0)
@@ -95,11 +114,22 @@ elseif(TF_REPLAY_REFLECTION_CAPTURE)
         endif()
         list(REMOVE_ITEM PS2X_VU1_STATIC_SOURCES "${CHAIN}")
     endforeach()
-    set(REPLAY_TARGET tf_reflection_capture)
-    add_executable(${REPLAY_TARGET} replay.cpp reflection_capture.cpp "${DUAL_STATE}"
-        "${CMAKE_BINARY_DIR}/reflection/reflection_chain.cpp"
-        "${CMAKE_BINARY_DIR}/reflection/reflection_projection_chain.cpp" ${PS2X_VU1_STATIC_SOURCES})
-    target_compile_definitions(${REPLAY_TARGET} PRIVATE TF_REPLAY_REFLECTION_CAPTURE=1)
+    if(TF_REPLAY_REFLECTION_LIVE)
+        set(REPLAY_TARGET tf_reflection_live)
+        add_executable(${REPLAY_TARGET} replay.cpp reflection_live.cpp "${DUAL_STATE}" "${DUAL_MATH}" "${REFLECTION_MATH}"
+            "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native/tf_gpu_reflection.cpp"
+            "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/native/tf_reflection_memory.cpp"
+            "${CMAKE_BINARY_DIR}/reflection/reflection_lighting.cpp"
+            "${CMAKE_BINARY_DIR}/reflection/reflection_projection.cpp" ${PS2X_VU1_STATIC_SOURCES})
+        set_source_files_properties("${DUAL_MATH}" "${REFLECTION_MATH}" PROPERTIES COMPILE_OPTIONS "/fp:strict")
+        target_compile_definitions(${REPLAY_TARGET} PRIVATE TF_REPLAY_REFLECTION_LIVE=1 PS2X_VU1_GPU_REFLECTION=1)
+    else()
+        set(REPLAY_TARGET tf_reflection_capture)
+        add_executable(${REPLAY_TARGET} replay.cpp reflection_capture.cpp "${DUAL_STATE}"
+            "${CMAKE_BINARY_DIR}/reflection/reflection_chain.cpp"
+            "${CMAKE_BINARY_DIR}/reflection/reflection_projection_chain.cpp" ${PS2X_VU1_STATIC_SOURCES})
+        target_compile_definitions(${REPLAY_TARGET} PRIVATE TF_REPLAY_REFLECTION_CAPTURE=1)
+    endif()
     target_include_directories(${REPLAY_TARGET} PRIVATE "${PACKAGE_DIR}/generated")
 else()
     set(REPLAY_TARGET tf_vu1_replay)

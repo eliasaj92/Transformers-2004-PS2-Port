@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -118,6 +119,29 @@ void state(unsigned side, unsigned mode)
     }
     transfer(p);
 }
+void preparePacket(const gsnative::DualPacket &source, const uint8_t *captured, unsigned mode, bool poison,
+                   uint8_t *packet)
+{
+    const unsigned n = source.vertices, bytes = 4 * (4 + 3 * n) * 16;
+    require(bytes <= MaxBytes && source.version == 2, "Invalid reflection source packet");
+    std::memcpy(packet, captured, bytes);
+    for (unsigned section = 0; section < 4; ++section)
+    {
+        auto *f = packet + section * (4 + n * 3) * 16;
+        uint64_t tag = wide(f + 48);
+        GIFRegPRIM prim{};
+        prim.U64 = tag >> 47 & 0x7ff;
+        prim.IIP = prim.TME = 1;
+        prim.FST = prim.AA1 = 0;
+        prim.ABE = mode == 1 || mode == 2;
+        tag = (tag & ~(0x7ffull << 47)) | (prim.U64 << 47);
+        std::memcpy(f + 48, &tag, 8);
+        if (poison)
+            for (unsigned v = 0; v + 3 < n; ++v)
+                std::memset(f + 64 + v * 48, 0xcd, 48);
+    }
+    require(tf_gpu::reflectionPacketFraming(source, packet, bytes), "Unexpected reflection framing");
+}
 std::vector<uint8_t> image(GSDevice12 *device, unsigned side, uint32_t &width, uint32_t &height)
 {
     const unsigned base = side * 112 * 32;
@@ -152,7 +176,9 @@ extern "C" TF_HWGS_API int tf_gs_reflection_frontend_probe(const gsnative::DualP
             require(g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::D3D12, "Reflection frontend needs D3D12");
             auto *renderer = GSRendererHW::GetInstance();
             auto *device = GSDevice12::GetInstance();
-            tf_gpu::DualGeometry pool(*device);
+            // Each group contains up to 192 strips. A private 128 KiB pair per
+            // strip exhausts this budget; disjoint slices must share pages.
+            tf_gpu::DualGeometry pool(*device, 4ull * 1024 * 1024);
             tf_gpu::ReflectionLiveStats counters;
             std::vector<GSVertex> latches(count);
             // Several independent render pairs limit occlusion between captured batches.
@@ -181,33 +207,37 @@ extern "C" TF_HWGS_API int tf_gs_reflection_frontend_probe(const gsnative::DualP
                 {
                     clearTarget(side);
                     state(side, mode);
+                    const char *option = std::getenv("PS2X_TF_GPU_REFLECTION_GROUPS");
+                    const unsigned groupSize =
+                        option && !std::strcmp(option, "64") ? tf_gpu::MaxReflectionComputeGroup : 8;
+                    alignas(16) std::array<std::array<uint8_t, MaxBytes>, tf_gpu::MaxReflectionComputeGroup> packets;
+                    std::array<tf_gpu::ReflectionPacketView, tf_gpu::MaxReflectionComputeGroup> views;
+                    std::array<tf_gpu::PreparedReflection, tf_gpu::MaxReflectionComputeGroup> prepared;
+                    bool hasPrepared = false;
                     for (unsigned i = begin; i < std::min(begin + 192, count); ++i)
                     {
+                        const unsigned slot = (i - begin) % groupSize;
+                        if (!slot)
+                        {
+                            const unsigned groupCount = std::min(groupSize, std::min(begin + 192, count) - i);
+                            for (unsigned j = 0; j < groupCount; ++j)
+                            {
+                                preparePacket(sources[i + j], captured + (i + j) * MaxBytes, mode, !side,
+                                              packets[j].data());
+                                views[j] = {&sources[i + j], packets[j].data(),
+                                            4 * (4 + 3 * sources[i + j].vertices) * 16};
+                            }
+                            hasPrepared = !side && mode != 3 &&
+                                          tf_gpu::prepareReflectionGroup(pool, views.data(), groupCount,
+                                                                         prepared.data(), counters);
+                        }
                         const auto &source = sources[i];
                         const unsigned n = source.vertices, bytes = 4 * (4 + 3 * n) * 16;
-                        require(bytes <= MaxBytes && source.version == 2, "Invalid reflection source packet");
-                        alignas(16) std::array<uint8_t, MaxBytes> packet;
-                        std::memcpy(packet.data(), captured + i * MaxBytes, bytes);
-                        for (unsigned section = 0; section < 4; ++section)
-                        {
-                            auto *f = packet.data() + section * (4 + n * 3) * 16;
-                            uint64_t tag = wide(f + 48);
-                            GIFRegPRIM prim{};
-                            prim.U64 = tag >> 47 & 0x7ff;
-                            prim.IIP = prim.TME = 1;
-                            prim.FST = prim.AA1 = 0;
-                            prim.ABE = mode == 1 || mode == 2;
-                            tag = (tag & ~(0x7ffull << 47)) | (prim.U64 << 47);
-                            std::memcpy(f + 48, &tag, 8);
-                            if (!side)
-                                for (unsigned v = 0; v + 3 < n; ++v)
-                                    std::memset(f + 64 + v * 48, 0xcd, 48);
-                        }
-                        require(tf_gpu::reflectionPacketFraming(source, packet.data(), bytes),
-                                "Unexpected reflection framing");
+                        auto &packet = packets[slot];
                         if (!side)
                         {
-                            if (!tf_gpu::drawReflectionPacket(pool, source, packet.data(), bytes, counters, mode == 3))
+                            if (!tf_gpu::drawReflectionPacket(pool, source, packet.data(), bytes, counters, mode == 3,
+                                                              hasPrepared ? &prepared[slot] : nullptr))
                             {
                                 gsnative::materializeReflectionPacket(source, packet.data(), bytes);
                                 kzgs::ExecuteGIFOnGSThread(1, packet.data(), bytes);
@@ -257,6 +287,13 @@ extern "C" TF_HWGS_API int tf_gs_reflection_frontend_probe(const gsnative::DualP
             stats[3] = counters.declinedSections;
             stats[10] = pool.stats().reflectionDispatches;
             stats[11] = pool.stats().reflectionVertices;
+            require(pool.stats().sourceUploadBytes + pool.stats().constantUploadBytes ==
+                        pool.stats().reflectionPackets * (sizeof(gsnative::DualPacket) + 144),
+                    "Live reflection expanded constants instead of uploading one compact packet");
+            require(!counters.outputDeclined, "Reflection strips exhausted the bounded shared-page pool");
+            if (mode != 3 && count > 32)
+                require(counters.preparedGroups > 0 && stats[10] < count / 2,
+                        "Reflection compute was not batched across independent strips");
             require(stats[4] == 0, "Reflection frontend pixels differ from accelerated GIF");
             require(stats[7] > 1000 && stats[6] == count,
                     "Reflection frontend did not exercise visible batches/latches");

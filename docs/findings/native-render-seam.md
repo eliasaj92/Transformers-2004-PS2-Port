@@ -1,6 +1,6 @@
 # Transformers native render seam investigation
 
-Status: live GPU dual-transform drawing and an experimental guarded CPU-tail bypass, November 2026. The bypass has captured-state, geometry and deferred-memory checks; whole-game reliability and distinct rendered 60 fps remain unverified. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Earlier sections retain the evidence and limitations of each preceding stage.
+Status: live GPU mesh/grass drawing and experimental reflection lighting/projection offload, November 2026. The guarded CPU-tail bypasses have captured-state, geometry and deferred-memory checks; whole-game reliability and sustained rendered 60 fps remain unverified. Direct GPU presentation and hardware resolution scaling are separate, already implemented features. Earlier sections retain the evidence and limitations of each preceding stage.
 
 ## Why this boundary
 
@@ -551,12 +551,12 @@ pipeline tail while allowing 11,193 earlier vertices to use actual GPU results
 in the offline experiment. All 5,000 enclosing calls still match state, memory,
 cycles and ordered GIF output.
 
-The remaining integration must carry original object-space reflection inputs
+At this kernel milestone, the remaining integration had to carry original object-space reflection inputs
 through the subsequent projection stage and into resident native draws. Merely
 dispatching this kernel and reading its result back would add a new stall.
 Source-derived bounds, deferred guest-memory ownership and fallback therefore
-remain gates for live use. The kernel and tail are currently diagnostics, with
-no new gameplay FPS claim. See [the qualification and commands](../../deps/hwgs/GPU_GEOMETRY.md#reflection-lighting-kernel-and-retained-cpu-tail).
+were gates for live use. The later live integration is described below. This
+kernel qualification alone makes no gameplay FPS claim. See [the qualification and commands](../../deps/hwgs/GPU_GEOMETRY.md#reflection-lighting-kernel-and-retained-cpu-tail).
 
 ## Paired reflection projection and resident output
 
@@ -574,10 +574,10 @@ two-pass rendering, match all 26,542,080 compared pixels across 11,312 GPU draws
 The output-pool reuse check changes the projection and verifies final draw
 fences before reuse.
 
-This is a resident drawing diagnostic and an offline VU-tail proof. The live
-adapter still needs an owned four-section companion, source-derived GS bounds,
-deferred-memory resolution and CPU fallback before performance can be measured
-in the enhanced level. The diagnostic viewport uses captured bounds and must
+This milestone establishes resident drawing and the offline VU-tail proof.
+The live adapter described below adds the owned four-section companion,
+source-derived GS bounds, deferred-memory resolution and CPU fallback.
+The diagnostic viewport uses captured bounds and must
 not become the live metadata path. See [the paired contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-projection-and-resident-drawing).
 
 ## Reflection frontend and GPU primitive culling
@@ -594,6 +594,48 @@ latches without differences. Each normal mode uses 695 GPU dispatches and
 2,780 native draws; eleven packets retain ordinary fallback when the resolved
 tail cannot prove native eligibility. Deliberate fallback also matches.
 
-Live VU ownership/hooks are still pending. No new gameplay rate is claimed;
-the latest enhanced Amazon measurement remains 57.49 physics updates/s and
-56.50 direct handoffs/s. See [the implementation contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-source-bounds-gs-frontend-and-gpu-culling).
+This frontend milestone precedes the live VU integration and makes no gameplay
+rate claim. See [the implementation contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-source-bounds-gs-frontend-and-gpu-culling).
+
+## Live reflection offload and dispatch batching
+
+The opt-in accelerated runtime now carries reflection source geometry from
+lighting through projection into resident GPU draws. It retains the necessary
+CPU tails and restores omitted guest memory only when subsequent code reads it.
+All 5,000 captured calls preserve complete VU state, cycles, memory and ordered
+GIF, including 695 calls with unresolved reflection memory carried across later
+writes. The original private package stays immutable; authenticated wrapper
+sources are generated outside the checkout.
+
+The first live attempt exhausted the output pool. Sharing disjoint page slices
+fixed that problem, but the completed enhanced Amazon run still regressed to
+28.42 physics updates/s and 28.43 direct handoffs/s. The saved enhanced mesh/grass
+run measured 57.49 and 56.50. No original game build was run. All deferred maps
+drained and direct presentation still transferred zero full-frame CPU bytes.
+
+The renderer profile identifies bounds arithmetic, many small dispatches and
+rendering waits as the next work. Consecutive reflection packets now share one
+compute dispatch while all four sections draw in their original order. Packed
+interval arithmetic and shared position bounds reduce duplicate CPU work.
+The captured frontend workload uses 89 dispatches instead of 695 and matches
+every compared image pixel and GS latch. The subsequent enhanced Amazon run
+reaches 53.24 physics updates/s and 53.26 direct handoffs/s, with no output-pool
+declines or unresolved guest memory. This recovers much of the initial live
+regression, but is still below the saved enhanced result. An exact-input
+lighting-bounds cache returned only 198 hits in 1.12 million queries and no
+measurable gain; it was removed. Raising the bounded compute limit to 64 reaches
+54.09 updates/s and 54.08 handoffs/s. A separate 32-frame capture matches every
+pixel of the saved enhanced mesh/grass images at 2048x1788. The new profile
+identifies remaining CPU geometry helpers and renderer metadata work.
+
+The next iteration inlines the small helpers within their strict-FP translation
+units and sends each reflection strip's compact source packet directly to the
+GPU. This avoids repeating its lighting constants and matrices for every vertex,
+reducing the captured workload's upload payload by 83.68%. Both GPUs pass the
+frontend image/latch checks. The enhanced level then reaches 56.54 updates/s
+and 56.39 direct handoffs/s, with seven skipped host handoffs. All deferred maps
+drain and no output allocation declines occur. This is another improvement to
+the reflection iteration, but remains below the saved enhanced result and does
+not establish true 60 fps. Its separate 32-frame gameplay capture again matches
+all 117,178,368 pixels of the saved enhanced images, without duplicated images.
+The reflection path remains opt-in. See [the live contract and diagnostics](../../deps/hwgs/GPU_GEOMETRY.md#live-reflection-lighting-and-projection-hooks).

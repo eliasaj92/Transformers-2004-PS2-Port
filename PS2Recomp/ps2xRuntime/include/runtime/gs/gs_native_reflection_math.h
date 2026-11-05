@@ -21,6 +21,8 @@ struct ReflectionRawVertex
 // Arithmetic requires DualFloatScope. These are source-only fallback helpers;
 // ordinary native rendering gets the actual geometry from the GPU kernel.
 ReflectionLitVertex reflectionLitVertex(const DualPacket &packet, unsigned vertex);
+uint32_t reflectionDrawAlpha(const DualPacket &packet);
+uint32_t reflectionRestartFlags(const DualPacket &packet, unsigned vertex);
 ReflectionRawVertex reflectionProjectVertex(const DualPacket &packet, const ReflectionLitVertex &lit, unsigned vertex,
                                             unsigned section);
 bool reflectionSourceValid(const DualPacket &packet);

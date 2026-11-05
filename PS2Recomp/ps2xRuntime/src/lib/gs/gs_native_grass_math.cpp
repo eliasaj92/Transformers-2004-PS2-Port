@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "runtime/gs/gs_native_grass_math.h"
+#include "gs_native_math_inline.h"
 #include "runtime/gs/gs_native_reflection_math.h"
 #include <bit>
 #include <cmath>
@@ -11,7 +12,7 @@ namespace gsnative
 namespace
 {
 using Vector = std::array<float, 4>;
-float normal(float value)
+GS_NATIVE_FORCEINLINE float normal(float value)
 {
     uint32_t bits = std::bit_cast<uint32_t>(value);
     const uint32_t exponent = bits & 0x7f800000u;
@@ -21,7 +22,7 @@ float normal(float value)
         bits = (bits & 0x80000000u) | 0x7f7fffffu;
     return std::bit_cast<float>(bits);
 }
-Vector load(const uint8_t *input, unsigned slot)
+GS_NATIVE_FORCEINLINE Vector load(const uint8_t *input, unsigned slot)
 {
     Vector result;
     std::memcpy(result.data(), input + slot * 16, 16);
@@ -29,21 +30,21 @@ Vector load(const uint8_t *input, unsigned slot)
         lane = normal(lane);
     return result;
 }
-Vector add(const Vector &a, const Vector &b)
+GS_NATIVE_FORCEINLINE Vector add(const Vector &a, const Vector &b)
 {
     Vector result;
     for (unsigned lane = 0; lane < 4; ++lane)
         result[lane] = normal(a[lane] + b[lane]);
     return result;
 }
-Vector scale(const Vector &a, float b)
+GS_NATIVE_FORCEINLINE Vector scale(const Vector &a, float b)
 {
     Vector result;
     for (unsigned lane = 0; lane < 4; ++lane)
         result[lane] = normal(a[lane] * b);
     return result;
 }
-Vector interpolate(const uint8_t *input, unsigned first, const Vector &weights, bool second)
+GS_NATIVE_FORCEINLINE Vector interpolate(const uint8_t *input, unsigned first, const Vector &weights, bool second)
 {
     const Vector edgeA = load(input, first + 1), edgeB = load(input, first + 2);
     auto result = add(load(input, first), scale(edgeA, weights[0]));
@@ -51,7 +52,7 @@ Vector interpolate(const uint8_t *input, unsigned first, const Vector &weights, 
         result = add(result, scale(edgeA, weights[2]));
     return add(result, scale(edgeB, weights[second ? 3 : 1]));
 }
-uint32_t clip(const uint8_t *input, const Vector &position)
+GS_NATIVE_FORCEINLINE uint32_t clip(const uint8_t *input, const Vector &position)
 {
     auto product = load(input, 0);
     for (unsigned lane = 0; lane < 4; ++lane)
@@ -66,7 +67,7 @@ uint32_t clip(const uint8_t *input, const Vector &position)
     }
     return flags;
 }
-uint32_t fixed4(float value)
+GS_NATIVE_FORCEINLINE uint32_t fixed4(float value)
 {
     value *= 16.0f;
     if (value >= 2147483648.0f)

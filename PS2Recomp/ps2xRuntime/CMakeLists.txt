@@ -407,6 +407,8 @@ add_library(ps2_runtime STATIC
     src/lib/native/tf_grass_oracle.cpp
     src/lib/native/tf_gpu_live.cpp
     src/lib/native/tf_gpu_grass.cpp
+    src/lib/native/tf_gpu_reflection.cpp
+    src/lib/native/tf_reflection_memory.cpp
     src/lib/native/tf_dual_state.cpp
     src/lib/native/tf_dual_memory.cpp
     src/lib/native/tf_grass_memory.cpp
@@ -816,6 +818,7 @@ endif()
 option(PS2X_WITH_VU1_STATIC "Compile an external experimental static VU1 package" OFF)
 option(PS2X_VU1_STATIC_AVX2 "Require AVX2 for the locally generated static VU1 package" OFF)
 option(PS2X_VU1_GPU_GRASS "Wrap qualified static grass emission for opt-in GPU offload" OFF)
+option(PS2X_VU1_GPU_REFLECTION "Wrap qualified reflection lighting/projection for opt-in GPU offload" OFF)
 if(PS2X_WITH_VU1_STATIC)
     if(NOT PS2X_WITH_VU1_AOT)
         target_sources(ps2_runtime PRIVATE src/lib/vu/ps2_vu1_aot_bridge.cpp src/lib/vu/ps2_vu1_aot_stubs.cpp)
@@ -840,6 +843,25 @@ if(PS2X_WITH_VU1_STATIC)
         endif()
         list(REMOVE_ITEM PS2X_VU1_STATIC_SOURCES "${GRASS_ORIGINAL_CHAIN}")
         list(APPEND PS2X_VU1_STATIC_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/grass-hooks/grass_chain.cpp")
+    endif()
+    if(PS2X_VU1_GPU_REFLECTION)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        set(REFLECTION_HOOK_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/vu1/prepare_reflection_hooks.py")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${REFLECTION_HOOK_SCRIPT}")
+        execute_process(COMMAND "${Python3_EXECUTABLE}" -B "${REFLECTION_HOOK_SCRIPT}"
+            --package "${PS2X_VU1_STATIC_DIR}" --output "${CMAKE_CURRENT_BINARY_DIR}/reflection-hooks"
+            COMMAND_ERROR_IS_FATAL ANY)
+        include("${CMAKE_CURRENT_BINARY_DIR}/reflection-hooks/reflection_chains.cmake")
+        foreach(CHAIN IN LISTS REFLECTION_ORIGINAL_CHAINS)
+            list(FIND PS2X_VU1_STATIC_SOURCES "${CHAIN}" REFLECTION_CHAIN_INDEX)
+            if(REFLECTION_CHAIN_INDEX LESS 0)
+                message(FATAL_ERROR "Qualified reflection chain is absent from the private package source list")
+            endif()
+            list(REMOVE_ITEM PS2X_VU1_STATIC_SOURCES "${CHAIN}")
+        endforeach()
+        list(APPEND PS2X_VU1_STATIC_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/reflection-hooks/reflection_lighting.cpp"
+            "${CMAKE_CURRENT_BINARY_DIR}/reflection-hooks/reflection_projection.cpp")
+        target_compile_definitions(ps2_runtime PRIVATE PS2X_VU1_GPU_REFLECTION=1)
     endif()
     set(PS2X_VU1_STATIC_JOBS 2 CACHE STRING "Parallel jobs for locally generated VU1 code")
     if(NOT PS2X_VU1_STATIC_JOBS MATCHES "^[1-9][0-9]*$" OR PS2X_VU1_STATIC_JOBS GREATER 16)

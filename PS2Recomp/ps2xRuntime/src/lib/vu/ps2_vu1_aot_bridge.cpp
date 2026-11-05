@@ -25,6 +25,7 @@
 #include "../native/tf_grass_oracle.h"
 #include "../native/tf_gpu_live.h"
 #include "runtime/gs/gs_native_grass_vu.h"
+#include "runtime/gs/gs_native_reflection_vu.h"
 
 // Implemented in the private, generated object library.
 int ps2Vu1AotIdentify(const uint8_t* code,uint32_t size,uint32_t entry);
@@ -407,11 +408,16 @@ bool VU1Interpreter::tryAot(uint8_t* code,uint32_t codeSize,uint8_t* data,uint32
         memory, code, data, m_state);
     const bool tail = nativeGeometry && staticReady &&
         tf_gpu_live::tryTail(code, data, m_state, gs, memory, pc, top, itop, budget, transfer.data());
-    if (!tail && !setup && resolve.active) tf_gpu_live::readMemory(memory, data, 0, 1024, tf_gpu_live::ProgramRead);
-    const bool gpuGrass = tf_gpu_grass::enabled && staticReady && !tail && !setup && memory->instantWorker();
+    const bool gpuReflection = tf_gpu_reflection::enabled && staticReady && !tail && !setup && memory->instantWorker() &&
+        tf_gpu_reflection::beginCall(pc, continuing, itop, generation, memory, code, data,
+            [](const void* owner, uint8_t* bytes, unsigned first, unsigned count) {
+                tf_gpu_live::readMemory(owner, bytes, first, count, tf_gpu_live::InputRead);
+            }, tf_gpu_live::overwriteCoordinates);
+    if (!tail && !setup && !gpuReflection && resolve.active) tf_gpu_live::readMemory(memory, data, 0, 1024, tf_gpu_live::ProgramRead);
+    const bool gpuGrass = tf_gpu_grass::enabled && staticReady && !tail && !setup && !gpuReflection && memory->instantWorker();
     if (gpuGrass) tf_gpu_grass::beginCall(memory, code, data, generation);
     const bool needsTransfer=!tail && (staticReady?ps2Vu1StaticRun:ps2Vu1AotRun)(image,&m_state,continuing,code,data,gs,memory,entry,top,itop,budget,transfer.data());
-    if (tail || setup) resolve.active = false;
+    if (tail || setup || gpuReflection) resolve.active = false;
     bool probeFell=false;
     { // TEMP(transformers) qualification (release fix): the package counter moved during this call = mid-call fallback.
         static thread_local uint64_t lastFallback=0;
@@ -419,11 +425,12 @@ bool VU1Interpreter::tryAot(uint8_t* code,uint32_t codeSize,uint8_t* data,uint32
         if(fb!=lastFallback && fb!=UINT64_MAX){lastFallback=fb;++aotStats.midFallback;ps2_perfscope::noteVu1MidFallback();probeFell=true;}
     }
     if (gpuGrass) tf_gpu_grass::endCall(needsTransfer, probeFell);
+    if (gpuReflection) tf_gpu_reflection::endCall(needsTransfer, probeFell);
     if (grassOracle) tf_grass_oracle::end(needsTransfer, probeFell);
     if (setup && (needsTransfer || probeFell))
         throw std::runtime_error("Qualified VU setup changed accelerated control flow");
     if (nativeGeometry) tf_gpu_live::end(needsTransfer, probeFell);
-    if (tail && (seamTicket || probe.on)) tf_gpu_live::readMemory(memory, data);
+    if ((tail || gpuReflection) && (seamTicket || probe.on)) tf_gpu_live::readMemory(memory, data);
     if (seamTicket) ps2_native_seam_probe::vuEnd(seamTicket, code, data, m_state, needsTransfer, probeFell);
     if(probe.on)
     { // TEMP(transformers) qualification (release fix)

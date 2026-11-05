@@ -6,12 +6,19 @@
 #include <cmath>
 #include <cstring>
 #include <numeric>
+#include <limits>
+#include <xmmintrin.h>
 
 namespace tf_gpu
 {
 namespace
 {
-using Range = DualRange;
+// Every lighting interval endpoint is a binary32 result. Keeping it binary32
+// avoids repeated double/float conversions in the recursive source bounds.
+struct Range
+{
+    float low = 0, high = 0;
+};
 using Vector = std::array<Range, 3>;
 float load(const uint8_t *p)
 {
@@ -42,22 +49,30 @@ bool finite(Range a)
 // across the independently rounded multiply/add/sqrt/reciprocal operations.
 Range plus(Range a, Range b)
 {
-    volatile float low = float(a.low) + float(b.low), high = float(a.high) + float(b.high);
-    return {low, high};
+    const __m128 values =
+        _mm_add_ps(_mm_setr_ps(a.low, a.high, a.low, a.high), _mm_setr_ps(b.low, b.high, b.low, b.high));
+    return {_mm_cvtss_f32(values), _mm_cvtss_f32(_mm_shuffle_ps(values, values, _MM_SHUFFLE(1, 1, 1, 1)))};
 }
 Range times(Range a, Range b)
 {
-    volatile float aa = float(a.low) * float(b.low), ab = float(a.low) * float(b.high);
-    volatile float ba = float(a.high) * float(b.low), bb = float(a.high) * float(b.high);
-    const double v[] = {aa, ab, ba, bb};
-    return {*std::min_element(std::begin(v), std::end(v)), *std::max_element(std::begin(v), std::end(v))};
+    const __m128 products =
+        _mm_mul_ps(_mm_setr_ps(a.low, a.low, a.high, a.high), _mm_setr_ps(b.low, b.high, b.low, b.high));
+    // MINPS can hide a NaN depending on operand order. Decline that domain
+    // explicitly instead of turning an invalid interval into a finite bound.
+    if (_mm_movemask_ps(_mm_cmpunord_ps(products, products)))
+        return {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()};
+    const __m128 opposite = _mm_movehl_ps(products, products);
+    const __m128 low = _mm_min_ps(products, opposite), high = _mm_max_ps(products, opposite);
+    return {_mm_cvtss_f32(_mm_min_ss(low, _mm_shuffle_ps(low, low, _MM_SHUFFLE(1, 1, 1, 1)))),
+            _mm_cvtss_f32(_mm_max_ss(high, _mm_shuffle_ps(high, high, _MM_SHUFFLE(1, 1, 1, 1))))};
 }
 Range squared(Range a)
 {
     const float low = a.low <= 0 && a.high >= 0 ? 0.0f : float(std::min(std::abs(a.low), std::abs(a.high)));
     const float high = float(std::max(std::abs(a.low), std::abs(a.high)));
-    volatile float a2 = low * low, b2 = high * high;
-    return {a2, b2};
+    const __m128 values = _mm_setr_ps(low, high, low, high);
+    const __m128 squares = _mm_mul_ps(values, values);
+    return {_mm_cvtss_f32(squares), _mm_cvtss_f32(_mm_shuffle_ps(squares, squares, _MM_SHUFFLE(1, 1, 1, 1)))};
 }
 Range dot(const Vector &a, const Vector &b)
 {
@@ -68,9 +83,10 @@ bool normalize(const Vector &input, Vector &output)
     const auto length = plus(plus(squared(input[0]), squared(input[1])), squared(input[2]));
     if (!finite(length) || length.low <= 0)
         return false;
-    volatile float low = std::sqrt(float(length.low)), high = std::sqrt(float(length.high));
-    volatile float inverseLow = 1.0f / high, inverseHigh = 1.0f / low;
-    const Range inverse{inverseLow, inverseHigh};
+    const __m128 lengths = _mm_sqrt_ps(_mm_setr_ps(length.high, length.low, length.high, length.low));
+    const __m128 reciprocals = _mm_div_ps(_mm_set1_ps(1.0f), lengths);
+    const Range inverse{_mm_cvtss_f32(reciprocals),
+                        _mm_cvtss_f32(_mm_shuffle_ps(reciprocals, reciprocals, _MM_SHUFFLE(1, 1, 1, 1)))};
     if (!finite(inverse))
         return false;
     for (unsigned axis = 0; axis < 3; ++axis)
@@ -134,16 +150,16 @@ struct SourceBounds
         unsigned lane = 4;
         double spread = -1;
         for (unsigned axis = 0; axis < 3; ++axis)
-            if (normal[axis].high - normal[axis].low > spread)
+            if (double(normal[axis].high) - normal[axis].low > spread)
             {
-                spread = normal[axis].high - normal[axis].low;
+                spread = double(normal[axis].high) - normal[axis].low;
                 lane = 4 + axis;
             }
         if (spread == 0)
             for (unsigned axis = 0; axis < 3; ++axis)
-                if (position[axis].high - position[axis].low > spread)
+                if (double(position[axis].high) - position[axis].low > spread)
                 {
-                    spread = position[axis].high - position[axis].low;
+                    spread = double(position[axis].high) - position[axis].low;
                     lane = axis;
                 }
         const unsigned half = count / 2;
@@ -187,20 +203,25 @@ bool projectReflectionBounds(const gsnative::DualPacket &packet, std::array<Dual
         return false;
     DualAttributes reflection{}, texture{};
     reflection.valid = texture.valid = true;
-    reflection.stq = reflectionStq;
+    for (unsigned axis = 0; axis < 3; ++axis)
+        reflection.stq[axis] = {reflectionStq[axis].low, reflectionStq[axis].high};
     texture.stq[2] = {1, 1};
     for (unsigned vertex = 0; vertex < packet.vertices; ++vertex)
     {
         const auto *p = packet.inputs.data() + vertex * 32;
         for (unsigned axis = 0; axis < 3; ++axis)
         {
-            const auto value = scalar(load(p + axis * 4));
-            reflection.position[axis] = vertex ? unite(reflection.position[axis], value) : value;
+            const double value = load(p + axis * 4);
+            reflection.position[axis] = vertex ? DualRange{std::min(reflection.position[axis].low, value),
+                                                           std::max(reflection.position[axis].high, value)}
+                                               : DualRange{value, value};
         }
         for (unsigned axis = 0; axis < 2; ++axis)
         {
-            const auto value = scalar(load(p + 12 + axis * 16));
-            texture.stq[axis] = vertex ? unite(texture.stq[axis], value) : value;
+            const double value = load(p + 12 + axis * 16);
+            texture.stq[axis] =
+                vertex ? DualRange{std::min(texture.stq[axis].low, value), std::max(texture.stq[axis].high, value)}
+                       : DualRange{value, value};
         }
     }
     texture.position = reflection.position;
@@ -215,10 +236,14 @@ bool projectReflectionBounds(const gsnative::DualPacket &packet, std::array<Dual
         attributes->colorMin = {0, 0, 0, uint32_t(scaled)};
         attributes->colorMax = {255, 255, 255, uint32_t(scaled)};
     }
-    for (unsigned section = 0; section < 4; ++section)
-        if (!projectDualBounds(section < 2 ? reflection : texture, packet.constants.data() + (section % 2) * 64, 0,
-                               result[section]))
+    for (unsigned field = 0; field < 2; ++field)
+    {
+        std::array<DualDrawBounds, 2> pair;
+        if (!projectDualBoundsPair(reflection, texture, packet.constants.data() + field * 64, 0, pair))
             return false;
+        result[field] = pair[0];
+        result[field + 2] = pair[1];
+    }
     return true;
 }
 } // namespace tf_gpu

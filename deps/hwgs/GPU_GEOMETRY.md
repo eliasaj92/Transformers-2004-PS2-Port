@@ -1142,6 +1142,128 @@ strips to check the expanded vertex bytes. Only that diagnostic reads geometry;
 the production renderer downloads none. `--first` / `--limit` restrict a
 frontend diagnostic to a captured packet range and do not change admission.
 
+## Live reflection lighting and projection hooks
+
+`PS2X_VU1_GPU_REFLECTION=ON` wraps the authenticated private lighting and
+projection chains at build time. At runtime, `PS2X_TF_GPU_REFLECTION=1` requires
+the supported executable, accelerated static VU and the D3D12 geometry bypass
+(`PS2X_TF_GPU_DUAL=2`). It remains opt-in. The wrapper keeps the final lighting
+and projection iterations for architectural state and sends an immutable
+source companion with the four-section GIF packet. No geometry is downloaded
+from the GPU in this path.
+
+Deferred VU memory owns the omitted coordinates and colors until a real guest
+read needs them. Overwrites discard superseded results. Fourth lanes retained
+by partial writes are restored from the source UV, alpha and restart mask,
+without lighting or projection. Reflection and ordinary mesh output explicitly
+invalidate each other's overwritten ownership. Unknown programs resolve their
+inputs through the existing VU owner/fence protocol.
+
+The accelerated replay carries unresolved memory across 5,000 consecutive
+captured calls and 204,352 observed external qword writes. All state, cycles,
+memory and ordered packets match, with no pending work or interpreter fallback.
+It admits 695 reflection packets, omitting 11,070 lighting and 11,142 projection
+vertices. Omitted lighting is deliberately poisoned; every attached source
+matches the inputs used by the GPU qualification. Separate memory checks cover
+all 706 captured batches, partial writes, overlapping output and W preservation.
+
+```powershell
+cmake -S testing/vu1_replay -B $private/reflection-live-build -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release -DPACKAGE_DIR=$private/vu1-static-package `
+  -DTF_REPLAY_REFLECTION_LIVE=ON
+cmake --build $private/reflection-live-build --target tf_reflection_live tf_reflection_memory -j2
+python -B testing/test_gpu_reflection_live.py replay `
+  --prepared $private/reflection-paired --fixtures $private/all-fixtures.txt `
+  --runner $private/reflection-live-build/tf_reflection_live.exe `
+  --report $private/reflection-live.json
+python -B testing/test_gpu_reflection_live.py prepare `
+  --prepared $private/reflection-paired --fixtures $private/all-fixtures.txt `
+  --output $private/reflection-memory-fixtures
+python -B testing/test_gpu_reflection_live.py memory `
+  --prepared $private/reflection-memory-fixtures `
+  --runner $private/reflection-live-build/tf_reflection_memory.exe `
+  --report $private/reflection-memory.json
+```
+
+The first enhanced Amazon run exposed output-pool exhaustion: one 64 KiB
+upload/output pair per tiny reflection strip exhausted the bounded pool.
+Reflection strips now use disjoint 256-byte-aligned slices. A retained page,
+per-batch ownership and the final draw fence prevent reuse while any earlier
+slice is in flight. This introduces no forced submission, wait or readback.
+The frontend diagnostic uses a 4 MiB pool over 192-strip runs to exercise this
+case and requires zero output-capacity declines.
+
+With pool exhaustion fixed, the first complete live run measured **28.4236
+physics updates/s and 28.4340 direct GPU handoffs/s**, versus the saved enhanced
+mesh/grass run's 57.4907 and 56.4953. This is a regression, not a performance
+improvement. All 1,123,845 selected reflection packets reached their owned GS
+companions, all deferred maps drained, and full-frame CPU transfer remained
+zero. The run generated 1,119,334 reflection compute dispatches and 4,474,986
+draws. Its profile shows substantial renderer waits and costly source-bounds
+work. Reflection remains opt-in; the normal launcher is unchanged.
+
+`PS2X_TF_GPU_GROUPS=8` now batches consecutive reflection packets under a
+separate queue callback. One compute dispatch contains up to eight independent
+threadgroups. Each descriptor gives its strip's source count, raster offset
+and disjoint output offset. All packet and four-section draw ordering remains
+unchanged; no fields, textures or GS state are reordered. Source-only bounds
+are prepared once per packet. Lighting intervals use packed binary32 arithmetic
+in the existing RTZ/FTZ scope, with explicit rejection of NaN products; the
+reflection and base-texture passes share position-bound calculations while
+retaining independent texture bounds.
+
+An exact-input lighting-bounds cache experiment produced only 198 hits across
+1,124,825 queries in the enhanced level. It measured 53.1795 updates/s and
+53.1801 handoffs/s, providing no measurable improvement. The cache was removed;
+source and camera changes continue to calculate fresh conservative bounds.
+
+The grouped frontend compares all 706 captured strips at 4x resolution, with
+89 dispatches instead of the previous 695. All four image modes and final GS
+latches match on both the integrated AMD GPU and the RTX 3080 Laptop GPU.
+The forced ordinary path and the single-strip path remain available.
+
+The enhanced Amazon measurement with eight-packet batching and packed/shared
+bounds reaches **53.2370 physics updates/s and 53.2630 direct handoffs/s**.
+Reflection dispatches fall to 180,021, with 1,110,089 packets prepared in
+167,509 compute groups. There are no output-capacity declines, no pending
+deferred memory and no skipped published frames. This recovers much of the
+initial live regression but is still below the saved enhanced mesh/grass
+measurement. It is not a verified 60 fps result.
+
+`PS2X_TF_GPU_REFLECTION_GROUPS=64` raises the bounded compute group limit. The
+normal reflection limit stays eight. The wider enhanced Amazon run reaches
+**54.0879 physics updates/s and 54.0849 direct handoffs/s**, with 89,539 reflection
+dispatches. Intervening GS commands limit most live groups below 64. There are
+no output-capacity declines, pending deferred memory or skipped published
+frames. All 32 separately captured 2048x1788 camera-turn images match the saved
+enhanced mesh/grass images exactly: 117,178,368 compared pixels, zero differences.
+This remains below the saved 57.4907 updates/s result and is not verified 60 fps.
+
+The subsequent CPU profile exposed out-of-line scalar normalization and
+arithmetic helpers in the strict geometry translation units. These small
+helpers now force inlining locally, preserving operation order, rounding,
+denormal handling and non-finite clamping. The accelerated reflection replay,
+mesh-tail checks and grass/reflection memory checks still match their captures.
+
+Live reflection uploads now copy one 1072-byte owned source packet, plus its
+16-byte group descriptor and 128-byte raster state. Lighting constants and
+projection matrices are no longer duplicated in a 368-byte record for every
+vertex. The shader selects compact source addresses before loading and obtains
+per-vertex UVs and restart flags from the original source layout. Expanded
+records remain supported for diagnostics. Each dispatch copies all bytes into
+owned, fenced upload slices; it retains no caller pointers or CPU scratch.
+Across the 706 captured strips this reduces payload from 5,259,920 to 858,496
+bytes (83.68%). The frontend diagnostic also requires the compact byte count.
+The compact path passes all four frontend image/latch modes on both the AMD
+integrated GPU and RTX 3080 Laptop GPU. The subsequent enhanced Amazon run
+measures **56.5435 physics updates/s and 56.3949 direct handoffs/s**, with a
+17.0295 ms median and 21.885 ms p95 update interval. All deferred maps drain and
+the output pool has no capacity declines. Seven published frames are skipped
+by the host handoff in this run. This improves the reflection iteration but
+still falls below the saved enhanced mesh/grass result; reflection stays opt-in.
+Its separate 32-frame gameplay capture again matches all 117,178,368 pixels of
+the saved enhanced images, with no adjacent or two-field duplicate images.
+
 ## Bounded output-image cadence capture
 
 `PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;

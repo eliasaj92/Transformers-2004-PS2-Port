@@ -2,7 +2,10 @@
 #pragma once
 #include <array>
 #include <cstdint>
-namespace gsnative { struct DualPacket; }
+namespace gsnative
+{
+struct DualPacket;
+}
 
 namespace tf_gpu
 {
@@ -36,6 +39,10 @@ void mergeDualAttributes(DualAttributes &result, const DualAttributes &other);
 // non-finite/overflowing inputs, boxes crossing W=0, and nonpositive output Q.
 // This supplies bounds, not all GS draw state or permission to skip VU work.
 bool projectDualBounds(const DualAttributes &attributes, const void *matrix, uint32_t bias, DualDrawBounds &result);
+// Two materials over the same object-space position box and matrix share one
+// position/reciprocal calculation. Attribute intervals remain independent.
+bool projectDualBoundsPair(const DualAttributes &first, const DualAttributes &second, const void *matrix, uint32_t bias,
+                           std::array<DualDrawBounds, 2> &result);
 // Bounds from one 320-byte grass emitter input, without emitting its vertices.
 // Uses monotone binary32 interval operations in the VU rounding environment.
 bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &result);

@@ -189,11 +189,22 @@ void mergeDualAttributes(DualAttributes &result, const DualAttributes &other)
     }
 }
 
-bool projectDualBounds(const DualAttributes &a, const void *matrixWords, uint32_t biasWord, DualDrawBounds &result)
+static bool projectDualBoundsImpl(const DualAttributes &a, const void *matrixWords, uint32_t biasWord,
+                                  DualDrawBounds &result, const DualAttributes *other, DualDrawBounds *otherResult)
 {
     result = {};
     if (!a.valid || !matrixWords)
         return false;
+    if (other)
+    {
+        *otherResult = {};
+        if (!other->valid)
+            return false;
+        for (unsigned axis = 0; axis < 3; ++axis)
+            if (a.position[axis].low != other->position[axis].low ||
+                a.position[axis].high != other->position[axis].high)
+                return false;
+    }
     Environment environment;
     if (!environment.ready)
         return false;
@@ -253,33 +264,52 @@ bool projectDualBounds(const DualAttributes &a, const void *matrixWords, uint32_
         if (!packBounds(screen[axis], axis, result))
             return false;
     }
-    DualRange sourceStq[3];
-    double outputError[3];
-    for (unsigned axis = 0; axis < 3; ++axis)
-    {
-        const DualRange difference{a.stq[axis].low - bias, a.stq[axis].high - bias};
-        sourceStq[axis] = expanded(difference, roundingError(magnitude(difference)));
-        const auto product = multiply(sourceStq[axis], reciprocal);
-        if (!finite(sourceStq[axis]) || !finite(product))
+    const auto attributes = [&](const DualAttributes &source, DualDrawBounds &output) {
+        DualRange sourceStq[3];
+        double outputError[3];
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            const DualRange difference{source.stq[axis].low - bias, source.stq[axis].high - bias};
+            sourceStq[axis] = expanded(difference, roundingError(magnitude(difference)));
+            const auto product = multiply(sourceStq[axis], reciprocal);
+            if (!finite(sourceStq[axis]) || !finite(product))
+                return false;
+            outputError[axis] = roundingError(magnitude(product));
+            output.stq[axis] = expanded(product, outputError[axis]);
+            if (!finite(output.stq[axis]))
+                return false;
+        }
+        if (sourceStq[2].low <= 0 || output.stq[2].low <= 0)
             return false;
-        outputError[axis] = roundingError(magnitude(product));
-        result.stq[axis] = expanded(product, outputError[axis]);
-        if (!finite(result.stq[axis]))
+        for (unsigned axis = 0; axis < 2; ++axis)
+        {
+            const auto ratio = multiply(sourceStq[axis], {1 / sourceStq[2].high, 1 / sourceStq[2].low});
+            const double error = (outputError[axis] + magnitude(ratio) * outputError[2]) / output.stq[2].low;
+            output.texture[axis] = expanded(ratio, error + 4 * roundingError(magnitude(ratio) + error));
+            if (!finite(output.texture[axis]))
+                return false;
+        }
+        output.colorMin = source.colorMin;
+        output.colorMax = source.colorMax;
+        return true;
+    };
+    if (other)
+    {
+        *otherResult = result;
+        if (!attributes(*other, *otherResult))
             return false;
     }
-    if (sourceStq[2].low <= 0 || result.stq[2].low <= 0)
-        return false;
-    for (unsigned axis = 0; axis < 2; ++axis)
-    {
-        const auto ratio = multiply(sourceStq[axis], {1 / sourceStq[2].high, 1 / sourceStq[2].low});
-        const double error = (outputError[axis] + magnitude(ratio) * outputError[2]) / result.stq[2].low;
-        result.texture[axis] = expanded(ratio, error + 4 * roundingError(magnitude(ratio) + error));
-        if (!finite(result.texture[axis]))
-            return false;
-    }
-    result.colorMin = a.colorMin;
-    result.colorMax = a.colorMax;
-    return true;
+    return attributes(a, result);
+}
+bool projectDualBounds(const DualAttributes &a, const void *matrix, uint32_t bias, DualDrawBounds &result)
+{
+    return projectDualBoundsImpl(a, matrix, bias, result, nullptr, nullptr);
+}
+bool projectDualBoundsPair(const DualAttributes &first, const DualAttributes &second, const void *matrix, uint32_t bias,
+                           std::array<DualDrawBounds, 2> &result)
+{
+    result = {};
+    return projectDualBoundsImpl(first, matrix, bias, result[0], &second, &result[1]);
 }
 bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &result)
 {

@@ -38,8 +38,8 @@ struct Draw
     ReflectionLiveStats &stats;
     bool forceFallback;
     DualGeometry::Batch batch;
+    uint32_t firstSource = 0;
     ReflectionRasterState raster;
-    std::array<uint8_t, gsnative::ReflectionMaxVertices * gsnative::ReflectionInputStride> inputs;
     alignas(16) std::array<uint8_t, 4 * (4 + 3 * gsnative::ReflectionMaxVertices) * 16> restored;
     bool hasRestored = false;
 };
@@ -64,7 +64,8 @@ bool submit(void *context, GSHWDrawConfig &config)
         return false;
     if (!d.batch)
     {
-        d.batch = d.pool.prepareReflectionCulled(d.inputs.data(), d.geometry.vertices, d.raster);
+        const ReflectionInput strip{nullptr, d.geometry.vertices, d.raster, &d.geometry};
+        d.batch = d.pool.prepareReflectionGroup(&strip, 1);
         if (!d.batch)
         {
             ++d.stats.outputDeclined;
@@ -72,7 +73,7 @@ bool submit(void *context, GSHWDrawConfig &config)
         }
     }
     // The existing pool counts pairs; reflection has four interleaved views.
-    if (!d.pool.draw(d.batch, config, 0, (d.geometry.vertices - 2) * 6))
+    if (!d.pool.draw(d.batch, config, d.firstSource, (d.geometry.vertices - 2) * 6))
         return false;
     ++d.stats.gpuDraws;
     return true;
@@ -146,6 +147,33 @@ bool varyingTail(const gsnative::DualPacket &geometry, const uint8_t *field, con
     }
     return false;
 }
+bool prepareBounds(const gsnative::DualPacket &p, const uint8_t *packet, PreparedReflection &prepared,
+                   ReflectionLiveStats &stats)
+{
+    uint32_t nodes = 0, leaves = 0;
+    const bool hasBounds = projectReflectionBounds(p, prepared.bounds, &nodes, &leaves);
+    stats.boundsNodes += nodes;
+    stats.boundsLeaves += leaves;
+    if (!hasBounds)
+    {
+        ++stats.boundsDeclined;
+        return false;
+    }
+    for (unsigned section = 0; section < 4; ++section)
+    {
+        const auto *f = packet + section * (4 + p.vertices * 3) * 16;
+        GIFRegSCISSOR scissor{};
+        GIFRegXYOFFSET offset{};
+        std::memcpy(&scissor, f + 16, 8);
+        std::memcpy(&offset, f + 32, 8);
+        if (scissor.SCAX0 > scissor.SCAX1 || scissor.SCAY0 > scissor.SCAY1)
+            return false;
+        prepared.raster.scissor[section] = {int(scissor.SCAX0) * 16 - 8, int(scissor.SCAY0) * 16 - 8,
+                                            int(scissor.SCAX1) * 16 + 8, int(scissor.SCAY1) * 16 + 8};
+        prepared.raster.offset[section] = {int(offset.OFX), int(offset.OFY), 0, 0};
+    }
+    return true;
+}
 } // namespace
 
 bool reflectionPacketFraming(const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes)
@@ -166,39 +194,60 @@ bool reflectionPacketFraming(const gsnative::DualPacket &p, const uint8_t *packe
     return true;
 }
 
+bool prepareReflectionGroup(DualGeometry &pool, const ReflectionPacketView *packets, uint32_t count,
+                            PreparedReflection *prepared, ReflectionLiveStats &stats)
+{
+    if (!packets || !prepared || !count || count > MaxReflectionComputeGroup || !g_gs_device ||
+        g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || g_gs_renderer->m_path[0].nloop ||
+        GSRendererHW::GetInstance()->GetUpscaleMultiplier() <= 1.0f)
+        return false;
+    std::array<ReflectionInput, MaxReflectionComputeGroup> strips;
+    uint32_t first = 0;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const auto &view = packets[i];
+        if (!view.geometry || !reflectionPacketFraming(*view.geometry, view.packet, view.bytes) ||
+            !prepareBounds(*view.geometry, view.packet, prepared[i], stats))
+        {
+            ++stats.groupDeclined;
+            return false;
+        }
+        prepared[i].firstSource = first;
+        first += (view.geometry->vertices - 2) * 6;
+        strips[i] = {nullptr, view.geometry->vertices, prepared[i].raster, view.geometry};
+    }
+    const auto batch = pool.prepareReflectionGroup(strips.data(), count);
+    if (!batch)
+    {
+        ++stats.groupDeclined;
+        ++stats.outputDeclined;
+        return false;
+    }
+    for (unsigned i = 0; i < count; ++i)
+        prepared[i].batch = batch;
+    ++stats.preparedGroups;
+    stats.preparedPackets += count;
+    return true;
+}
+
 bool drawReflectionPacket(DualGeometry &pool, const gsnative::DualPacket &p, const uint8_t *packet, uint32_t bytes,
-                          ReflectionLiveStats &stats, bool forceFallback)
+                          ReflectionLiveStats &stats, bool forceFallback, const PreparedReflection *prepared)
 {
     if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || !reflectionPacketFraming(p, packet, bytes) ||
         g_gs_renderer->m_path[0].nloop || GSRendererHW::GetInstance()->GetUpscaleMultiplier() <= 1.0f)
         return false;
     ++stats.packets;
-    std::array<DualDrawBounds, 4> bounds;
-    uint32_t nodes = 0, leaves = 0;
-    const bool hasBounds = projectReflectionBounds(p, bounds, &nodes, &leaves);
-    stats.boundsNodes += nodes;
-    stats.boundsLeaves += leaves;
-    if (!hasBounds)
+    PreparedReflection local;
+    if (!prepared)
     {
-        ++stats.boundsDeclined;
-        return false;
+        if (!prepareBounds(p, packet, local, stats))
+            return false;
+        prepared = &local;
     }
     Draw draw{pool, p, packet, bytes, stats, forceFallback};
-    for (unsigned section = 0; section < 4; ++section)
-    {
-        const auto *f = packet + section * (4 + p.vertices * 3) * 16;
-        GIFRegSCISSOR scissor{};
-        GIFRegXYOFFSET offset{};
-        std::memcpy(&scissor, f + 16, 8);
-        std::memcpy(&offset, f + 32, 8);
-        if (scissor.SCAX0 > scissor.SCAX1 || scissor.SCAY0 > scissor.SCAY1)
-            return false;
-        draw.raster.scissor[section] = {int(scissor.SCAX0) * 16 - 8, int(scissor.SCAY0) * 16 - 8,
-                                        int(scissor.SCAX1) * 16 + 8, int(scissor.SCAY1) * 16 + 8};
-        draw.raster.offset[section] = {int(offset.OFX), int(offset.OFY), 0, 0};
-    }
-    if (!gsnative::expandReflectionInputs(p, draw.inputs.data(), unsigned(draw.inputs.size())))
-        return false;
+    draw.raster = prepared->raster;
+    draw.batch = prepared->batch;
+    draw.firstSource = prepared->firstSource;
     auto *renderer = GSRendererHW::GetInstance();
     const unsigned sectionBytes = (4 + 3 * p.vertices) * 16;
     for (unsigned section = 0; section < 4; ++section)
@@ -222,10 +271,11 @@ bool drawReflectionPacket(DualGeometry &pool, const gsnative::DualPacket &p, con
         }
         GSVertexTrace::Vertex minimum{}, maximum{};
         const bool consumed =
-            !nindices || (varyingTail(p, f, draw.raster, section) &&
-                          prepareDualTrace(bounds[section], *renderer->m_context, *renderer->PRIM, minimum, maximum) &&
-                          renderer->DrawNativeTriangles(minimum, maximum, indices.data(), nindices,
-                                                        (p.vertices - 2) * 12, true, &draw, submit, materialize));
+            !nindices ||
+            (varyingTail(p, f, draw.raster, section) &&
+             prepareDualTrace(prepared->bounds[section], *renderer->m_context, *renderer->PRIM, minimum, maximum) &&
+             renderer->DrawNativeTriangles(minimum, maximum, indices.data(), nindices, (p.vertices - 2) * 12, true,
+                                           &draw, submit, materialize));
         if (!consumed)
         {
             ++stats.declinedSections;

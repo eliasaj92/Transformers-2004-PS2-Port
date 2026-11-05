@@ -26,6 +26,7 @@ enum ReadReason : unsigned
 };
 void readMemory(const void *owner, uint8_t *data, unsigned first = 0, unsigned count = 1024,
                 ReadReason reason = EeRead);
+void overwriteCoordinates(const void *owner, uint8_t *data, unsigned first, unsigned count);
 void unpackMemory(const void *owner, uint8_t *data, unsigned address, unsigned count, unsigned cl, unsigned wl,
                   bool overwritesXYZ);
 void resetMemory(const void *owner);

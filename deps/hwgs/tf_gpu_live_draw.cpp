@@ -123,10 +123,12 @@ struct Live
         std::fprintf(stderr,
                      "[gpu-reflection:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
                      "declined_sections=%llu bounds_declined=%llu output_declined=%llu "
-                     "bounds_nodes=%llu bounds_leaves=%llu dispatches=%llu vertices=%llu\n",
-                     reflection.packets, reflection.gpuDraws, reflection.materializations,
-                     reflection.declinedSections, reflection.boundsDeclined, reflection.outputDeclined,
-                     reflection.boundsNodes, reflection.boundsLeaves, s.reflectionDispatches, s.reflectionVertices);
+                     "bounds_nodes=%llu bounds_leaves=%llu dispatches=%llu vertices=%llu "
+                     "compute_groups=%llu compute_packets=%llu group_declined=%llu\n",
+                     reflection.packets, reflection.gpuDraws, reflection.materializations, reflection.declinedSections,
+                     reflection.boundsDeclined, reflection.outputDeclined, reflection.boundsNodes,
+                     reflection.boundsLeaves, s.reflectionDispatches, s.reflectionVertices, reflection.preparedGroups,
+                     reflection.preparedPackets, reflection.groupDeclined);
         std::fprintf(stderr,
                      "[gpu-dual:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu declined_fields=%llu "
                      "source_hits=%llu bounds_declined=%llu dispatches=%llu source_uploads=%llu source_bytes=%llu "
@@ -502,6 +504,47 @@ void executeGrassWide(const kzgs::PacketView *views, uint32_t count)
     executeGrassWide(views, first);
     executeGrassWide(views + first, count - first);
 }
+void executeReflectionGroup(const kzgs::PacketView *views, uint32_t count)
+{
+    const auto ordinary = [&] {
+        for (unsigned i = 0; i < count; ++i)
+            execute(views[i].data, views[i].bytes);
+    };
+    if (count < 2 || count > tf_gpu::MaxReflectionComputeGroup || !g_gs_device ||
+        g_gs_device->GetRenderAPI() != RenderAPI::D3D12)
+    {
+        ordinary();
+        return;
+    }
+    std::array<tf_gpu::ReflectionPacketView, tf_gpu::MaxReflectionComputeGroup> packets;
+    std::array<tf_gpu::PreparedReflection, tf_gpu::MaxReflectionComputeGroup> prepared;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        if (views[i].bytes < sizeof(Payload))
+        {
+            ordinary();
+            return;
+        }
+        const auto &payload = *reinterpret_cast<const Payload *>(views[i].data);
+        if (payload.path != 1 || payload.bytes != views[i].bytes - sizeof(Payload))
+        {
+            ordinary();
+            return;
+        }
+        packets[i] = {&payload.geometry, views[i].data + sizeof(Payload), payload.bytes};
+    }
+    if (!live)
+        live = std::make_unique<Live>(*GSDevice12::GetInstance());
+    if (!tf_gpu::prepareReflectionGroup(live->pool, packets.data(), count, prepared.data(), live->reflection))
+    {
+        ordinary();
+        return;
+    }
+    for (unsigned i = 0; i < count; ++i)
+        if (!tf_gpu::drawReflectionPacket(live->pool, *packets[i].geometry, packets[i].packet, packets[i].bytes,
+                                          live->reflection, false, &prepared[i]))
+            execute(views[i].data, views[i].bytes);
+}
 } // namespace
 
 extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_t bytes,
@@ -515,14 +558,24 @@ extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_
     const Payload payload{*geometry, path, bytes, 0};
     std::memcpy(storage.data(), &payload, sizeof(payload));
     std::memcpy(storage.data() + sizeof(payload), data, bytes);
-    // Four ordered reflection sections are not part of the dual/grass merger.
-    // An ordinary owned command also forms an explicit group boundary.
-    if (geometry->kind == gsnative::GeometryKind::Reflection)
-        return kzgs::QueuePacketCommand(execute, storage.data(), uint32_t(sizeof(payload) + bytes)) ? 1 : 0;
     static const bool grouped = [] {
         const char *p = std::getenv("PS2X_TF_GPU_GROUPS");
         return p && !std::strcmp(p, "8");
     }();
+    // A distinct callback keeps reflection groups separate from mesh/grass.
+    // Only immutable compute is batched; all four sections draw in order.
+    if (geometry->kind == gsnative::GeometryKind::Reflection)
+    {
+        static const unsigned maximum = [] {
+            const char *option = std::getenv("PS2X_TF_GPU_REFLECTION_GROUPS");
+            return option && !std::strcmp(option, "64") ? tf_gpu::MaxReflectionComputeGroup : 8u;
+        }();
+        return (grouped ? kzgs::QueuePacketGroupCommand(executeReflectionGroup, storage.data(),
+                                                        uint32_t(sizeof(payload) + bytes), maximum)
+                        : kzgs::QueuePacketCommand(execute, storage.data(), uint32_t(sizeof(payload) + bytes)))
+                   ? 1
+                   : 0;
+    }
     if (grouped)
     {
         static const bool wideGrass = [] {

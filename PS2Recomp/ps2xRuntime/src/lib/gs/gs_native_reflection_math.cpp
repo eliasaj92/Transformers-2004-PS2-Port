@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "runtime/gs/gs_native_reflection_math.h"
+#include "gs_native_math_inline.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -10,13 +11,13 @@ namespace gsnative
 {
 namespace
 {
-uint32_t word(const void *p)
+GS_NATIVE_FORCEINLINE uint32_t word(const void *p)
 {
     uint32_t value;
     std::memcpy(&value, p, 4);
     return value;
 }
-float normal(float value)
+GS_NATIVE_FORCEINLINE float normal(float value)
 {
     uint32_t bits = std::bit_cast<uint32_t>(value);
     const uint32_t exponent = bits & 0x7f800000u;
@@ -26,25 +27,25 @@ float normal(float value)
         bits = (bits & 0x80000000u) | 0x7f7fffffu;
     return std::bit_cast<float>(bits);
 }
-float load(const void *p)
+GS_NATIVE_FORCEINLINE float load(const void *p)
 {
     return normal(std::bit_cast<float>(word(p)));
 }
-float add(float a, float b)
+GS_NATIVE_FORCEINLINE float add(float a, float b)
 {
     return normal(normal(a) + normal(b));
 }
-float mul(float a, float b)
+GS_NATIVE_FORCEINLINE float mul(float a, float b)
 {
     return normal(normal(a) * normal(b));
 }
-float reciprocal(float value)
+GS_NATIVE_FORCEINLINE float reciprocal(float value)
 {
     value = normal(value);
     return value == 0 ? std::bit_cast<float>((std::bit_cast<uint32_t>(value) & 0x80000000u) | 0x7f7fffffu)
                       : normal(1.0f / value);
 }
-uint32_t integer(float value)
+GS_NATIVE_FORCEINLINE uint32_t integer(float value)
 {
     if (value >= 2147483648.0f)
         return 0x7fffffffu;
@@ -53,23 +54,23 @@ uint32_t integer(float value)
     return uint32_t(int32_t(value));
 }
 using Vector = std::array<float, 3>;
-Vector vector(const uint8_t *p)
+GS_NATIVE_FORCEINLINE Vector vector(const uint8_t *p)
 {
     return {load(p), load(p + 4), load(p + 8)};
 }
-Vector plus(Vector a, Vector b)
+GS_NATIVE_FORCEINLINE Vector plus(Vector a, Vector b)
 {
     return {add(a[0], b[0]), add(a[1], b[1]), add(a[2], b[2])};
 }
-Vector times(Vector a, Vector b)
+GS_NATIVE_FORCEINLINE Vector times(Vector a, Vector b)
 {
     return {mul(a[0], b[0]), mul(a[1], b[1]), mul(a[2], b[2])};
 }
-Vector scale(Vector a, float b)
+GS_NATIVE_FORCEINLINE Vector scale(Vector a, float b)
 {
     return times(a, {b, b, b});
 }
-float dot(Vector a, Vector b)
+GS_NATIVE_FORCEINLINE float dot(Vector a, Vector b)
 {
     const auto product = times(a, b);
     return add(add(product[0], product[1]), product[2]);
@@ -116,6 +117,16 @@ ReflectionLitVertex reflectionLitVertex(const DualPacket &packet, unsigned verte
     return result;
 }
 
+uint32_t reflectionDrawAlpha(const DualPacket &packet)
+{
+    return integer(mul(load(packet.constants.data() + 128), 128.0f));
+}
+uint32_t reflectionRestartFlags(const DualPacket &packet, unsigned vertex)
+{
+    const unsigned flags = (word(packet.constants.data() + 132 + (vertex / 16) * 4) << (vertex % 16)) & 65535u;
+    return (flags & 32768) ? flags | 0xffff0000u : flags;
+}
+
 ReflectionRawVertex reflectionProjectVertex(const DualPacket &packet, const ReflectionLitVertex &lit, unsigned vertex,
                                             unsigned section)
 {
@@ -130,7 +141,6 @@ ReflectionRawVertex reflectionProjectVertex(const DualPacket &packet, const Refl
     }
     const float q = reciprocal(projected[3]);
     ReflectionRawVertex result;
-    const unsigned flags = (word(packet.constants.data() + 132 + (vertex / 16) * 4) << (vertex % 16)) & 65535u;
     for (unsigned axis = 0; axis < 3; ++axis)
     {
         const float tex = section < 2 ? std::bit_cast<float>(lit.stq[axis])
@@ -142,8 +152,8 @@ ReflectionRawVertex reflectionProjectVertex(const DualPacket &packet, const Refl
         result.xyz[axis] = integer(mul(projected[axis], q) * 16.0f);
     }
     result.stq[3] = lit.stq[3];
-    result.color[3] = integer(mul(load(packet.constants.data() + 128), 128.0f));
-    result.xyz[3] = (flags & 32768) ? flags | 0xffff0000u : flags;
+    result.color[3] = reflectionDrawAlpha(packet);
+    result.xyz[3] = reflectionRestartFlags(packet, vertex);
     return result;
 }
 

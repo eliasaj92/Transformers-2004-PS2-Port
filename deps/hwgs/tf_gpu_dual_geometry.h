@@ -23,6 +23,16 @@ struct ReflectionRasterState
     std::array<std::array<int32_t, 4>, 4> scissor{}, offset{};
 };
 static_assert(sizeof(ReflectionRasterState) == 128);
+struct ReflectionInput
+{
+    const void *vertices = nullptr;
+    uint32_t count = 0;
+    ReflectionRasterState raster;
+    // Exactly one representation: expanded diagnostic vertices or the owned
+    // compact source packet. The upload copies it before returning.
+    const gsnative::DualPacket *source = nullptr;
+};
+inline constexpr unsigned MaxReflectionComputeGroup = 64;
 
 // GS-thread-only compute/draw component. Destroy Mesh/Batch handles before
 // their pool, and the pool before device shutdown or switching APIs.
@@ -50,6 +60,7 @@ class DualGeometry
         friend class DualGeometry;
         std::shared_ptr<Page> page;
         uint32_t vertices = 0;
+        uint32_t outputOffset = 0;
 
       public:
         explicit operator bool() const
@@ -63,7 +74,7 @@ class DualGeometry
         uint64_t meshUploads = 0, meshBytes = 0, sourceUploadBytes = 0, constantUploadBytes = 0;
         uint64_t groupedDispatches = 0, groupedMeshes = 0;
         uint64_t grassDispatches = 0, grassBatches = 0;
-        uint64_t reflectionDispatches = 0, reflectionVertices = 0;
+        uint64_t reflectionDispatches = 0, reflectionVertices = 0, reflectionGroups = 0, reflectionPackets = 0;
     };
 
     explicit DualGeometry(GSDevice12 &device, uint64_t budget = 128ull * 1024 * 1024,
@@ -110,6 +121,9 @@ class DualGeometry
     // triangle emits twelve native vertices: (triangle*3+corner)*4+section.
     // For draw(), sourceCount=(count-2)*6. Upscaled, non-AA triangles only.
     Batch prepareReflectionCulled(const void *inputs, uint32_t count, const ReflectionRasterState &raster);
+    // Concatenate up to 64 strips in one dispatch. Each threadgroup owns
+    // one strip; firstSource advances by (count-2)*6. Draw ordering is unchanged.
+    Batch prepareReflectionGroup(const ReflectionInput *inputs, uint32_t count);
     // Whole-mesh metadata from cached source bounds and the two transforms.
     // Chunks in this range must share matrices/bias. Does not map GPU output
     // or transform the mesh's vertices on the CPU.
@@ -133,6 +147,11 @@ class DualGeometry
     std::unique_ptr<Pipeline> m_reflectionPipeline;
     std::unique_ptr<Pipeline> m_reflectionCullPipeline;
     std::vector<std::shared_ptr<Page>> m_pages;
+    // Small reflection strips share disjoint ranges in one upload/output pair.
+    // Retaining the page prevents whole-page reuse until its final slice is
+    // issued; Batch handles and the final draw fence protect all earlier slices.
+    std::shared_ptr<Page> m_reflectionPage;
+    uint32_t m_reflectionUpload = 0, m_reflectionOutput = 0;
     std::size_t m_pageCursor = 0;
     std::vector<std::shared_ptr<Source>> m_sources;
     uint64_t m_budget, m_meshBudget;
@@ -140,6 +159,7 @@ class DualGeometry
     std::shared_ptr<Page> acquirePage(uint32_t uploadBytes, uint32_t outputBytes);
     Batch dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices, uint32_t constantsOffset,
                    const uint64_t *groupSources = nullptr, uint32_t groups = 0, bool grass = false,
-                   bool fieldMajor = false, bool reflection = false, uint32_t reflectionCullCount = 0);
+                   bool fieldMajor = false, bool reflection = false, uint32_t reflectionCullGroups = 0,
+                   uint32_t outputOffset = 0, uint32_t reflectionSourceVertices = 0);
 };
 } // namespace tf_gpu
