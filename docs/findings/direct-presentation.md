@@ -35,6 +35,38 @@ remain below 60 and measure different asynchronous boundaries.
 
 ## Qualification
 
+### Experimental frame-ready waiting
+
+`PS2X_HWGS_WAIT_FRAME=1` makes direct acquisition wait for a newly submitted
+output when no slot is ready, instead of immediately returning to the host's
+independent polling loop. Publication wakes a condition variable. Its requested
+timeout is 16.667 ms so host input and shutdown continue when production stops.
+This changes neither the guest timestep nor the GPU fence ownership protocol.
+It defaults off; omit it or set it to `0` to restore the previous behavior.
+
+Three alternating enhanced-build pairs, both runtime and host capped at 60 Hz,
+improved host deliveries by 3.51%, 1.65%, and 1.21%. Delivery p99 fell from about
+33.3 to 21.0 ms; simulation throughput did not consistently improve. Three more
+pairs held waiting on and varied only `framerate.fps_cap` between `60` and `off`.
+Removing that remaining host timer eliminated skipped output submissions and
+reduced acquisition delay to about 0.015 ms, but did not consistently improve
+FPS or production spikes. A 32-image complete-scene capture matched the saved
+enhanced reference exactly at 2048x1788.
+
+For that diagnostic only, `PS2X_REALTIME=1`, `PS2X_REALTIME_HZ=60`, the existing
+guest timestep, and explicit VSync off were held constant. Host cap `off` in
+combination with this wait is not unlocked simulation. Timeout redraws can
+present the old image again, so the host loop rate is not a unique-frame count.
+The original poll and fallback remain available, and normal-play settings are
+unchanged. Script-mode tests must verify that the live host-cap setting actually
+applied; an INI alone does not prove the active cap.
+
+See the [pacing diagnosis](pacing-diagnosis.md) for all paired rates, game/wall
+time, processing spikes, separate CPU/GPU profiles and measurement limits.
+The remaining 22-23 ms simulation spikes prevent a sustained-60 claim.
+
+### Earlier direct-presentation qualification
+
 Tests use the private USA disc and Trainer hub seed, visible accelerated builds, and skip both opening and in-game cinematics. Raw logs, captures, saves and generated code remain outside the repository. Qualification so far covers the RTX 3080 Laptop on Windows, not other drivers, multi-GPU configurations or Proton.
 
 The initial direct run matched all six terminal counters and player probes from the readback timing route: 3,763 fields, 2,775 pad reads, 18,496,270,155 cycles, 1,119 CD operations, 3,100 I5 events and 1,118,322 MSCALs. It passed robot/vehicle/robot transitions and orderly shutdown. Captures show the correctly oriented hub and playable Amazon scene.

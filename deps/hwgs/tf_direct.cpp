@@ -7,6 +7,7 @@
 #include "GS/Renderers/DX12/GSTexture12.h"
 #include <array>
 #include <mutex>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -27,7 +28,26 @@ struct Slot {
 };
 std::array<Slot,3> slots;
 std::mutex mutex;
+std::condition_variable frameReady;
 uint64_t sequence = 0;
+bool waitForFrameReady() {
+    static const bool enabled=[] {
+        const char* value=std::getenv("PS2X_HWGS_WAIT_FRAME");
+        const bool on=value && *value=='1';
+        if(on)std::fprintf(stderr,"[hwgs:direct] frame-ready wait enabled; timeout_us=16667\n");
+        return on;
+    }();
+    return enabled;
+}
+struct FrameWaitStats {
+    uint64_t waits=0, ready=0, timeouts=0;
+} frameWaitStats; // Protected by the presentation-slot mutex.
+Slot* latestReadySlot() {
+    Slot* latest=nullptr;
+    for(auto& s:slots)
+        if(s.state==State::Ready && (!latest || s.info.sequence>latest->info.sequence))latest=&s;
+    return latest;
+}
 struct FrameTrace {
     struct Row {
         uint64_t hostUs, sequence, tick;
@@ -188,6 +208,7 @@ int tf_gs_direct_publish(uint32_t scale, uint32_t scene, uint32_t display_fbp, u
                 s.state=State::Ready;
                 frameTrace().record('p', s.info);
             }
+            if(waitForFrameReady())frameReady.notify_one();
             if(sequence%300==0)std::fprintf(stderr,"[hwgs:direct] submitted=%llu output=%ux%u full_frame_cpu_bytes=0\n",static_cast<unsigned long long>(sequence),width,height);
         } catch(const std::exception& e) {std::fprintf(stderr,"[hwgs:direct] %s\n",e.what());ok=false;}
     });
@@ -195,9 +216,20 @@ int tf_gs_direct_publish(uint32_t scale, uint32_t scene, uint32_t display_fbp, u
 }
 int tf_gs_direct_acquire(TfGpuFrame* frame) {
     if(!frame)return 0;
-    std::lock_guard<std::mutex> lock(mutex);
-    Slot* latest=nullptr;
-    for(auto& s:slots)if(s.state==State::Ready && (!latest || s.info.sequence>latest->info.sequence))latest=&s;
+    std::unique_lock<std::mutex> lock(mutex);
+    Slot* latest=latestReadySlot();
+    if(!latest && waitForFrameReady()) {
+        // The caller's frame limiter includes time spent here. Keep its cap,
+        // but wake for a newly submitted frame instead of polling a field later.
+        // Bound the wait so input, pause and shutdown still progress without a
+        // producer. The existing GPU fence wait/release protocol is unchanged.
+        ++frameWaitStats.waits;
+        if(frameReady.wait_for(lock,std::chrono::microseconds(16667),[&] {
+            latest=latestReadySlot();
+            return latest!=nullptr;
+        }))++frameWaitStats.ready;
+        else ++frameWaitStats.timeouts;
+    }
     if(!latest)return 0;
     // Retire skipped frames now. Otherwise a later host refresh could acquire an
     // older slot while the producer is still preparing the next frame.
@@ -228,5 +260,12 @@ void tf_gs_direct_close() {
         std::lock_guard<std::mutex> lock(mutex);
         for(auto& s:slots){destroy(s);s.state=State::Free;}
         frameTrace().close();
+        if(waitForFrameReady()) {
+            std::fprintf(stderr,"[hwgs:direct-wait] waits=%llu ready=%llu timeouts=%llu\n",
+                static_cast<unsigned long long>(frameWaitStats.waits),
+                static_cast<unsigned long long>(frameWaitStats.ready),
+                static_cast<unsigned long long>(frameWaitStats.timeouts));
+            frameWaitStats={};
+        }
     });
 }
