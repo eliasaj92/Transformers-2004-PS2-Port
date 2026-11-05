@@ -75,7 +75,7 @@ void beginCall(const void *owner, const uint8_t *code, uint8_t *data, uint64_t g
     state.callSelected = state.counts.selected;
     state.active = true;
 }
-bool beginEmitter(uint32_t pc, uint8_t *data, const Input &input, bool overlapping)
+bool beginEmitter(uint32_t pc, uint8_t *data, const Input &input, bool overlapping, bool prologue)
 {
     require(active() && state.data == data && !state.emitter, "Invalid grass emitter ownership");
     const unsigned base = (pc - 2536u) & 16383u;
@@ -104,6 +104,7 @@ bool beginEmitter(uint32_t pc, uint8_t *data, const Input &input, bool overlappi
     std::memcpy(p->inputs.data(), input.data(), input.size());
     state.emitter = std::move(p);
     state.counts.overlapping += overlapping;
+    state.counts.skippedPrologues += prologue;
     return true;
 }
 void completeEmitter(uint8_t *data, unsigned base)
@@ -160,9 +161,9 @@ void finish()
     const auto s = stats();
     std::fprintf(stderr,
                  "[gpu-grass] selected=%llu attached=%llu declined=%llu overlapping=%llu "
-                 "skipped_iterations=%llu recorded=%llu overwritten_qwords=%llu materialized_sprites=%llu "
+                 "skipped_iterations=%llu skipped_prologues=%llu recorded=%llu overwritten_qwords=%llu materialized_sprites=%llu "
                  "materialized_qwords=%llu dirty=%u\n",
-                 s.selected, s.attached, s.declined, s.overlapping, s.selected * 2, s.recorded, s.overwrittenQwords,
+                 s.selected, s.attached, s.declined, s.overlapping, s.selected * 2, s.skippedPrologues, s.recorded, s.overwrittenQwords,
                  s.materializedSprites, s.materializedQwords, s.dirtyQwords);
 }
 } // namespace tf_gpu_grass

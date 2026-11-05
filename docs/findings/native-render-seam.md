@@ -648,3 +648,18 @@ level result is 57.46 updates/s and 56.69 direct handoffs/s, with 31 skipped
 handoffs. The latter change does not demonstrate an overall FPS gain. A separate
 32-frame capture still matches every saved enhanced pixel at 2048x1788. Further
 work is required to reach sustained 60 fps.
+
+The next VU change moves the grass handoff ahead of its first sprite pair.
+That pair was still calculated on the CPU even though the owned GPU source
+already generated it and its output memory was deferred. The shortcut preserves
+the 59 guest cycles and address increments, then retains the existing final
+iteration. Both captured routes skip all 17,096 first-pair prologues while
+preserving complete state, memory, cycles and ordered GIF in 5,374 enclosing
+calls. Fifteen rejection checks cover unsupported control, timing and depth.
+See the [earlier grass handoff](../../deps/hwgs/GPU_GEOMETRY.md#earlier-grass-emission-handoff).
+
+The enhanced level then measures 58.15 gameplay updates/s and 57.67 direct frame
+handoffs/s, with 19 skipped handoffs. All 32 camera-turn images still match the
+saved enhanced scene exactly, and direct presentation retains zero full-frame
+CPU transfer. This is a small measured improvement; sustained 60 fps remains
+unfinished.

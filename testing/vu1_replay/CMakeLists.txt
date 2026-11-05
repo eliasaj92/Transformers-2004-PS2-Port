@@ -81,7 +81,7 @@ elseif(TF_REPLAY_GRASS_TAIL)
     add_executable(${REPLAY_TARGET} replay.cpp grass_tail.cpp "${DUAL_STATE}" "${GRASS_MATH}" "${DUAL_MATH}" "${REFLECTION_MATH}" "${GRASS_MEMORY}" "${GRASS_RUNTIME}"
         "${CMAKE_BINARY_DIR}/grass/grass_chain.cpp" ${PS2X_VU1_STATIC_SOURCES})
     target_compile_definitions(${REPLAY_TARGET} PRIVATE TF_REPLAY_GRASS_TAIL=1
-        "TF_GRASS_LOOP=${GRASS_LOOP}" "TF_GRASS_EPILOGUE=${GRASS_EPILOGUE}")
+        "TF_GRASS_PROLOGUE=${GRASS_PROLOGUE}" "TF_GRASS_LOOP=${GRASS_LOOP}" "TF_GRASS_EPILOGUE=${GRASS_EPILOGUE}")
     target_include_directories(${REPLAY_TARGET} PRIVATE "${PACKAGE_DIR}/generated")
 elseif(TF_REPLAY_REFLECTION_CAPTURE OR TF_REPLAY_REFLECTION_LIVE)
     set(REFLECTION_MATH "${REPO_ROOT}/PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_reflection_math.cpp")

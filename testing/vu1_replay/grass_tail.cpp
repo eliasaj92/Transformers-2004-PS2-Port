@@ -12,6 +12,7 @@
 #include <vector>
 #include <deque>
 
+bool TF_GRASS_PROLOGUE(StaticVU &, uint8_t *, uint32_t, uint64_t, bool &);
 bool TF_GRASS_LOOP(StaticVU &, uint8_t *, uint32_t, uint64_t, bool &);
 bool TF_GRASS_EPILOGUE(StaticVU &, uint8_t *, uint32_t, uint64_t, bool &);
 
@@ -26,6 +27,7 @@ std::ofstream inputFile, packetFile;
 bool deferGeometry = false;
 std::array<uint8_t, 1216> restoredPacket;
 uint64_t deferredPackets = 0;
+unsigned prologueGuardChecks = 0;
 
 void require(bool condition, const char *message)
 {
@@ -57,6 +59,49 @@ uint64_t fingerprint(const uint8_t *data, size_t bytes)
         hash *= 1099511628211ull;
     }
     return hash;
+}
+
+void verifyPrologueGuards(const StaticVU &v, uint8_t *data, uint32_t size, uint64_t end)
+{
+    auto candidate = std::make_unique<StaticVU>();
+    for (unsigned test = 0; test < 15; ++test)
+    {
+        *candidate = v;
+        auto &c = *candidate;
+        uint64_t budget = end;
+        uint32_t bytes = size;
+        switch (test)
+        {
+        case 0: budget = c.m_cycle + 262; break;
+        case 1: c.m_state.branchPending = true; break;
+        case 2: c.m_stopRequested = true; break;
+        case 3: c.m_state.dBitEnabled = true; break;
+        case 4: c.m_state.tBitEnabled = true; break;
+        case 5: c.m_state.ebit = true; break;
+        case 6: c.m_state.haltAfterDelaySlot = true; break;
+        case 7: c.m_state.status &= ~0x3c0u; break;
+        case 8: bytes = 8192; break;
+        case 9: c.m_viReady[5] = c.m_cycle + 1; break;
+        case 10: c.m_vfReady[9][0] = c.m_cycle + 1; break;
+        case 11: case 12: case 13: case 14:
+            c.m_state.vf[9][3] = test == 11 ? 0.0f : test == 12 ? -0.0f :
+                test == 13 ? std::numeric_limits<float>::infinity() : std::numeric_limits<float>::quiet_NaN();
+            c.m_state.vf[16][3] = c.m_state.vf[17][3] = 0.0f;
+            break;
+        }
+        unsigned ordinaryCalls = 0, tailCalls = 0;
+        const auto ordinary = [&](auto &, auto *, auto, auto, auto &) { ++ordinaryCalls; return true; };
+        const auto tail = [&](auto &, auto *, auto, auto, auto &) { ++tailCalls; return true; };
+        const auto stateBefore = c.m_state;
+        const auto selected = tf_gpu_grass::stats().selected;
+        const auto cycle = c.m_cycle;
+        bool ended = false;
+        require(tf_gpu_grass::prologue(c, data, bytes, budget, ended, ordinary, tail) && ordinaryCalls == 1 &&
+                    !tailCalls && !ended && c.m_cycle == cycle && !std::memcmp(&stateBefore, &c.m_state, sizeof(stateBefore)) &&
+                    tf_gpu_grass::stats().selected == selected,
+                "Grass prologue failed to decline unsupported control/depth without mutation");
+        ++prologueGuardChecks;
+    }
 }
 
 } // namespace
@@ -94,6 +139,30 @@ void grassReplayInitialize()
         deferGeometry = true;
         tf_gpu_grass::install(0x74c982c0, true);
     }
+}
+
+bool grassPrologueProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end, bool &ended)
+{
+    if (!deferGeometry)
+        return TF_GRASS_PROLOGUE(v, data, size, end, ended);
+    require(!emitterPending, "Nested grass prologue");
+    if (!prologueGuardChecks)
+        verifyPrologueGuards(v, data, size, end);
+    const auto input = tf_gpu_grass::inputs(v, data, 0);
+    const auto selected = tf_gpu_grass::stats().selected;
+    const bool overlapping = v.m_xgkick.active;
+    const bool result = tf_gpu_grass::prologue(v, data, size, end, ended, TF_GRASS_PROLOGUE, TF_GRASS_LOOP);
+    if (tf_gpu_grass::stats().selected == selected)
+        return result;
+    require(result && captured < gpuInputs.size() / 256 &&
+                !std::memcmp(gpuInputs.data() + captured * 256, input.data(), 256),
+            "Grass prologue differs from actual GPU upload");
+    emitterInput = input;
+    emitterPending = true;
+    ++calls;
+    active += overlapping;
+    ++replaced;
+    return result;
 }
 
 bool grassTailProbe(StaticVU &v, uint8_t *data, uint32_t size, uint64_t end, bool &ended)
@@ -269,6 +338,7 @@ void grassReplayFinish()
                     "materialized_qwords=%llu dirty=%u\n",
                     deferredPackets, deferred.recorded, deferred.overwrittenQwords, deferred.materializedSprites,
                     deferred.materializedQwords, deferred.dirtyQwords);
+        std::printf("GRASS_PROLOGUE skipped=%llu guard_checks=%u\n", deferred.skippedPrologues, prologueGuardChecks);
     }
     std::printf("GRASS_TAIL calls=%llu active_transfers=%llu emitted=%llu gpu_replaced=%llu skipped_iterations=%llu\n",
                 calls, active, captured, replaced, replaced * 2);

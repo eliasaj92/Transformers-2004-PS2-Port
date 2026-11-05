@@ -285,3 +285,27 @@ ownership, source-derived GS metadata and fallback still need integration.
 The latest relevant live measurement remains 57.4907 physics updates/s and
 56.4953 direct handoffs/s; true 60 fps remains unfinished. See the
 [paired contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-projection-and-resident-drawing).
+
+## Profile after earlier grass handoff
+
+Live reflection offload, compact uploads and packed source bounds are now
+integrated as opt-in enhancements; their subsequent measurements and image
+checks are recorded in the [live contract](../../deps/hwgs/GPU_GEOMETRY.md#live-reflection-lighting-and-projection-hooks).
+The next CPU shortcut skips the redundant first grass pair before joining the
+retained final iteration. The enhanced Amazon run reaches 58.1459 updates/s
+and 57.6746 direct handoffs/s, with all 32 captured scene images unchanged.
+This remains below sustained true 60 fps.
+
+A separate 20-second enhanced level profile collects 10,079 samples per selected
+thread, with the renderer map matched to the loaded DLL's exact code bytes.
+The removed `sr728` prologue no longer appears among the hot VU ranges. Remaining
+VU samples include reflection lighting reconstruction at 4.88%, retained grass
+`sr729` at 4.43%, pipeline commits at 3.25%, `aotFast` at 3.10%, grass deferred
+memory recording at 2.67%, and reflection projection reconstruction at 1.72%.
+
+The hardware renderer waits in 8.64% of samples; `GSRendererHW::Draw` accounts
+for 7.13%, grass bounds for 3.35%, and reflection lighting bounds plus its helper
+for 4.95%. The runtime GS submission thread waits in 94.25% of samples. EE's
+known frame-wait routine remains at 7.59%, with full scheduler checkpoints at
+6.21%. These instrumented results guide further removal of CPU work around
+resident GPU geometry; they are not a separate frame-rate measurement.

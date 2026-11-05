@@ -76,6 +76,16 @@ The optional broad list also verifies the authenticated manager and context
 setup programs' read footprints by poisoning all data outside their inputs. Both use only
 the accelerated static package. See [the contract and recorded results](../../deps/hwgs/GPU_GEOMETRY.md#guarded-cpu-tail-and-deferred-vu-memory).
 
+## Grass emission prologue
+
+The grass runner (`-DTF_REPLAY_GRASS_TAIL=ON`) also wraps the earlier emission
+prologue. In `replay_gpu_grass.py --defer-memory --require-prologue` mode it
+checks the shared runtime shortcut against actual GPU captures, carries the
+retained CPU tail through the enclosing calls, and exercises fifteen rejection
+guards. The private reports record skipped prologues and require complete
+state, memory, guest-cycle and packet equality. See the
+[earlier handoff contract](../../deps/hwgs/GPU_GEOMETRY.md#earlier-grass-emission-handoff).
+
 ## Reflection input capture and GPU tail experiment
 
 Configure a separate private build with `-DTF_REPLAY_REFLECTION_CAPTURE=ON`

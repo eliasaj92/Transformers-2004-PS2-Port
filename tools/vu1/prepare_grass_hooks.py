@@ -15,7 +15,7 @@ def prepare(package, output):
     source = original.read_text()
     entries = re.findall(r"ps2Vu1StaticSpan\(v.m_state.pc,(\d+)u,(\d+)u,(\d+)u\)\|\|!(sr\d+)\(", source)
     regions = {(int(rel), int(pairs)): name for _, rel, pairs, name in entries}
-    if not all(key in regions for key in ((317, 59), (376, 22), (398, 5))):
+    if not all(key in regions for key in ((262, 55), (317, 59), (376, 22), (398, 5))):
         raise ValueError("Private package lacks the qualified grass loop/epilogue/kick")
     for key, hook in (((317, 59), "loop"), ((376, 22), "epilogue")):
         name = regions[key]
@@ -23,6 +23,15 @@ def prepare(package, output):
         if source.count(needle) != 1:
             raise ValueError("Ambiguous grass chain hook")
         source = source.replace(needle, f"!tf_gpu_grass::{hook}(v,data,size,end,ended,{name})")
+    prologue, loop, epilogue = (regions[key] for key in ((262, 55), (317, 59), (376, 22)))
+    needle = f"!{prologue}(v,data,size,end,ended)"
+    if source.count(needle) != 1:
+        raise ValueError("Ambiguous grass prologue hook")
+    source = source.replace(needle, f"!tf_gpu_grass::prologue(v,data,size,end,ended,{prologue},{loop})")
+    needle = f"if(v.m_state.pc==((base+2536u)&0x3fffu))goto r{loop[2:]};"
+    if source.count(needle) != 2:
+        raise ValueError("Grass prologue continuation changed")
+    source = source.replace(needle, needle + f"\nif(v.m_state.pc==((base+3008u)&0x3fffu))goto r{epilogue[2:]};", 1)
     source = '#include "runtime/gs/gs_native_grass_vu.h"\n' + source
     output.mkdir(parents=True, exist_ok=True)
     for path, value in ((output / "grass_chain.cpp", source),

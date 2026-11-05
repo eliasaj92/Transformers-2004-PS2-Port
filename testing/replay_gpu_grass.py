@@ -20,7 +20,11 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--defer-memory", action="store_true",
                         help="Keep skipped VU words unresolved and check ordered source-based reconstruction")
+    parser.add_argument("--require-prologue", action="store_true",
+                        help="Require the earlier GPU emission hook and its rejection checks")
     args = parser.parse_args()
+    if args.require_prologue and not args.defer_memory:
+        parser.error("--require-prologue requires --defer-memory")
     prefix, gpu, gpu_report, fixtures, runner, report = (
         private(p) for p in (args.prefix, args.gpu_capture, args.gpu_report, args.fixtures, args.runner, args.report))
     csv_path, log_path = report.with_suffix(".csv"), report.with_suffix(".log")
@@ -61,6 +65,7 @@ def main():
     passed = bool(passed and metrics["calls"] == count and metrics["emitted"] == count and
                   metrics["gpu_replaced"] == count and metrics["skipped_iterations"] == count * 2)
     ownership = {}
+    prologue = {}
     if args.defer_memory:
         match = re.search(r"GRASS_DEFER packets=(\d+) recorded=(\d+) overwritten_qwords=(\d+) "
                           r"materialized_sprites=(\d+) materialized_qwords=(\d+) dirty=(\d+)", text)
@@ -69,7 +74,13 @@ def main():
                                   "materialized_qwords", "dirty"), map(int, match.groups())))
         passed = bool(passed and ownership and ownership["packets"] == count and
                       ownership["recorded"] == count and ownership["dirty"] == 0)
+        match = re.search(r"GRASS_PROLOGUE skipped=(\d+) guard_checks=(\d+)", text)
+        if match:
+            prologue = dict(zip(("skipped", "guard_checks"), map(int, match.groups())))
+    if args.require_prologue:
+        passed = bool(passed and prologue and prologue["skipped"] == count and prologue["guard_checks"] == 15)
     report.write_text(json.dumps({"passed": passed, "fixtures": len(rows), **metrics, "deferred_memory": ownership,
+        "prologue": prologue,
         "exit_code": result.returncode, "inputs_sha256": digest(inputs), "gpu_capture_sha256": digest(capture),
         "gpu_report_sha256": digest(gpu_report.read_bytes()), "runner_sha256": digest(runner.read_bytes()),
         "fixture_list_sha256": digest(fixtures.read_bytes()), "csv_sha256": digest(csv_path.read_bytes()) if rows else None,

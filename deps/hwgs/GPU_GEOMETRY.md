@@ -1289,6 +1289,50 @@ the reflection-only metadata optimization. Its separate 32-frame capture again
 matches all 117,178,368 saved enhanced pixels exactly. These local CPU savings
 do not establish sustained 60 fps, and reflection remains opt-in.
 
+## Earlier grass emission handoff
+
+The grass hook now admits a batch before its first sprite pair is calculated.
+The GPU already emits that pair from the owned source; the CPU previously still
+ran its 55-instruction prologue even though all those coordinates and colors
+were deferred. The earlier hook advances the real transfer/pipeline calendar
+by the same 59 guest cycles, preserves the source/output address increments,
+and joins the existing middle-pair shortcut and retained final iteration.
+Queued graphics output remains in order. No shader, readback or packet-layout
+change is needed.
+
+Admission still authenticates the resident grass program and finite inputs.
+It also requires enough remaining cycle budget, saturated arithmetic sticky
+flags, ready incoming registers and finite first-pair depths away from zero;
+unsupported control state or depths retain the accelerated prologue. This
+avoids dropping persistent reciprocal exception flags. The final iteration
+and epilogue retain the game's register values, clipping, flags and GS latches.
+
+The accelerated broad and moving replays skip all 17,096 prologues while
+preserving all 5,374 enclosing calls' complete state, memory, cycles and ordered
+GIF. Every source still matches its authenticated actual GPU upload. Fifteen
+rejection cases verify that an insufficient budget, pending control, register
+readiness and zero/non-finite depth use the accelerated path without mutation.
+Only 15,156 deferred qwords require reconstruction; 600,300 are overwritten.
+Both ownership maps finish empty. These are correctness results, not live FPS.
+
+Add `--require-prologue` to the existing `testing/replay_gpu_grass.py` command
+with `--defer-memory` to require full prologue coverage and the rejection checks.
+Live shutdown counters include `skipped_prologues` separately from the two
+omitted middle iterations per selected batch.
+
+The enhanced Amazon run measures **58.1459 physics updates/s and 57.6746 direct
+frame handoffs/s**, compared with the saved preceding enhanced result of
+57.4623 and 56.6931. Median/p95 update intervals are 16.5905/21.299 ms. It skips
+4,591,270 first-pair prologues over the whole session; all selected companions
+attach, all deferred memory drains and the GPU output pool has no capacity
+declines. Nineteen published frames are skipped by host acquisition. Direct
+presentation still transfers zero full-frame CPU bytes.
+
+The separate 32-frame camera-turn capture at 2048x1788 matches all 117,178,368
+pixels of the saved enhanced images, with no adjacent or two-field duplicate
+images. The result is a small improvement in this level, not sustained true
+60 fps or full-campaign validation. Reflection remains opt-in.
+
 ## Bounded output-image cadence capture
 
 `PS2X_TF_SCENE_CAPTURE` accepts a fresh absolute private output prefix;
