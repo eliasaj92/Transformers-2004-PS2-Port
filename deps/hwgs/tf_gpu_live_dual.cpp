@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <list>
+#include <unordered_map>
 #include <stdexcept>
 #include <vector>
 
@@ -52,6 +54,139 @@ bool dualPacketFraming(const gsnative::DualPacket &p, const uint8_t *packet, uin
             return false;
     }
     return true;
+}
+bool dualMeshTransformsMatch(const DualPacketView &a, const DualPacketView &b)
+{
+    return a.geometry && b.geometry &&
+           !std::memcmp(a.geometry->constants.data(), b.geometry->constants.data(), 132);
+}
+bool dualMeshStateMatches(const DualPacketView &a, const DualPacketView &b)
+{
+    if (!a.geometry || !b.geometry || !a.packet || !b.packet) return false;
+    for (unsigned field = 0; field < 2; ++field)
+    {
+        const auto *x = a.packet + field * (4 + a.geometry->vertices * 3) * 16;
+        const auto *y = b.packet + field * (4 + b.geometry->vertices * 3) * 16;
+        if (wide(x + 16) != wide(y + 16) || wide(x + 32) != wide(y + 32) ||
+            ((wide(x + 48) >> 47) & 0x7ff) != ((wide(y + 48) >> 47) & 0x7ff)) return false;
+    }
+    return true;
+}
+struct DualMeshCache::Impl
+{
+    struct Entry
+    {
+        uint64_t hash = 0;
+        std::vector<uint8_t> source;
+        std::vector<uint32_t> counts;
+        Prepared prepared;
+    };
+    DualGeometry &pool;
+    std::list<Entry> entries;
+    std::unordered_multimap<uint64_t, std::list<Entry>::iterator> lookup;
+    explicit Impl(DualGeometry &p) : pool(p) {}
+};
+DualMeshCache::DualMeshCache(DualGeometry &pool) : impl(std::make_unique<Impl>(pool)) {}
+DualMeshCache::~DualMeshCache() = default;
+DualMeshCache::Prepared *DualMeshCache::prepare(const DualPacketView *views, uint32_t count, DualMergeStats &stats)
+{
+    if (!views || count < 2 || count > MaxDualMeshPackets)
+        return nullptr;
+    uint64_t key = 14695981039346656037ull;
+    const auto hash = [&](const void *data, unsigned bytes) {
+        const auto *p = static_cast<const uint8_t *>(data);
+        for (unsigned i = 0; i < bytes; ++i) key = (key ^ p[i]) * 1099511628211ull;
+    };
+    for (unsigned i = 0; i < count; ++i)
+    {
+        if (!views[i].geometry || !dualPacketFraming(*views[i].geometry, views[i].packet, views[i].bytes))
+            return nullptr;
+        const auto &p = *views[i].geometry;
+        hash(&p.vertices, sizeof(p.vertices));
+        hash(p.inputs.data(), p.vertices * 32);
+        hash(p.constants.data() + 132, 8); // ADC strip restarts are part of topology.
+    }
+    auto &c = *impl;
+    auto entry = c.entries.end();
+    const auto [begin, end] = c.lookup.equal_range(key);
+    for (auto it = begin; it != end; ++it)
+    {
+        auto candidate = it->second;
+        if (candidate->counts.size() != count) continue;
+        bool equal = true;
+        unsigned offset = 0;
+        for (unsigned i = 0; equal && i < count; ++i)
+        {
+            const auto &p = *views[i].geometry;
+            equal = candidate->counts[i] == p.vertices &&
+                    !std::memcmp(candidate->source.data() + offset, p.inputs.data(), p.vertices * 32) &&
+                    !std::memcmp(candidate->prepared.constants.data() + i * 144 + 132,
+                                 p.constants.data() + 132, 8);
+            offset += p.vertices * 32;
+        }
+        if (equal) { entry = candidate; ++stats.cacheHits; break; }
+    }
+    if (entry == c.entries.end())
+    {
+        // Bounded independently of the transient per-chunk cache. The pool
+        // retires released buffers only after their last GPU fence completes.
+        while (c.entries.size() >= 512)
+        {
+            const auto old = std::prev(c.entries.end());
+            const auto range = c.lookup.equal_range(old->hash);
+            for (auto it = range.first; it != range.second; ++it)
+                if (it->second == old) { c.lookup.erase(it); break; }
+            c.entries.erase(old);
+        }
+        Impl::Entry fresh;
+        fresh.hash = key;
+        fresh.prepared.constants.resize(count * 144);
+        std::vector<uint8_t> upload;
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const auto &p = *views[i].geometry;
+            const unsigned first = fresh.prepared.vertices;
+            fresh.counts.push_back(p.vertices);
+            fresh.source.insert(fresh.source.end(), p.inputs.data(), p.inputs.data() + p.vertices * 32);
+            upload.insert(upload.end(), p.inputs.data(), p.inputs.data() + p.vertices * 32);
+            for (unsigned v = 0; v < p.vertices; ++v) put(upload.data() + (first + v) * 32 + 12, i);
+            auto *record = fresh.prepared.constants.data() + i * 144;
+            std::memcpy(record + 132, p.constants.data() + 132, 8);
+            put(record + 140, first);
+            bool hasTriangles = false;
+            for (unsigned v = 2; v < p.vertices; ++v)
+            {
+                if ((word(record + 132 + (v / 16) * 4) << (v % 16)) & 32768) continue;
+                hasTriangles = true;
+                for (unsigned field = 0; field < 2; ++field)
+                    for (unsigned corner = v - 2; corner <= v; ++corner)
+                        fresh.prepared.indices[field].push_back(uint16_t(2 * (first + corner) + field));
+            }
+            fresh.prepared.triangleChunks.push_back(hasTriangles);
+            fresh.prepared.vertices += p.vertices;
+        }
+        fresh.prepared.mesh = c.pool.uploadMesh(upload.data(), fresh.prepared.vertices, count);
+        if (!fresh.prepared.mesh) return nullptr;
+        c.entries.push_front(std::move(fresh));
+        entry = c.entries.begin();
+        c.lookup.emplace(key, entry);
+        ++stats.cacheUploads;
+    }
+    c.entries.splice(c.entries.begin(), c.entries, entry);
+    auto &result = entry->prepared;
+    for (unsigned i = 0; i < count; ++i)
+        std::memcpy(result.constants.data() + i * 144, views[i].geometry->constants.data(), 132);
+    for (unsigned first = 0; first < count;)
+    {
+        unsigned end = first + 1;
+        while (end < count && dualMeshTransformsMatch(views[first], views[end])) ++end;
+        std::array<DualDrawBounds, 2> bounds;
+        if (!c.pool.bounds(result.mesh, result.constants.data(), count, first, end - first, bounds)) return nullptr;
+        if (!first) result.bounds = bounds;
+        else for (unsigned f = 0; f < 2; ++f) mergeDrawBounds(result.bounds[f], bounds[f]);
+        first = end;
+    }
+    return &result;
 }
 namespace
 {
@@ -145,13 +280,13 @@ void ordinaryField(MergedDraw &draw, unsigned field)
 } // namespace
 
 bool drawDualGroup(DualGeometry &pool, const DualPacketView *views, const PreparedDual *prepared, uint32_t count,
-                   DualMergeStats &stats, bool forceFallback)
+                   DualMergeStats &stats, bool forceFallback, DualMeshCache *cache)
 {
     const auto decline = [](uint64_t &reason) {
         ++reason;
         return false;
     };
-    if (!views || !prepared || count < 2 || count > 8 || !g_gs_device ||
+    if (!views || (!prepared && !cache) || count < 2 || count > (cache ? MaxDualMeshPackets : 8u) || !g_gs_device ||
         g_gs_device->GetRenderAPI() != RenderAPI::D3D12 || g_gs_renderer->m_path[0].nloop ||
         GSRendererHW::GetInstance()->GetUpscaleMultiplier() <= 1.0f)
         return decline(stats.stateDeclined);
@@ -160,23 +295,13 @@ bool drawDualGroup(DualGeometry &pool, const DualPacketView *views, const Prepar
         return decline(stats.stateDeclined);
     for (unsigned i = 0; i < count; ++i)
         if (!views[i].geometry || !dualPacketFraming(*views[i].geometry, views[i].packet, views[i].bytes) ||
-            !prepared[i].mesh)
+            (!cache && !prepared[i].mesh))
             return decline(stats.stateDeclined);
     const auto &first = views[0];
     GIFRegPRIM prim{};
     prim.U64 = (wide(first.packet + 48) >> 47) & 0x7ff;
     if (!prim.TME || !prim.IIP || prim.FST || prim.AA1)
         return decline(stats.stateDeclined);
-    // Do not widen the vertex alpha range seen by blend selection. Mixed alpha
-    // batches can select different hardware/software blending and rounding.
-    if (prim.ABE)
-    {
-        const unsigned alpha = prepared[0].bounds[0].colorMin[3];
-        for (unsigned i = 0; i < count; ++i)
-            for (const auto &bounds : prepared[i].bounds)
-                if (bounds.colorMin[3] != alpha || bounds.colorMax[3] != alpha)
-                    return decline(stats.stateDeclined);
-    }
     for (unsigned i = 0; i < count; ++i)
         for (unsigned field = 0; field < 2; ++field)
         {
@@ -198,37 +323,63 @@ bool drawDualGroup(DualGeometry &pool, const DualPacketView *views, const Prepar
     const auto &context = renderer->m_env.CTXT[prim.CTXT];
     if (!noFieldTextureFeedback(context, scissor[0], scissor[1]))
         return decline(stats.feedbackDeclined);
+    auto *resident = cache ? cache->prepare(views, count, stats) : nullptr;
+    if (cache && !resident) return decline(stats.boundsDeclined);
+    // Do not widen the vertex alpha range seen by blend selection. Mixed alpha
+    // batches can select different hardware/software blending and rounding.
+    if (prim.ABE)
+    {
+        const unsigned alpha = resident ? resident->bounds[0].colorMin[3] : prepared[0].bounds[0].colorMin[3];
+        for (unsigned i = 0; i < (resident ? 1u : count); ++i)
+            for (const auto &b : resident ? resident->bounds : prepared[i].bounds)
+                if (b.colorMin[3] != alpha || b.colorMax[3] != alpha)
+                    return decline(stats.stateDeclined);
+    }
     std::array<DualGeometry::Mesh, 8> meshes;
     std::array<uint8_t, 8 * 144> constants;
     std::array<DualDrawBounds, 2> bounds;
     std::array<std::array<uint16_t, 8 * 26 * 3>, 2> indices;
+    const uint16_t *drawIndices[2]{indices[0].data(), indices[1].data()};
     unsigned nindices[2]{}, vertices = 0;
     bool witness[2]{};
     for (unsigned i = 0; i < count; ++i)
     {
         const auto &geometry = *views[i].geometry;
-        meshes[i] = prepared[i].mesh;
-        std::memcpy(constants.data() + i * 144, geometry.constants.data(), 144);
-        bool hasTriangles = false;
-        for (unsigned vertex = 2; vertex < geometry.vertices; ++vertex)
+        if (!resident)
+        {
+            meshes[i] = prepared[i].mesh;
+            std::memcpy(constants.data() + i * 144, geometry.constants.data(), 144);
+        }
+        bool hasTriangles = resident ? resident->triangleChunks[i] : false;
+        for (unsigned vertex = 2; !resident && vertex < geometry.vertices; ++vertex)
         {
             const uint32_t mask = word(geometry.constants.data() + 132 + (vertex / 16) * 4);
             if ((mask << (vertex % 16)) & 32768)
                 continue;
             hasTriangles = true;
-            for (unsigned field = 0; field < 2; ++field)
+            if (!resident) for (unsigned field = 0; field < 2; ++field)
                 for (unsigned corner = vertex - 2; corner <= vertex; ++corner)
                     indices[field][nindices[field]++] = uint16_t(2 * (vertices + corner) + field);
         }
         for (unsigned field = 0; field < 2; ++field)
         {
             witness[field] |= hasTriangles && (geometry.varyingDepth & (1u << field));
+            if (resident) continue;
             if (i)
                 mergeDrawBounds(bounds[field], prepared[i].bounds[field]);
             else
                 bounds[field] = prepared[i].bounds[field];
         }
         vertices += geometry.vertices;
+    }
+    if (resident)
+    {
+        bounds = resident->bounds;
+        for (unsigned f = 0; f < 2; ++f)
+        {
+            drawIndices[f] = resident->indices[f].data();
+            nindices[f] = uint32_t(resident->indices[f].size());
+        }
     }
     GSVertexTrace::Vertex minimum[2]{}, maximum[2]{};
     for (unsigned field = 0; field < 2; ++field)
@@ -241,18 +392,25 @@ bool drawDualGroup(DualGeometry &pool, const DualPacketView *views, const Prepar
             !prepareDualTrace(bounds[field], state, prim, minimum[field], maximum[field]))
             return decline(stats.boundsDeclined);
     }
-    auto batch = pool.prepareGroup(meshes.data(), constants.data(), count);
+    auto batch = resident ? pool.prepare(resident->mesh, resident->constants.data(), count)
+                          : pool.prepareGroup(meshes.data(), constants.data(), count);
     if (!batch)
         return decline(stats.outputDeclined);
     MergedDraw draw{pool, views, count, vertices, stats, forceFallback, std::move(batch)};
     ++stats.groups;
     stats.packets += count;
+    if (resident)
+    {
+        ++stats.nativeBatches;
+        stats.nativePackets += count;
+        stats.largestBatch = std::max(stats.largestBatch, uint64_t(count));
+    }
     // Original triangle order is retained within each independent field.
     // Local indices never connect two source strips, including their ADC cuts.
     for (unsigned field = 0; field < 2; ++field)
     {
         prefix(first.packet + field * (4 + first.geometry->vertices * 3) * 16);
-        if (renderer->DrawNativeTriangles(minimum[field], maximum[field], indices[field].data(), nindices[field],
+        if (renderer->DrawNativeTriangles(minimum[field], maximum[field], drawIndices[field], nindices[field],
                                           vertices * 2, true, &draw, submit, materialize))
             restoreTail(views[count - 1], field);
         else

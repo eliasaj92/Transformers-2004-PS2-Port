@@ -166,6 +166,7 @@ struct DualGeometry::Source
     wil::com_ptr_nothrow<ID3D12Resource> buffer;
     std::vector<uint32_t> firsts;
     std::vector<DualAttributes> attributes;
+    DualAttributes wholeAttributes;
     uint32_t vertices = 0, capacity = 0;
     uint64_t fence = 0;
     Source(GSDevice12 &device, const DualGeometry *pool) : gs(device), owner(pool)
@@ -367,6 +368,7 @@ DualGeometry::Mesh DualGeometry::uploadMesh(const void *inputs, uint32_t vertice
         const uint32_t first = source->firsts[i], end = i + 1 == batches ? vertices : source->firsts[i + 1];
         if (!summarizeDualInputs(data + first * 32, end - first, source->attributes[i]))
             return {};
+        mergeDualAttributes(source->wholeAttributes, source->attributes[i]);
     }
     const uint32_t capacity = (vertices * 32 + 65535) & ~65535u;
     if (capacity > m_meshBudget)
@@ -620,12 +622,14 @@ bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batc
     const auto *transforms = static_cast<const uint8_t *>(constants);
     const auto *first = transforms + firstChunk * 144;
     DualAttributes attributes;
+    const bool whole = firstChunk == 0 && chunks == batches;
     for (uint32_t i = firstChunk; i < firstChunk + chunks; ++i)
     {
         if (std::memcmp(first, transforms + i * 144, 132) || word(transforms + i * 144 + 140) != mesh.source->firsts[i])
             return false;
-        mergeDualAttributes(attributes, mesh.source->attributes[i]);
+        if (!whole) mergeDualAttributes(attributes, mesh.source->attributes[i]);
     }
+    if (whole) attributes = mesh.source->wholeAttributes;
     if (!projectDualBounds(attributes, first, word(first + 128), result[0]))
         return false;
     if (std::memcmp(first, first + 64, 64) == 0)

@@ -195,7 +195,7 @@ void materialize(void *context, GSVertex *vertices, uint32_t count)
 void packetScene(const void *inputs, const uint8_t *constants, const void *packed, unsigned vertices, unsigned count,
                  unsigned side, unsigned mode, GIFRegPRIM prim, tf_gpu::DualGeometry &pool,
                  tf_gpu::DualMergeStats &stats, std::vector<GSVertex> &latches, std::vector<bool> &latchEnds,
-                 uint64_t *counters)
+                 uint64_t *counters, tf_gpu::DualMeshCache *cache)
 {
     auto *renderer = GSRendererHW::GetInstance();
     struct alignas(16) RawPacket
@@ -280,7 +280,7 @@ void packetScene(const void *inputs, const uint8_t *constants, const void *packe
             const auto environment = renderer->m_env;
             const auto latch = renderer->GetNativeVertexLatch();
             const auto dispatches = pool.stats().dispatches;
-            require(!tf_gpu::drawDualGroup(pool, views.data(), prepared.data(), n, stats),
+            require(!tf_gpu::drawDualGroup(pool, views.data(), prepared.data(), n, stats, false, cache),
                     "Unsafe dual merge accepted");
             require(dispatches == pool.stats().dispatches &&
                         !std::memcmp(&environment, &renderer->m_env, sizeof(environment)) &&
@@ -289,7 +289,7 @@ void packetScene(const void *inputs, const uint8_t *constants, const void *packe
             ++counters[17];
         };
         decline(0);
-        decline(9);
+        decline(cache ? tf_gpu::MaxDualMeshPackets + 1 : 9);
         const auto saved0 = raw[0], saved1 = raw[1];
         raw[1].data[16] ^= 1;
         decline(2);
@@ -319,6 +319,38 @@ void packetScene(const void *inputs, const uint8_t *constants, const void *packe
         sources[0].vertices = 2;
         decline(2);
         sources[0].vertices = (views[0].bytes / 16 - 8) / 6;
+        if (cache)
+        {
+            // Cache identity includes every source byte and restart mask, but
+            // excludes camera transforms. Deliberately change both kinds of
+            // immutable data, then restore them and require the original hit.
+            require(tf_gpu::dualMeshTransformsMatch(views[0], views[1]), "Cache test requires a shared transform");
+            auto *original = cache->prepare(views.data(), 2, stats);
+            require(original != nullptr, "Cannot prepare cache identity fixture");
+            const auto originalIndices = original->indices[0].size();
+            const auto uploads = stats.cacheUploads;
+            uint32_t savedPosition;
+            std::memcpy(&savedPosition, sources[0].inputs.data(), 4);
+            const uint32_t changed = savedPosition ^ 1u;
+            std::memcpy(sources[0].inputs.data(), &changed, 4);
+            require(cache->prepare(views.data(), 2, stats) && stats.cacheUploads == uploads + 1,
+                    "Changed mesh source reused stale GPU vertices");
+            std::memcpy(sources[0].inputs.data(), &savedPosition, 4);
+            sources[0].constants[133] ^= 0x20; // toggle the first triangle's ADC bit
+            auto *cut = cache->prepare(views.data(), 2, stats);
+            require(cut && stats.cacheUploads == uploads + 2 && cut->indices[0].size() != originalIndices,
+                    "Changed strip restart reused stale topology");
+            sources[0].constants[133] ^= 0x20;
+            const auto hits = stats.cacheHits;
+            require(cache->prepare(views.data(), 2, stats) == original && stats.cacheHits == hits + 1,
+                    "Restored source did not reuse its resident mesh");
+            const auto savedMatrix = sources[1].constants[0];
+            sources[1].constants[0] ^= 1;
+            require(cache->prepare(views.data(), 2, stats) == original && stats.cacheUploads == uploads + 2,
+                    "Camera-only change replaced immutable source geometry");
+            sources[1].constants[0] = savedMatrix;
+            counters[17] += 4;
+        }
     }
     const auto ordinary = [&](unsigned i) {
         if (!side)
@@ -331,8 +363,13 @@ void packetScene(const void *inputs, const uint8_t *constants, const void *packe
         for (unsigned i = 0, group = 0; i < count; ++group)
         {
             constexpr unsigned sizes[] = {2, 3, 4, 8};
-            const unsigned n = std::min(sizes[group % 4], count - i);
-            if (n < 2 || !tf_gpu::drawDualGroup(pool, views.data() + i, prepared.data() + i, n, stats, mode == 3))
+            unsigned n = std::min(sizes[group % 4], count - i);
+            if (cache)
+            {
+                constexpr unsigned wideSizes[] = {2, 3, 4, 8, 16, 32, tf_gpu::MaxDualMeshPackets};
+                n = std::min(wideSizes[group % 7], count - i);
+            }
+            if (n < 2 || !tf_gpu::drawDualGroup(pool, views.data() + i, prepared.data() + i, n, stats, mode == 3, cache))
                 for (unsigned j = i; j < i + n; ++j)
                     ordinary(j);
             latches[i + n - 1] = renderer->GetNativeVertexLatch();
@@ -383,6 +420,9 @@ static int frontendProbe(const void *inputs, uint32_t count, const void *constan
             std::memcpy(reference.data(), expected, size_t(count) * 64);
             tf_gpu::DualGeometry pool(*device);
             tf_gpu::DualMergeStats merged;
+            const char *meshOption = std::getenv("PS2X_TF_GPU_DUAL_BATCHES");
+            std::unique_ptr<tf_gpu::DualMeshCache> meshCache;
+            if (meshOption && !std::strcmp(meshOption, "1")) meshCache = std::make_unique<tf_gpu::DualMeshCache>(pool);
             std::vector<GSVertex> packetLatches(batches);
             std::vector<bool> packetLatchEnds(batches);
             if (packed)
@@ -569,7 +609,7 @@ static int frontendProbe(const void *inputs, uint32_t count, const void *constan
                         if (packed)
                         {
                             packetScene(inputs, transforms, packed, count, batches, side, mode, prim, pool, merged,
-                                        packetLatches, packetLatchEnds, stats);
+                                        packetLatches, packetLatchEnds, stats, meshCache.get());
                             continue;
                         }
                         for (unsigned group = 0; group < groups; ++group)
@@ -715,6 +755,16 @@ static int frontendProbe(const void *inputs, uint32_t count, const void *constan
                 stats[25] = merged.feedbackDeclined;
                 stats[26] = merged.boundsDeclined;
                 stats[27] = merged.outputDeclined;
+                if (meshCache)
+                {
+                    require(merged.nativeBatches > 100 && merged.cacheHits > 100 && merged.largestBatch > 8 &&
+                                merged.cacheUploads > 0,
+                            "Resident mesh test did not exercise wide groups and source reuse");
+                    std::fprintf(stderr,
+                                 "[gpu-mesh:qualification] batches=%llu packets=%llu cache_hits=%llu cache_uploads=%llu largest=%llu\n",
+                                 merged.nativeBatches, merged.nativePackets, merged.cacheHits, merged.cacheUploads,
+                                 merged.largestBatch);
+                }
                 require(merged.groups > 100 && merged.gpuDraws > 100 && merged.materializations > 0 &&
                             stats[16] > 100 && stats[17] >= 9,
                         "Merged dual diagnostic did not exercise required paths");

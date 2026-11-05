@@ -66,6 +66,7 @@ struct CacheEntry
 struct Live
 {
     tf_gpu::DualGeometry pool;
+    tf_gpu::DualMeshCache meshBatches;
     std::list<CacheEntry> meshes;
     std::unordered_multimap<uint64_t, std::list<CacheEntry>::iterator> lookup;
     std::unordered_set<uint64_t> sourceHashes;
@@ -78,7 +79,7 @@ struct Live
     // Retain the visible level's source working set. The initial 256-entry
     // cache uploaded 125,208 of 155,337 packets. Extra pool capacity covers
     // released buffers which are still in flight.
-    explicit Live(GSDevice12 &device) : pool(device, 128ull * 1024 * 1024, 192ull * 1024 * 1024)
+    explicit Live(GSDevice12 &device) : pool(device, 128ull * 1024 * 1024, 192ull * 1024 * 1024), meshBatches(pool)
     {
     }
     tf_gpu::DualGeometry::Mesh source(const gsnative::DualPacket &p)
@@ -120,6 +121,10 @@ struct Live
     void report() const
     {
         const auto &s = pool.stats();
+        std::fprintf(stderr,
+                     "[gpu-mesh:batches] batches=%llu packets=%llu cache_hits=%llu cache_uploads=%llu largest=%llu\n",
+                     merged.nativeBatches, merged.nativePackets, merged.cacheHits, merged.cacheUploads,
+                     merged.largestBatch);
         std::fprintf(stderr,
                      "[gpu-reflection:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
                      "declined_sections=%llu bounds_declined=%llu output_declined=%llu "
@@ -471,6 +476,47 @@ void executeGroup(const kzgs::PacketView *views, uint32_t count)
         executePacket(views[i].data, views[i].bytes, &prepared[i]);
     }
 }
+void executeDualMeshes(const kzgs::PacketView *views, uint32_t count)
+{
+    static_assert(tf_gpu::MaxDualMeshPackets <= kzgs::MaxPacketGroup);
+    const auto fallback = [&](unsigned begin, unsigned end) {
+        while (begin < end)
+        {
+            const unsigned n = std::min(8u, end - begin);
+            executeGroup(views + begin, n);
+            begin += n;
+        }
+    };
+    if (!count || count > tf_gpu::MaxDualMeshPackets || !g_gs_device ||
+        g_gs_device->GetRenderAPI() != RenderAPI::D3D12)
+    {
+        fallback(0, count);
+        return;
+    }
+    std::array<tf_gpu::DualPacketView, tf_gpu::MaxDualMeshPackets> packets;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        if (views[i].bytes < sizeof(Payload)) { fallback(0, count); return; }
+        const auto &payload = *reinterpret_cast<const Payload *>(views[i].data);
+        if (payload.path != 1 || payload.bytes != views[i].bytes - sizeof(Payload) ||
+            !tf_gpu::dualPacketFraming(payload.geometry, views[i].data + sizeof(Payload), payload.bytes))
+        {
+            fallback(0, count);
+            return;
+        }
+        packets[i] = {&payload.geometry, views[i].data + sizeof(Payload), payload.bytes};
+    }
+    if (!live) live = std::make_unique<Live>(*GSDevice12::GetInstance());
+    for (unsigned first = 0; first < count;)
+    {
+        unsigned end = first + 1;
+        while (end < count && tf_gpu::dualMeshStateMatches(packets[first], packets[end])) ++end;
+        if (end - first < 2 || !tf_gpu::drawDualGroup(live->pool, packets.data() + first, nullptr, end - first,
+                                                     live->merged, false, &live->meshBatches))
+            fallback(first, end);
+        first = end;
+    }
+}
 void executeGrassWide(const kzgs::PacketView *views, uint32_t count)
 {
     static_assert(tf_gpu::MaxMergedGrassPackets <= kzgs::MaxPacketGroup);
@@ -594,6 +640,14 @@ extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_
     }
     if (grouped)
     {
+        static const bool nativeMeshes = [] {
+            const char *value = std::getenv("PS2X_TF_GPU_DUAL_BATCHES");
+            const char *merge = std::getenv("PS2X_TF_GPU_DUAL_MERGE");
+            return value && !std::strcmp(value, "1") && merge && !std::strcmp(merge, "1");
+        }();
+        if (nativeMeshes && geometry->kind == gsnative::GeometryKind::DualTransform)
+            return kzgs::QueuePacketGroupCommand(executeDualMeshes, storage.data(), uint32_t(sizeof(payload) + bytes),
+                                                 tf_gpu::MaxDualMeshPackets) ? 1 : 0;
         static const bool wideGrass = [] {
             const char *size = std::getenv("PS2X_TF_GPU_GRASS_GROUPS");
             const char *merge = std::getenv("PS2X_TF_GPU_GRASS_MERGE");
