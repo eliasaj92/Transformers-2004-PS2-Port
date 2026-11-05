@@ -5,9 +5,12 @@ architecture and headroom above 60 fps. This supersedes further grass/packet
 micro-optimizations. The first offscreen whole-mesh prototype is now implemented:
 an original Amazon rock and its named texture render through a shared native
 mesh/material/snapshot interface, with no GS frontend. Four 1080p diagnostic
-views passed in one Release D3D12 probe invocation. No game was launched.
+views passed in one Release D3D12 probe invocation. A subsequent single enhanced,
+windowed Amazon run exercised the same native pass on the game's actual device
+and queue. Its separate targets passed the same reference checks, preserved the
+game's completed output byte-for-byte, and allowed gameplay to continue.
 See [implementation and evidence](../../deps/native_renderer/README.md).
-Live engine integration and any performance gain remain unproven.
+Replacing live world submissions and any performance gain remain unproven.
 
 ## The boundary must move upstream
 

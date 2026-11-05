@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Transformers adapter to drakolordx7's kzgs and PCSX2. See NOTICE/THIRD_PARTY.md.
 #include "tf_hwgs.h"
+#ifdef TF_HWGS_NATIVE_MESH_PROBE
+#include "tf_native_probe.h"
+#endif
 #ifdef TF_HWGS_GPU_GEOMETRY
 #include "tf_gpu_draw_trace.h"
 #include "tf_gpu_live_draw.h"
@@ -92,6 +95,11 @@ int tf_gs_open(int scale, int fxaa, const char* resources, char* error, uint32_t
     config.upscale = std::clamp(scale, 1, 8);
     config.fxaa = fxaa != 0;
     config.vsync = false; // The existing Transformers presenter owns pacing and the window.
+#ifdef TF_HWGS_NATIVE_MESH_PROBE
+    // A correctness diagnostic, never a benchmark. Enable validation before
+    // device creation so the native pass inherits the real host debug device.
+    if (tf_native_probe::requested()) tf_native_probe::enableHostValidation();
+#endif
     // PCSX2's pinned GameIndex.yaml, SLUS-20668: adaptive BFF avoids combing;
     // texture-in-target, native scaling and half-pixel fixes preserve shadows,
     // sky, light rays and depth edges when rendering above native resolution.

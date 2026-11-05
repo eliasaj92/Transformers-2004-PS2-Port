@@ -1,0 +1,40 @@
+# Enhanced accelerated builds only; visible window, direct presentation and native60=3.
+# Requires a private saved-game seed with the first Amazon gate available.
+# Navigate directly to the level; skip opening movies and the arrival cinematic.
+# Correctness only: native pass runs on the host D3D12 device after player_ready.
+# The runner arms it at native_probe_begin; timings are not a benchmark.
+budget 600s
+stall 600 hard 3600
+watchdog warn 30 600
+defaults hold=3 gap=6 timeout=3000vs
+dumpsteps off
+
+boot:     press start until seen /FMV/NATTRACT.PSS every 10 max 300 hold=2 gap=3 timeout 4000vs
+          wait pads 4
+title:    press start until pads 200 every 40 max 5
+menu:     press down
+          wait pads 20
+          press cross
+          wait pads 60 timeout 9000vs
+loadsave: press cross until cd /SOUND/MUSIC/UI_MAIN.MS every 120 max 2 timeout 3000vs
+hubload:  wait pads 40 timeout 9000vs
+missions: press cross until cd /FMV/LEVELS/N01AMA.M2V every 60 max 2 timeout 1500vs
+          wait pads 4
+          press cross hold=2 gap=4
+          wait pads 30 timeout 9000vs
+          press cross until cd /TFA.ZIP@1940-44053 or cd /SOUND/MUSIC/AMAZON.MS every 30 max 3 timeout 3000vs
+skip_level_intro: press start until player_ready every 10 max 300 hold=2 gap=3 timeout 9000vs
+level:    wait vs 120
+          mark native_probe_begin
+          trainer_probe
+          stick 128 0 128 128
+          wait vs 180
+          stick none
+          wait vs 120
+          stick 128 128 224 128
+          wait vs 180
+          stick none
+          wait vs 300
+          mark native_probe_end
+          trainer_probe
+          pass enhanced level continued after native mesh host probe

@@ -45,3 +45,13 @@ Current enhancement tests skip both opening movies and in-game cinematics. Repla
 The `enhancements/objective_guidance.tfs` route uses a private Amazon hub seed with Aftershock unlocked and `game.objective_guidance=on` in the test INI. It walks through the first guidance trigger, then disables the setting. Verify the logged Training area -> Combat training -> hidden transitions and inspect host captures. Ordinary comparison screenshots contain only guest output, so use `PS2X_HIRES_CAPTURE_DIR`, `PS2X_HIRES_CAPTURE_VS`, and `PS2X_HIRES_CAPTURE_KEEP_SIZE=1` to capture the host marker while preserving the requested window size. All captures and seed cards belong outside the source checkout.
 
 `enhancements/direct_presentation.tfs` uses the same seed and exercises GPU presentation, 4x/8x/4x internal resolution, FXAA on/off and objective guidance. Select `PS2X_GS_BACKEND=hwgs;PS2X_HWGS_DIRECT=1`, use the accelerated package and an explicit private settings INI. Check actual dimensions and zero full-frame readbacks in the logs, not just the terminal PASS. Direct-path script captures retain the full internal image; host captures include the overlay. See [presentation qualification](../docs/findings/direct-presentation.md) for limitations and timing methodology.
+
+`enhancements/native_mesh_host.tfs`, driven by `run_native_mesh_host.py`, tests the
+whole-mesh native renderer on the enhanced game's device/queue after entering the
+level. It requires a renderer built with `TF_HWGS_NATIVE_MESH_PROBE=ON`, private
+native fixture assets, the Amazon save seed and explicit 1280x720 windowed
+settings. One run only, Normal priority, cinematics skipped, no menu checks or
+performance claim. The native pass renders to separate 1080p targets; it does
+not replace a world submission. `verify_native_mesh_host.py` checks saved native
+images, byte-exact preservation of the host image, and gameplay continuation
+without relaunching. See [native renderer tests](../deps/native_renderer/README.md).

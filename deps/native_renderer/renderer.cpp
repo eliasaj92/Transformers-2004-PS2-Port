@@ -73,6 +73,8 @@ struct Renderer::Impl {
     ComPtr<ID3D12GraphicsCommandList> commands;
     ComPtr<ID3D12Fence> fence;
     ComPtr<ID3D12InfoQueue> info;
+    uint64_t firstValidationMessage = 0;
+    bool hostDevice = false;
     HANDLE event = nullptr;
     uint64_t submitted = 0;
     ComPtr<ID3D12RootSignature> root;
@@ -188,8 +190,46 @@ Renderer::Renderer(uint32_t width, uint32_t height, const std::wstring& adapterN
     D3D12_COMMAND_QUEUE_DESC queue{};
     queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     check(p.device->CreateCommandQueue(&queue, IID_PPV_ARGS(&p.queue)), "Create graphics queue");
-    check(p.device->CreateCommandAllocator(queue.Type, IID_PPV_ARGS(&p.allocator)), "Create allocator");
-    check(p.device->CreateCommandList(0, queue.Type, p.allocator.Get(), nullptr, IID_PPV_ARGS(&p.commands)), "Create command list");
+    initialize(width, height, shader);
+}
+
+Renderer::Renderer(uint32_t width, uint32_t height, ID3D12Device* device,
+                   ID3D12CommandQueue* queue, const std::filesystem::path& shader)
+    : impl_(std::make_unique<Impl>()) {
+    auto& p = *impl_;
+    require(device && queue && queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT,
+            "Native renderer requires a host device and DIRECT queue");
+    ComPtr<ID3D12Device> owner;
+    check(queue->GetDevice(IID_PPV_ARGS(&owner)), "Get queue device");
+    require(owner.Get() == device, "Host queue belongs to a different device");
+    p.device = device;
+    p.queue = queue;
+    p.hostDevice = true;
+    // Enabling a layer after device creation is invalid: inherit it instead.
+    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&p.info))))
+        p.firstValidationMessage = p.info->GetNumStoredMessages();
+    ComPtr<IDXGIFactory4> factory;
+    ComPtr<IDXGIAdapter1> adapter;
+    check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "Create host adapter factory");
+    check(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter)), "Find host adapter");
+    DXGI_ADAPTER_DESC1 description{};
+    check(adapter->GetDesc1(&description), "Get host adapter description");
+    require(!(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE), "Native host probe refuses software rendering");
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, description.Description, -1, nullptr, 0, nullptr, nullptr);
+    require(bytes > 1, "Invalid host adapter name");
+    std::vector<char> utf8(size_t(bytes), '\0');
+    require(WideCharToMultiByte(CP_UTF8, 0, description.Description, -1, utf8.data(), bytes, nullptr, nullptr) == bytes,
+            "Cannot encode host adapter name");
+    p.adapter = utf8.data();
+    initialize(width, height, shader);
+}
+
+void Renderer::initialize(uint32_t width, uint32_t height, const std::filesystem::path& shader) {
+    auto& p = *impl_;
+    require(width && height && width <= 8192 && height <= 8192, "Invalid target size");
+    p.width = width; p.height = height;
+    check(p.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&p.allocator)), "Create allocator");
+    check(p.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, p.allocator.Get(), nullptr, IID_PPV_ARGS(&p.commands)), "Create command list");
     check(p.commands->Close(), "Close initial list");
     check(p.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&p.fence)), "Create fence");
     p.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -432,10 +472,12 @@ Readback Renderer::readbackForValidation() {
 }
 const Statistics& Renderer::statistics() const { return impl_->stats; }
 std::string Renderer::adapterName() const { return impl_->adapter; }
+bool Renderer::validationEnabled() const { return bool(impl_->info); }
+bool Renderer::usesHostDevice() const { return impl_->hostDevice; }
 void Renderer::requireNoValidationErrors() const {
     const auto& p = *impl_;
     if (!p.info) return;
-    for (UINT64 i = 0; i < p.info->GetNumStoredMessages(); ++i) {
+    for (UINT64 i = p.firstValidationMessage; i < p.info->GetNumStoredMessages(); ++i) {
         SIZE_T size = 0;
         check(p.info->GetMessage(i, nullptr, &size), "Get validation size");
         std::vector<uint8_t> storage(size);

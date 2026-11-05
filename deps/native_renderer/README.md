@@ -35,9 +35,11 @@ and is not specific to rocks or any VU shader family.
 `render()` returns a GPU resource in `PIXEL_SHADER_RESOURCE` state and a fence.
 It does not read pixels back. `readbackForValidation()` is a separate, explicitly
 diagnostic operation used to check the output. The standalone prototype owns its
-device/queue and permits one frame in flight; integration with the host device,
-shared depth/color ownership and independent render cadence remains subsequent
-work. It creates no window or swapchain.
+device/queue and permits one frame in flight. An overload now accepts the
+enhanced game's device and queue, retaining them through COM ownership while
+using separate lists, heaps and targets. This path passed the in-process test
+below. Shared world depth/color ownership and independent render cadence remain
+subsequent work. The renderer creates no window or swapchain.
 
 ## Actual game asset
 
@@ -120,6 +122,58 @@ The executable dependency inspection contained only D3D12, DXGI, D3DCompiler,
 Windows and C/C++ runtime libraries. There is no legacy draw fallback inside
 this prototype. The normal enhanced game and its fallback remain untouched.
 
+## Enhanced-game host test, 2026-11-05
+
+The same four native views also passed **inside one enhanced Amazon level run**,
+using the game's actual D3D12 device and DIRECT queue. The renderer accepts those
+interfaces directly and retains its own command lists, heaps, assets and targets.
+The shared probe code is used by both the standalone executable and host adapter.
+
+Build the enhanced renderer with `TF_HWGS_NATIVE_MESH_PROBE=ON` (default OFF).
+The native diagnostic remains disabled until `PS2X_TF_NATIVE_HOST_PROBE` names a
+fresh private output directory. `PS2X_TF_NATIVE_HOST_ASSET` and
+`PS2X_TF_NATIVE_HOST_SHADER` supply absolute input paths. The runner creates the
+`PS2X_TF_NATIVE_HOST_ARM` file only after the stable in-level `player_ready`
+checkpoint. The host enables standard D3D12 validation before device creation;
+GPU-instrumented validation of the entire legacy renderer is not enabled.
+
+```powershell
+python testing/run_native_mesh_host.py `
+  --exe 'C:/path/to/enhanced-probe-build/ps2EntryRunner.exe' `
+  --elf 'C:/path/to/generation/SLUS_206.68' `
+  --iso 'C:/path/to/Transformers (USA).iso' `
+  --seed 'C:/path/to/private/Amazon-save/mc0' `
+  --settings 'C:/path/to/private/windowed-1280x720.ini' `
+  --asset "$nativeWork/fixture" --shader 'deps/native_renderer/mesh.hlsl' `
+  --work "$nativeWork/host-run"
+```
+
+Observed result in private `runs/level-native-host-windowed-01`:
+
+- One game-68 invocation, unchanged accelerated/static-VU game-67 executable,
+  test renderer DLL `23820260d438a6c33e288d4d790979118da60f55df5c97d803dea733ff1263b3`.
+- Normal process priority, no concurrent compilation, visible bordered
+  1280x720 window, 4x internal scene output, opening/arrival cinematics skipped.
+  No menu checks or original-build tests.
+- Native target: 1920x1080, four views/five complete-mesh draws, one-time 70,684
+  byte asset upload, standard debug layer, no native-pass validation errors.
+  All color/depth/coverage results match the standalone table above.
+- The game's completed 2048x1788 RGBA output was byte-identical before/after
+  the native pass: **14,647,296 bytes** checked. Subsequent gameplay output was
+  captured 60 renderer ticks later and visually inspected. The route exercised
+  movement/camera input and passed; private input save/settings hashes matched.
+- The game's route marks were EE fields 2697..3477. The native pass was renderer
+  tick 2691, followed by continuation at 2751. These counters have different
+  origins and asynchronous delivery. The initial verifier incorrectly compared
+  their values; it was corrected to check the arming/log order and each clock
+  separately. Re-verification used saved files only, with **no second game run**.
+
+`host-verification.json` records the final PASS. `host-run.json` records the game
+exit code, visible-window verification and protected input hashes result.
+The run is diagnostic correctness evidence, not a speed measurement. Readbacks
+occur only for the bounded native/host validation images. The normal launcher
+and gameplay settings were not changed.
+
 ## What this establishes, and the next boundary
 
 This proves a complete original game mesh can be retained and textured using
@@ -128,9 +182,12 @@ to a live game's effective camera/material/lighting state, campaign coverage,
 60/120 fps, or safe suppression of a guest submission. The reference is the
 authored asset plus an independent rasterizer, not a matching PCSX2 screenshot.
 
-The smallest subsequent integration experiment is one identified rigid-mesh
-submission with an owned live instance/camera/material snapshot, using the host
-D3D12 device and an explicit color/depth ownership boundary. Compare that output
+The host test validates device/queue sharing during gameplay. It still renders
+the authored fixture into separate native targets; it does not replace a world
+object or prove the live game's material/lighting state. The smallest subsequent
+integration experiment is one identified rigid-mesh submission with an owned
+live instance/camera/material snapshot and an explicit world color/depth
+ownership boundary on the now-tested host device. Compare that output
 and preserve required guest side effects before suppressing its legacy draw.
 Unsupported material/animation/feedback cases stay on the enhanced renderer.
 Only measure a speedup after this removes work from live frame delivery. No

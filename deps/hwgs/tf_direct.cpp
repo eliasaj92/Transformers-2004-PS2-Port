@@ -2,6 +2,9 @@
 // D3D12 -> OpenGL shared textures. No frame pixels cross the CPU boundary.
 #include "tf_hwgs.h"
 #include "tf_scene_capture.h"
+#ifdef TF_HWGS_NATIVE_MESH_PROBE
+#include "tf_native_probe.h"
+#endif
 #include "kzgs_internal.h"
 #include "GS/Renderers/DX12/GSDevice12.h"
 #include "GS/Renderers/DX12/GSTexture12.h"
@@ -199,6 +202,9 @@ int tf_gs_direct_publish(uint32_t scale, uint32_t scene, uint32_t display_fbp, u
             const uint64_t ready=s.nextValue; s.nextValue+=2;
             if(!device->ExecuteCommandList(GSDevice12::WaitType::None))throw std::runtime_error("direct frame submission failed");
             device->InvalidateCachedState();
+#ifdef TF_HWGS_NATIVE_MESH_PROBE
+            tf_native_probe::afterSubmit(*device, *current, captureFrame);
+#endif
             check(device->GetCommandQueue()->Signal(s.fence.get(),ready),"GPU signal for GL acquire");
             {
                 std::lock_guard<std::mutex> lock(mutex);

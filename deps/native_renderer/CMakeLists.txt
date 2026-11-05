@@ -12,8 +12,12 @@ target_compile_definitions(tf_native_renderer PRIVATE WIN32_LEAN_AND_MEAN NOMINM
 target_compile_options(tf_native_renderer PRIVATE /W4 /permissive-)
 target_link_libraries(tf_native_renderer PUBLIC d3d12 dxgi d3dcompiler)
 
+add_library(tf_native_mesh_probe_support STATIC probe_scene.cpp)
+target_compile_definitions(tf_native_mesh_probe_support PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(tf_native_mesh_probe_support PRIVATE /W4 /permissive-)
+target_link_libraries(tf_native_mesh_probe_support PUBLIC tf_native_renderer)
 add_executable(tf_native_mesh_probe probe.cpp)
 target_compile_definitions(tf_native_mesh_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(tf_native_mesh_probe PRIVATE /W4 /permissive-)
-target_link_libraries(tf_native_mesh_probe PRIVATE tf_native_renderer)
+target_link_libraries(tf_native_mesh_probe PRIVATE tf_native_mesh_probe_support)
 configure_file(mesh.hlsl mesh.hlsl COPYONLY)

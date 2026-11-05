@@ -9,6 +9,8 @@
 
 struct ID3D12Resource;
 struct ID3D12Fence;
+struct ID3D12Device;
+struct ID3D12CommandQueue;
 
 namespace tfnative {
 
@@ -75,6 +77,11 @@ public:
     // The probe deliberately requires the requested hardware adapter, no WARP.
     Renderer(uint32_t width, uint32_t height, const std::wstring& adapterName,
              const std::filesystem::path& shader, bool debugLayer);
+    // Host must flush its open list before calling this path, and serialize all
+    // queue submissions. Own lists/heaps/targets; no mutation of host resources.
+    // Device and queue are AddRef'd. Validation is inherited from the host.
+    Renderer(uint32_t width, uint32_t height, ID3D12Device* device,
+             ID3D12CommandQueue* queue, const std::filesystem::path& shader);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
@@ -85,9 +92,12 @@ public:
     Readback readbackForValidation(); // explicit diagnostic; not the render path
     const Statistics& statistics() const;
     std::string adapterName() const;
+    bool validationEnabled() const;
+    bool usesHostDevice() const;
     void requireNoValidationErrors() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    void initialize(uint32_t width, uint32_t height, const std::filesystem::path& shader);
 };
 } // namespace tfnative
