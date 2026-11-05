@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "runtime/gs/gs_native_grass_math.h"
+#include "runtime/gs/gs_native_reflection_math.h"
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -131,6 +132,9 @@ void materializePacket(const DualPacket &packet, uint8_t *gif, uint32_t bytes)
         return;
     case GeometryKind::GrassSprites:
         materializeGrassPacket(packet, gif, bytes);
+        return;
+    case GeometryKind::Reflection:
+        materializeReflectionPacket(packet, gif, bytes);
         return;
     }
     throw std::runtime_error("Unknown deferred geometry kind");

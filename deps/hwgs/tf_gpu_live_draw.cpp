@@ -3,6 +3,7 @@
 #include "tf_gpu_live_draw.h"
 #include "tf_gpu_live_grass.h"
 #include "tf_gpu_live_dual.h"
+#include "tf_gpu_live_reflection.h"
 #include "tf_gpu_dual_geometry.h"
 #include "tf_gpu_dual_frontend.h"
 #include "runtime/gs/gs_native_grass_math.h"
@@ -73,6 +74,7 @@ struct Live
     uint64_t packetGroups = 0, groupPackets = 0, groupDeclined = 0;
     tf_gpu::GrassLiveStats grass;
     tf_gpu::DualMergeStats merged;
+    tf_gpu::ReflectionLiveStats reflection;
     // Retain the visible level's source working set. The initial 256-entry
     // cache uploaded 125,208 of 155,337 packets. Extra pool capacity covers
     // released buffers which are still in flight.
@@ -118,6 +120,13 @@ struct Live
     void report() const
     {
         const auto &s = pool.stats();
+        std::fprintf(stderr,
+                     "[gpu-reflection:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
+                     "declined_sections=%llu bounds_declined=%llu output_declined=%llu "
+                     "bounds_nodes=%llu bounds_leaves=%llu dispatches=%llu vertices=%llu\n",
+                     reflection.packets, reflection.gpuDraws, reflection.materializations,
+                     reflection.declinedSections, reflection.boundsDeclined, reflection.outputDeclined,
+                     reflection.boundsNodes, reflection.boundsLeaves, s.reflectionDispatches, s.reflectionVertices);
         std::fprintf(stderr,
                      "[gpu-dual:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu declined_fields=%llu "
                      "source_hits=%llu bounds_declined=%llu dispatches=%llu source_uploads=%llu source_bytes=%llu "
@@ -252,6 +261,18 @@ void executePacket(const uint8_t *bytes, uint32_t size, const tf_gpu::PreparedDu
             if (!live)
                 live = std::make_unique<Live>(*GSDevice12::GetInstance());
             if (tf_gpu::drawGrassPacket(live->pool, p, packet, payload.bytes, live->grass, false, grassPrepared))
+                return;
+        }
+        ordinary();
+        return;
+    }
+    if (p.kind == gsnative::GeometryKind::Reflection)
+    {
+        if (g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::D3D12 && payload.path == 1)
+        {
+            if (!live)
+                live = std::make_unique<Live>(*GSDevice12::GetInstance());
+            if (tf_gpu::drawReflectionPacket(live->pool, p, packet, payload.bytes, live->reflection))
                 return;
         }
         ordinary();
@@ -487,12 +508,17 @@ extern "C" int tf_gs_native_dual_gif(uint32_t path, const uint8_t *data, uint32_
                                      const gsnative::DualPacket *geometry)
 {
     if (path != 1 || !data || !geometry ||
-        (!tf_gpu::dualPacketFraming(*geometry, data, bytes) && !tf_gpu::grassPacketFraming(*geometry, data, bytes)))
+        (!tf_gpu::dualPacketFraming(*geometry, data, bytes) && !tf_gpu::grassPacketFraming(*geometry, data, bytes) &&
+         !tf_gpu::reflectionPacketFraming(*geometry, data, bytes)))
         return 0;
-    alignas(16) std::array<uint8_t, sizeof(Payload) + (8 + 28 * 6) * 16> storage;
+    alignas(16) std::array<uint8_t, sizeof(Payload) + 4 * (4 + 3 * gsnative::ReflectionMaxVertices) * 16> storage;
     const Payload payload{*geometry, path, bytes, 0};
     std::memcpy(storage.data(), &payload, sizeof(payload));
     std::memcpy(storage.data() + sizeof(payload), data, bytes);
+    // Four ordered reflection sections are not part of the dual/grass merger.
+    // An ordinary owned command also forms an explicit group boundary.
+    if (geometry->kind == gsnative::GeometryKind::Reflection)
+        return kzgs::QueuePacketCommand(execute, storage.data(), uint32_t(sizeof(payload) + bytes)) ? 1 : 0;
     static const bool grouped = [] {
         const char *p = std::getenv("PS2X_TF_GPU_GROUPS");
         return p && !std::strcmp(p, "8");

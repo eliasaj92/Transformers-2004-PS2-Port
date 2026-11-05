@@ -579,3 +579,21 @@ adapter still needs an owned four-section companion, source-derived GS bounds,
 deferred-memory resolution and CPU fallback before performance can be measured
 in the enhanced level. The diagnostic viewport uses captured bounds and must
 not become the live metadata path. See [the paired contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-projection-and-resident-drawing).
+
+## Reflection frontend and GPU primitive culling
+
+The reflection companion now carries original source geometry through the
+existing owned queue layout. Source-only interval bounds and strict CPU fallback
+match all 706 captured batches. The D3D12 path calculates lighting/projection,
+applies the GS scissor/degenerate-triangle rules on the GPU, and passes resident
+vertices through the real texture/depth/blend frontend in four ordered sections.
+An initial screen-edge mismatch was fixed by that GPU culling step.
+
+Four 4×-resolution frontend modes compare 58,720,256 pixels and 2,824 final
+latches without differences. Each normal mode uses 695 GPU dispatches and
+2,780 native draws; eleven packets retain ordinary fallback when the resolved
+tail cannot prove native eligibility. Deliberate fallback also matches.
+
+Live VU ownership/hooks are still pending. No new gameplay rate is claimed;
+the latest enhanced Amazon measurement remains 57.49 physics updates/s and
+56.50 direct handoffs/s. See [the implementation contract](../../deps/hwgs/GPU_GEOMETRY.md#reflection-source-bounds-gs-frontend-and-gpu-culling).

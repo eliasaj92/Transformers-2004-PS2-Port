@@ -1055,11 +1055,11 @@ compares 26,542,080 pixels with zero differences. It downloads final images
 only. Captured coordinates set the diagnostic viewport; this does **not**
 qualify source-derived live GS bounds, texture-cache admission or CPU fallback.
 
-Live reflection bypass remains unfinished. The next work is an owned
-four-section packet with original sources/constants, deferred guest-memory
-resolution, source-derived frontend metadata and fallback, followed by an
-enhanced level run. Neither offline tail counts nor resident diagnostic draws
-establish a gameplay FPS improvement.
+Live VU reflection bypass remains unfinished. The owned packet, source-derived
+frontend metadata and fallback are now implemented below; deferred guest-memory
+resolution and authenticated runtime hooks remain, followed by an enhanced
+level run. Neither offline tail counts nor resident diagnostic draws establish
+a gameplay FPS improvement.
 
 ```powershell
 python -B testing/test_gpu_reflection.py capture --projection `
@@ -1083,6 +1083,64 @@ python -B testing/test_gpu_reflection_projection.py draw `
   --dll $private/gpu-build/tf_hwgs.dll --adapter 'NVIDIA GeForce RTX 3080 Laptop GPU' `
   --report $private/projection-draw.json
 ```
+
+## Reflection source bounds, GS frontend and GPU culling
+
+`GeometryKind::Reflection` reuses the owned 1,072-byte companion layout. It
+contains up to 22 position/UV/normal records, eleven lighting vectors, two
+projection matrices, draw opacity and restart masks. The renderer queues an
+independent copy and preserves all four GIF sections in their original order.
+Reflection commands form boundaries between existing mesh/grass groups.
+
+Source-space normal/position intervals supply conservative reflection UV/Q
+bounds. Only inconclusive normalization boxes are subdivided. Projection uses
+the existing conservative bounds routine; neither step reads GPU output or
+emits the mesh's projected CPU vertices. The required rounding/denormal mode
+is restored afterward. All 706 captured batches have valid enclosing bounds.
+The strict CPU fallback reproduces all 14,017 captured lighting vertices and
+four-section projection packets, including untouched lanes and framing.
+
+The real GS frontend comparison exposed a missing primitive-culling step at
+the scissor edge. `prepareReflectionCulled` now computes lighting/projection
+once per source into group-shared storage, then expands each triangle into
+independent native vertices and applies the upscaled GS integer culling rules
+on the GPU. Culled triangles become degenerate without changing their neighbors.
+The source-only CPU fallback applies the same rules. A retained, surviving
+triangle must witness nonconstant depth; otherwise that section uses ordinary
+GIF fallback. Native-resolution and AA cases also keep the ordinary path.
+
+Four modes (nearest, linear with alpha/blending, mipmapped blending and forced
+fallback) compare complete 2,048×1,792 targets against captured accelerated GIF.
+Each mode checks 706 final GS latches and four independent images. Across all
+modes, 58,720,256 pixels match exactly. Each normal GPU mode uses 2,780 native
+draws from 695 dispatches; eleven packets require conservative fallback. The
+native input is poisoned everywhere outside the final three retained vertices,
+so stale omitted geometry cannot accidentally supply draw preparation.
+
+These are renderer integration diagnostics, not live VU offload or FPS results.
+The normal launcher is unchanged. The next step is to preserve deferred VU
+memory across live calls and bind the authenticated lighting/projection tails
+to these owned packets, then measure the enhanced Amazon route.
+
+```powershell
+python -B testing/test_gpu_reflection_source.py `
+  --prepared $private/reflection-paired --fixtures $private/all-fixtures.txt `
+  --dll $private/gpu-build/tf_hwgs.dll --adapter 'NVIDIA GeForce RTX 3080 Laptop GPU' `
+  --report $private/reflection-source.json
+python -B testing/test_gpu_reflection_source.py --cull `
+  --prepared $private/reflection-paired --fixtures $private/all-fixtures.txt `
+  --dll $private/gpu-build/tf_hwgs.dll --adapter 'NVIDIA GeForce RTX 3080 Laptop GPU' `
+  --report $private/reflection-culling.json
+python -B testing/test_gpu_reflection_source.py --frontend `
+  --prepared $private/reflection-paired --fixtures $private/all-fixtures.txt `
+  --dll $private/gpu-build/tf_hwgs.dll --adapter 'NVIDIA GeForce RTX 3080 Laptop GPU' `
+  --report $private/reflection-frontend.json
+```
+
+The culling diagnostic explicitly reads back selected mixed surviving/culled
+strips to check the expanded vertex bytes. Only that diagnostic reads geometry;
+the production renderer downloads none. `--first` / `--limit` restrict a
+frontend diagnostic to a captured packet range and do not change admission.
 
 ## Bounded output-image cadence capture
 

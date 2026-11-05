@@ -34,14 +34,16 @@ if(TF_HWGS_GPU_GEOMETRY)
         tf_gpu_dual_geometry.cpp tf_gpu_grass_probe.cpp tf_gpu_grass_draw_probe.cpp tf_gpu_dual_draw_probe.cpp tf_gpu_draw_trace.cpp
         tf_gpu_dual_frontend.cpp tf_gpu_frontend_probe.cpp tf_gpu_grass_frontend_probe.cpp tf_gpu_live_draw.cpp
         tf_gpu_live_grass.cpp tf_gpu_live_dual.cpp tf_gpu_merge_guards.cpp tf_gpu_reflection_probe.cpp
-        tf_gpu_reflection_draw_probe.cpp tf_scene_capture_probe.cpp)
+        tf_gpu_reflection_draw_probe.cpp tf_gpu_reflection_source_probe.cpp tf_gpu_live_reflection.cpp
+        tf_gpu_reflection_frontend_probe.cpp tf_scene_capture_probe.cpp)
     # Bounds must honor/restore the caller's floating-point environment. Keep
     # this object separate from kzgs_flags, whose /fp:contract conflicts with
     # /fp:strict under MSVC.
     add_library(tf_gpu_dual_bounds OBJECT tf_gpu_dual_bounds.cpp)
     target_sources(tf_gpu_dual_bounds PRIVATE
         ../../PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_dual_math.cpp
-        ../../PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_grass_math.cpp)
+        ../../PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_grass_math.cpp
+        ../../PS2Recomp/ps2xRuntime/src/lib/gs/gs_native_reflection_math.cpp tf_gpu_reflection_bounds.cpp)
     target_include_directories(tf_gpu_dual_bounds PRIVATE ../../PS2Recomp/ps2xRuntime/include)
     target_compile_features(tf_gpu_dual_bounds PRIVATE cxx_std_20)
     if(MSVC)

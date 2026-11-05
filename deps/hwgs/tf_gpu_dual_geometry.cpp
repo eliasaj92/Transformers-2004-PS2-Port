@@ -50,7 +50,8 @@ struct DualGeometry::Pipeline
     GSDevice12 &gs;
     wil::com_ptr_nothrow<ID3D12RootSignature> signature;
     wil::com_ptr_nothrow<ID3D12PipelineState> pipeline;
-    explicit Pipeline(GSDevice12 &device, bool grouped = false, bool grass = false, bool reflection = false)
+    explicit Pipeline(GSDevice12 &device, bool grouped = false, bool grass = false, bool reflection = false,
+                      bool reflectionCull = false)
         : gs(device)
     {
         D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
@@ -69,7 +70,8 @@ struct DualGeometry::Pipeline
                   "Cannot query reflection shader support");
             if (model.HighestShaderModel < D3D_SHADER_MODEL_6_5)
                 throw std::runtime_error("Native reflection geometry requires shader model 6.5");
-            const std::string shader = std::string("#define TF_GPU_REFLECTION_PROJECT 1\n") + tf_gpu_reflection_shader;
+            const std::string shader = std::string("#define TF_GPU_REFLECTION_PROJECT 1\n") +
+                (reflectionCull ? "#define TF_GPU_REFLECTION_CULL 1\n" : "") + tf_gpu_reflection_shader;
             code = D3D::CompileShaderDXIL(D3D::ShaderType::Compute, D3D::ShaderModel::SM65, false, shader);
             if (!code)
                 throw std::runtime_error("Native reflection DXIL compilation failed");
@@ -420,6 +422,29 @@ DualGeometry::Batch DualGeometry::prepareReflection(const void *inputs, uint32_t
     return dispatch(std::move(page), address, count * 2, 0, nullptr, 0, false, false, true);
 }
 
+DualGeometry::Batch DualGeometry::prepareReflectionCulled(const void *inputs, uint32_t count,
+                                                         const ReflectionRasterState &raster)
+{
+    if (!inputs || count < 3 || count > 22)
+        return {};
+    for (unsigned section = 0; section < 4; ++section)
+        if (raster.offset[section][2] || raster.offset[section][3] ||
+            raster.scissor[section][0] >= raster.scissor[section][2] ||
+            raster.scissor[section][1] >= raster.scissor[section][3])
+            return {};
+    if (!m_reflectionCullPipeline)
+        m_reflectionCullPipeline = std::make_unique<Pipeline>(m_device, false, false, true, true);
+    auto page = acquirePage((count * 368 + 128 + 65535) & ~65535u, ((count - 2) * 384 + 65535) & ~65535u);
+    if (!page)
+        return {};
+    std::memcpy(page->mappedUpload, inputs, size_t(count) * 368);
+    std::memcpy(static_cast<uint8_t *>(page->mappedUpload) + count * 368, &raster, sizeof(raster));
+    m_stats.sourceUploadBytes += uint64_t(count) * 48;
+    m_stats.constantUploadBytes += uint64_t(count) * 320 + 128;
+    const auto address = page->upload->GetGPUVirtualAddress();
+    return dispatch(std::move(page), address, (count - 2) * 6, 0, nullptr, 0, false, false, true, count);
+}
+
 bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batches, uint32_t firstChunk,
                           uint32_t chunks, std::array<DualDrawBounds, 2> &result) const
 {
@@ -448,7 +473,7 @@ bool DualGeometry::bounds(const Mesh &mesh, const void *constants, uint32_t batc
 
 DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices,
                                            uint32_t constantsOffset, const uint64_t *groupSources, uint32_t groups,
-                                           bool grass, bool fieldMajor, bool reflection)
+                                           bool grass, bool fieldMajor, bool reflection, uint32_t reflectionCullCount)
 {
     m_device.EndRenderPass();
     auto *command = m_device.GetCommandList().list4.get();
@@ -464,7 +489,8 @@ DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t 
         command->ResourceBarrier(1, &barrier);
     }
     const auto &pipeline =
-        reflection ? m_reflectionPipeline : (grass ? m_grassPipeline : (groups ? m_groupedPipeline : m_pipeline));
+        reflection ? (reflectionCullCount ? m_reflectionCullPipeline : m_reflectionPipeline)
+                   : (grass ? m_grassPipeline : (groups ? m_groupedPipeline : m_pipeline));
     const unsigned sources = groups ? 8 : 1;
     command->SetComputeRootSignature(pipeline->signature.get());
     command->SetPipelineState(pipeline->pipeline.get());
@@ -473,7 +499,8 @@ DualGeometry::Batch DualGeometry::dispatch(std::shared_ptr<Page> page, uint64_t 
     if (!grass && !reflection)
         command->SetComputeRootShaderResourceView(sources, page->upload->GetGPUVirtualAddress() + constantsOffset);
     const unsigned outputSlot = (grass || reflection) ? 1 : sources + 1;
-    const uint32_t count = reflection ? vertices / 2 : (grass ? vertices / 16 : (groups ? groups : vertices));
+    const uint32_t count = reflection ? (reflectionCullCount ? reflectionCullCount : vertices / 2)
+                                     : (grass ? vertices / 16 : (groups ? groups : vertices));
     command->SetComputeRootUnorderedAccessView(outputSlot, page->output->GetGPUVirtualAddress());
     command->SetComputeRoot32BitConstant(outputSlot + 1, count, 0);
     if (grass)

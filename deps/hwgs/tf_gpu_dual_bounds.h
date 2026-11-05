@@ -2,6 +2,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+namespace gsnative { struct DualPacket; }
 
 namespace tf_gpu
 {
@@ -38,4 +39,8 @@ bool projectDualBounds(const DualAttributes &attributes, const void *matrix, uin
 // Bounds from one 320-byte grass emitter input, without emitting its vertices.
 // Uses monotone binary32 interval operations in the VU rounding environment.
 bool projectGrassBounds(const void *inputs, std::array<DualDrawBounds, 2> &result);
+// Source-space reflection boxes are split only when normalization/Q bounds
+// are inconclusive. Never reads GPU output or emits projected CPU vertices.
+bool projectReflectionBounds(const gsnative::DualPacket &packet, std::array<DualDrawBounds, 4> &result,
+                             uint32_t *visitedNodes = nullptr, uint32_t *acceptedLeaves = nullptr);
 } // namespace tf_gpu

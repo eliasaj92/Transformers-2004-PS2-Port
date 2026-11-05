@@ -7,6 +7,11 @@ ByteAddressBuffer inputs : register(t0);
 RWByteAddressBuffer geometry : register(u0);
 cbuffer Dispatch : register(b0) { uint count; };
 #include "vu_math.hlsl"
+#ifdef TF_GPU_REFLECTION_CULL
+// One packet per group (at most 22 source vertices). Shared results avoid
+// repeating lighting/projection when expanding the strip into culled triangles.
+groupshared uint4 nativeVertices[22 * 8];
+#endif
 
 precise float4 loadVector(uint base, uint slot) { return asfloat(inputs.Load4(base + slot * 16)); }
 precise float3 times(float3 a, float3 b)
@@ -33,9 +38,14 @@ precise float sqrt_rtz(float value)
     }
     return normal(asfloat(bits));
 }
+uint integer_rtz(float value)
+{
+    if (value >= 2147483648.0f) return 0x7fffffffu;
+    if (value <= -2147483648.0f) return 0x80000000u;
+    return asuint((int)value);
+}
 
-[numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void calculate(uint3 id)
 {
     if (id.x >= count) return;
 #ifdef TF_GPU_REFLECTION_PROJECT
@@ -71,7 +81,7 @@ void main(uint3 id : SV_DispatchThreadID)
                             add_rtz(mul_rtz(direction.y, q), 0.5f));
     const precise float4 alpha = loadVector(base, 8);
     const precise float opacity = mul_rtz(mul_rtz(255.0f, alpha.x), mul_rtz(add_rtz(1.0f, -facing), alpha.y));
-    const uint4 lit = uint4(rgb, opacity);
+    const uint4 lit = uint4(uint3(rgb), integer_rtz(opacity));
 #ifdef TF_GPU_REFLECTION_PROJECT
     const uint drawAlpha = (uint)mul_rtz(asfloat(inputs.Load(base + 352)), 128.0f);
     const uint flags = inputs.Load(base + 356);
@@ -95,9 +105,16 @@ void main(uint3 id : SV_DispatchThreadID)
             const uint rgba = (color.x & 255) | ((color.y & 255) << 8) | ((color.z & 255) << 16) |
                               ((color.w & 255) << 24);
             const uint address = (id.x * 4 + section) * 32;
-            geometry.Store4(address, uint4(asuint(uvq.xy), rgba, asuint(uvq.z) == 0 ? 0x00800000u : asuint(uvq.z)));
-            geometry.Store4(address + 16, uint4((uint(xyz.x) & 65535) | (uint(xyz.y) << 16),
-                (uint(xyz.z) >> 4) & 0x00ffffffu, 0, (flags >> 4) & 255));
+            const uint4 first = uint4(asuint(uvq.xy), rgba, asuint(uvq.z) == 0 ? 0x00800000u : asuint(uvq.z));
+            const uint4 second = uint4((uint(xyz.x) & 65535) | (uint(xyz.y) << 16),
+                (uint(xyz.z) >> 4) & 0x00ffffffu, 0, (flags >> 4) & 255);
+#ifdef TF_GPU_REFLECTION_CULL
+            nativeVertices[address / 16] = first;
+            nativeVertices[address / 16 + 1] = second;
+#else
+            geometry.Store4(address, first);
+            geometry.Store4(address + 16, second);
+#endif
 #ifdef TF_GPU_REFLECTION_CAPTURE
             // Offline diagnostic readback only. Resident draws compile this
             // out; unused packed STQ.w has no GS vertex semantics.
@@ -112,5 +129,47 @@ void main(uint3 id : SV_DispatchThreadID)
     geometry.Store4(output, asuint(float4(uv, denominator, stq.y)));
     geometry.Store4(output + 16, lit);
     geometry.Store4(output + 32, asuint(float4(position.xyz, stq.x)));
+#endif
+}
+
+#ifdef TF_GPU_REFLECTION_CULL
+bool culled(uint vertex, uint section)
+{
+    const int4 scissor = asint(inputs.Load4(count * 368 + section * 16));
+    const int2 offset = asint(inputs.Load2(count * 368 + 64 + section * 16));
+    int2 points[3];
+    [unroll] for (uint corner = 0; corner < 3; ++corner)
+    {
+        const uint xy = nativeVertices[(vertex + corner) * 8 + section * 2 + 1].x;
+        points[corner] = int2(xy & 65535, xy >> 16) - offset;
+    }
+    int4 box = int4(min(min(points[0], points[1]), points[2]), max(max(points[0], points[1]), points[2]));
+    box.zw -= int2((box.zw & 15) == 0);
+    return any(box.xy >= box.zw) || any(box.zw + 1 <= scissor.xy) || any(box.xy >= scissor.zw) ||
+        all(points[0] == points[1]) || all(points[1] == points[2]) || all(points[0] == points[2]);
+}
+#endif
+
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    calculate(id);
+#ifdef TF_GPU_REFLECTION_CULL
+    // Every lane reaches the barrier, including the lanes without a source.
+    GroupMemoryBarrierWithGroupSync();
+    if (id.x + 2 >= count) return;
+    [unroll] for (uint section = 0; section < 4; ++section)
+    {
+        const bool skip = culled(id.x, section);
+        [unroll] for (uint corner = 0; corner < 3; ++corner)
+        {
+            const uint input = (id.x + corner) * 8 + section * 2;
+            const uint address = ((id.x * 3 + corner) * 4 + section) * 32;
+            uint4 second = nativeVertices[input + 1];
+            if (skip) second.xy = nativeVertices[id.x * 8 + section * 2 + 1].xy;
+            geometry.Store4(address, nativeVertices[input]);
+            geometry.Store4(address + 16, second);
+        }
+    }
 #endif
 }

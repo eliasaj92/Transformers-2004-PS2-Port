@@ -56,11 +56,15 @@ void upload(ID3D12Resource *buffer, const void *source, uint32_t bytes)
 } // namespace
 
 static int reflectionProbe(const void *inputs, uint32_t count, void *output, uint32_t outputCapacity, char *error,
-                           uint32_t errorCapacity, bool projection)
+                           uint32_t errorCapacity, unsigned mode)
 {
+    const bool projection = mode != 0, culled = mode == 2;
     const uint32_t inputStride = projection ? 368 : 224, outputStride = projection ? 320 : 48;
+    const uint32_t sourceBytes = count * inputStride + (culled ? 128 : 0);
+    const uint32_t resultBytes = culled ? (count >= 3 ? (count - 2) * 384 : 0) : count * outputStride;
     bool passed = false;
-    if (!inputs || !output || !count || count > 65536 || outputCapacity < uint64_t(count) * outputStride)
+    if (!inputs || !output || !count || count > 65536 || (culled && (count < 3 || count > 22)) ||
+        outputCapacity < resultBytes)
     {
         if (error && errorCapacity)
             std::snprintf(error, errorCapacity, "Invalid reflection probe buffers");
@@ -86,7 +90,8 @@ static int reflectionProbe(const void *inputs, uint32_t count, void *output, uin
             // FXC's optimized output loses vector components in this kernel.
             // Use the renderer's existing optimized DXC path, qualified below.
             const std::string shader =
-                std::string(projection ? "#define TF_GPU_REFLECTION_PROJECT 1\n#define TF_GPU_REFLECTION_CAPTURE 1\n"
+                std::string(culled ? "#define TF_GPU_REFLECTION_PROJECT 1\n#define TF_GPU_REFLECTION_CULL 1\n" :
+                    projection ? "#define TF_GPU_REFLECTION_PROJECT 1\n#define TF_GPU_REFLECTION_CAPTURE 1\n"
                                        : "") +
                 tf_gpu_reflection_shader;
             auto code = D3D::CompileShaderDXIL(D3D::ShaderType::Compute, D3D::ShaderModel::SM65, false, shader);
@@ -114,12 +119,12 @@ static int reflectionProbe(const void *inputs, uint32_t count, void *output, uin
             wil::com_ptr_nothrow<ID3D12PipelineState> pipeline;
             check(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(pipeline.put())),
                   "Create reflection pipeline");
-            auto source = createBuffer(device, count * inputStride, D3D12_HEAP_TYPE_UPLOAD,
+            auto source = createBuffer(device, sourceBytes, D3D12_HEAP_TYPE_UPLOAD,
                                        D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
             auto result =
-                createBuffer(device, count * outputStride, D3D12_HEAP_TYPE_DEFAULT,
+                createBuffer(device, resultBytes, D3D12_HEAP_TYPE_DEFAULT,
                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            auto readback = createBuffer(device, count * outputStride, D3D12_HEAP_TYPE_READBACK,
+            auto readback = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_READBACK,
                                          D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
             struct LifetimeGuard
             {
@@ -129,7 +134,7 @@ static int reflectionProbe(const void *inputs, uint32_t count, void *output, uin
                     device->WaitForGPUIdle();
                 }
             } lifetime{gs};
-            upload(source.get(), inputs, count * inputStride);
+            upload(source.get(), inputs, sourceBytes);
             gs->EndRenderPass();
             auto *command = gs->GetCommandList().list4.get();
             command->SetComputeRootSignature(signature.get());
@@ -145,13 +150,13 @@ static int reflectionProbe(const void *inputs, uint32_t count, void *output, uin
             barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
             command->ResourceBarrier(1, &barrier);
-            command->CopyBufferRegion(readback.get(), 0, result.get(), 0, count * outputStride);
+            command->CopyBufferRegion(readback.get(), 0, result.get(), 0, resultBytes);
             gs->InvalidateCachedState();
             gs->ExecuteCommandList(true);
             void *mapped = nullptr;
-            const D3D12_RANGE range{0, count * outputStride};
+            const D3D12_RANGE range{0, resultBytes};
             check(readback->Map(0, &range, &mapped), "Read diagnostic transformed vertices");
-            std::memcpy(output, mapped, count * outputStride);
+            std::memcpy(output, mapped, resultBytes);
             const D3D12_RANGE empty{0, 0};
             readback->Unmap(0, &empty);
             passed = true;
@@ -168,12 +173,17 @@ static int reflectionProbe(const void *inputs, uint32_t count, void *output, uin
 extern "C" TF_HWGS_API int tf_gs_gpu_reflection_probe(const void *inputs, uint32_t count, void *output,
                                                       uint32_t outputCapacity, char *error, uint32_t errorCapacity)
 {
-    return reflectionProbe(inputs, count, output, outputCapacity, error, errorCapacity, false);
+    return reflectionProbe(inputs, count, output, outputCapacity, error, errorCapacity, 0);
 }
 
 extern "C" TF_HWGS_API int tf_gs_gpu_reflection_projection_probe(const void *inputs, uint32_t count, void *output,
                                                                  uint32_t outputCapacity, char *error,
                                                                  uint32_t errorCapacity)
 {
-    return reflectionProbe(inputs, count, output, outputCapacity, error, errorCapacity, true);
+    return reflectionProbe(inputs, count, output, outputCapacity, error, errorCapacity, 1);
+}
+extern "C" TF_HWGS_API int tf_gs_gpu_reflection_cull_probe(const void *inputs, uint32_t count, void *output,
+                                                         uint32_t outputCapacity, char *error, uint32_t errorCapacity)
+{
+    return reflectionProbe(inputs, count, output, outputCapacity, error, errorCapacity, 2);
 }

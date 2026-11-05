@@ -18,6 +18,11 @@ struct GrassRasterState
     std::array<std::array<int32_t, 4>, 2> scissor{}, offset{};
 };
 static_assert(sizeof(GrassRasterState) == 64);
+struct ReflectionRasterState
+{
+    std::array<std::array<int32_t, 4>, 4> scissor{}, offset{};
+};
+static_assert(sizeof(ReflectionRasterState) == 128);
 
 // GS-thread-only compute/draw component. Destroy Mesh/Batch handles before
 // their pool, and the pool before device shutdown or switching APIs.
@@ -101,6 +106,10 @@ class DualGeometry
     // sourceCount=count*2; config indices use 4*vertex+section (0..3).
     // Live ownership and source-derived frontend bounds belong to the caller.
     Batch prepareReflection(const void *inputs, uint32_t count);
+    // One 3..22 vertex strip, expanded after GPU GS culling. Each source
+    // triangle emits twelve native vertices: (triangle*3+corner)*4+section.
+    // For draw(), sourceCount=(count-2)*6. Upscaled, non-AA triangles only.
+    Batch prepareReflectionCulled(const void *inputs, uint32_t count, const ReflectionRasterState &raster);
     // Whole-mesh metadata from cached source bounds and the two transforms.
     // Chunks in this range must share matrices/bias. Does not map GPU output
     // or transform the mesh's vertices on the CPU.
@@ -122,6 +131,7 @@ class DualGeometry
     std::unique_ptr<Pipeline> m_groupedPipeline;
     std::unique_ptr<Pipeline> m_grassPipeline;
     std::unique_ptr<Pipeline> m_reflectionPipeline;
+    std::unique_ptr<Pipeline> m_reflectionCullPipeline;
     std::vector<std::shared_ptr<Page>> m_pages;
     std::size_t m_pageCursor = 0;
     std::vector<std::shared_ptr<Source>> m_sources;
@@ -130,6 +140,6 @@ class DualGeometry
     std::shared_ptr<Page> acquirePage(uint32_t uploadBytes, uint32_t outputBytes);
     Batch dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices, uint32_t constantsOffset,
                    const uint64_t *groupSources = nullptr, uint32_t groups = 0, bool grass = false,
-                   bool fieldMajor = false, bool reflection = false);
+                   bool fieldMajor = false, bool reflection = false, uint32_t reflectionCullCount = 0);
 };
 } // namespace tf_gpu

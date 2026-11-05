@@ -10,7 +10,8 @@ namespace gsnative
 enum class GeometryKind : uint32_t
 {
     DualTransform = 0,
-    GrassSprites = 1
+    GrassSprites = 1,
+    Reflection = 2
 };
 // Owned companion to one PATH1 packet. Version 1 contains complete raw GIF;
 // version 2 resolves only the CPU tail and requires source materialization for
@@ -27,6 +28,9 @@ struct alignas(16) DualPacket
 // Grass companions use eight sprites and the first 256 input bytes for their
 // emitter constants/scatter. Version 2 retains sprites 6,7 in the raw GIF.
 // The legacy type/API name and 1072-byte queue layout remain compatible.
+// Reflection uses at most 22 position/UV/normal source records. Its eleven
+// lighting vectors occupy inputs[720..895]; constants hold two matrices,
+// draw opacity and restart masks. No guest pointers or ABI size change.
 static_assert(sizeof(DualPacket) == 1072 && std::is_trivially_copyable_v<DualPacket>);
 using DualPacketPtr = std::shared_ptr<const DualPacket>;
 

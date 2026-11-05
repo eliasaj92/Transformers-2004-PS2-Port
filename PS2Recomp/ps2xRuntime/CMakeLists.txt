@@ -398,6 +398,7 @@ add_library(ps2_runtime STATIC
     src/lib/gs/gs_hw_present.cpp
     src/lib/gs/gs_native_dual_math.cpp
     src/lib/gs/gs_native_grass_math.cpp
+    src/lib/gs/gs_native_reflection_math.cpp
     src/lib/ps2_trainer.cpp
     src/lib/ps2_objectives.cpp
     src/lib/ps2_native_seam_probe.cpp
@@ -501,10 +502,10 @@ target_sources(ps2_runtime PRIVATE
     ${KERNEL_SRC_FILES}
 )
 if(MSVC)
-    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/gs/gs_native_grass_math.cpp src/lib/native/tf_dual_state.cpp
+    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/gs/gs_native_grass_math.cpp src/lib/gs/gs_native_reflection_math.cpp src/lib/native/tf_dual_state.cpp
         PROPERTIES COMPILE_OPTIONS "/fp:strict")
 else()
-    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/gs/gs_native_grass_math.cpp src/lib/native/tf_dual_state.cpp
+    set_source_files_properties(src/lib/gs/gs_native_dual_math.cpp src/lib/gs/gs_native_grass_math.cpp src/lib/gs/gs_native_reflection_math.cpp src/lib/native/tf_dual_state.cpp
         PROPERTIES COMPILE_OPTIONS "-frounding-math;-ffp-contract=off")
 endif()
 
