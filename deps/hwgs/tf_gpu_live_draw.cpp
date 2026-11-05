@@ -136,13 +136,15 @@ struct Live
                      "unique_source_hashes=%zu grouped_dispatches=%llu grouped_meshes=%llu packet_groups=%llu "
                      "group_packets=%llu group_declined=%llu merged_groups=%llu merged_packets=%llu "
                      "merged_draws=%llu merge_state_declined=%llu merge_feedback_declined=%llu "
-                     "merge_bounds_declined=%llu merge_output_declined=%llu\n",
+                     "merge_bounds_declined=%llu merge_output_declined=%llu "
+                     "staging_allocations=%llu staging_uploads=%llu staging_reuses=%llu staging_fallbacks=%llu\n",
                      packets + merged.packets, gpuDraws + merged.gpuDraws, cpuFallbacks + merged.materializations,
                      declinedFields + merged.ordinaryFields, sourceHits, noBounds, s.dispatches, s.meshUploads,
                      s.sourceUploadBytes, s.allocations, s.pageProbes, sourceDeclined, outputDeclined,
                      sourceHashes.size(), s.groupedDispatches, s.groupedMeshes, packetGroups, groupPackets,
                      groupDeclined, merged.groups, merged.packets, merged.gpuDraws, merged.stateDeclined,
-                     merged.feedbackDeclined, merged.boundsDeclined, merged.outputDeclined);
+                     merged.feedbackDeclined, merged.boundsDeclined, merged.outputDeclined,
+                     s.stagingAllocations, s.stagingUploads, s.stagingReuses, s.stagingFallbacks);
         std::fprintf(stderr,
                      "[gpu-grass:gs] packets=%llu gpu_draws=%llu cpu_materializations=%llu "
                      "declined_fields=%llu bounds_declined=%llu output_declined=%llu dispatches=%llu batches=%llu "

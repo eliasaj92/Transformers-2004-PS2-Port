@@ -6,6 +6,8 @@
 #include "GS/Renderers/DX11/D3D.h"
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -176,11 +178,94 @@ struct DualGeometry::Source
     }
 };
 
+struct DualGeometry::StagingPage
+{
+    static constexpr uint32_t Capacity = 1024 * 1024;
+    GSDevice12 &gs;
+    wil::com_ptr_nothrow<ID3D12Resource> buffer;
+    uint8_t *mapped = nullptr;
+    uint32_t used = 0;
+    uint64_t fence = 0;
+
+    explicit StagingPage(GSDevice12 &device) : gs(device)
+    {
+        buffer = makeBuffer(gs, Capacity, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
+                            D3D12_RESOURCE_FLAG_NONE);
+        const D3D12_RANGE noReads{0, 0};
+        void *address = nullptr;
+        check(buffer->Map(0, &noReads, &address), "Cannot map reusable native mesh staging page");
+        mapped = static_cast<uint8_t *>(address);
+    }
+
+    ~StagingPage()
+    {
+        buffer->Unmap(0, nullptr);
+        // Pool destruction may precede completion of its last queued upload.
+        // Retain the resource through the device's existing deferred release.
+        if (fence > gs.GetCompletedFenceValue())
+            gs.DeferObjectDestruction(buffer.get());
+    }
+};
+
 DualGeometry::DualGeometry(GSDevice12 &device, uint64_t budget, uint64_t meshBudget)
     : m_device(device), m_pipeline(std::make_unique<Pipeline>(device)), m_budget(budget), m_meshBudget(meshBudget)
 {
+    const char *setting = std::getenv("PS2X_TF_GPU_STAGING_POOL");
+    m_meshStagingEnabled = !setting || setting[0] != '0';
 }
 DualGeometry::~DualGeometry() = default;
+
+DualGeometry::StagingPage *DualGeometry::acquireMeshStaging(uint32_t bytes, uint32_t &offset)
+{
+    if (!m_meshStagingEnabled || bytes > StagingPage::Capacity)
+        return nullptr;
+    const uint64_t completed = m_device.GetCompletedFenceValue();
+    for (std::size_t n = 0; n < m_meshStaging.size(); ++n)
+    {
+        const std::size_t index = (m_meshStagingCursor + n) % m_meshStaging.size();
+        auto &page = m_meshStaging[index];
+        if (!page)
+            continue;
+        uint32_t start = (page->used + 255u) & ~255u;
+        if (bytes > StagingPage::Capacity - start)
+        {
+            if (page->fence > completed)
+                continue;
+            start = 0;
+            ++m_stats.stagingReuses;
+        }
+        // Appending to an unused, aligned range is safe even while the GPU
+        // reads earlier ranges. Only wrapping the page requires completion.
+        page->used = start + bytes;
+        offset = start;
+        m_meshStagingCursor = index;
+        return page.get();
+    }
+    for (std::size_t index = 0; index < m_meshStaging.size(); ++index)
+    {
+        auto &page = m_meshStaging[index];
+        if (page)
+            continue;
+        try
+        {
+            page = std::make_unique<StagingPage>(m_device);
+        }
+        catch (const std::exception &error)
+        {
+            // A small transient upload may still fit if a whole page cannot.
+            // Disable further page attempts to avoid repeated allocation stalls.
+            m_meshStagingEnabled = false;
+            std::fprintf(stderr, "[gpu-dual:staging] %s; using transient uploads\n", error.what());
+            return nullptr;
+        }
+        ++m_stats.stagingAllocations;
+        page->used = bytes;
+        offset = 0;
+        m_meshStagingCursor = index;
+        return page.get();
+    }
+    return nullptr; // All pages busy: preserve the original path without waiting.
+}
 
 std::shared_ptr<DualGeometry::Page> DualGeometry::acquirePage(uint32_t uploadBytes, uint32_t outputBytes)
 {
@@ -300,18 +385,37 @@ DualGeometry::Mesh DualGeometry::uploadMesh(const void *inputs, uint32_t vertice
         return {};
     source->buffer = makeBuffer(m_device, capacity, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST,
                                 D3D12_RESOURCE_FLAG_NONE);
-    auto staging = makeBuffer(m_device, capacity, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
-                              D3D12_RESOURCE_FLAG_NONE);
-    void *mapped = nullptr;
-    const D3D12_RANGE empty{0, 0}, written{0, size_t(vertices) * 32};
-    check(staging->Map(0, &empty, &mapped), "Cannot map native mesh staging upload");
-    std::memcpy(mapped, inputs, written.End);
-    staging->Unmap(0, &written);
+    const uint32_t uploadBytes = vertices * 32;
+    uint32_t stagingOffset = 0;
+    StagingPage *stagingPage = acquireMeshStaging(uploadBytes, stagingOffset);
+    wil::com_ptr_nothrow<ID3D12Resource> transient;
+    ID3D12Resource *staging;
+    if (stagingPage)
+    {
+        staging = stagingPage->buffer.get();
+        std::memcpy(stagingPage->mapped + stagingOffset, inputs, uploadBytes);
+    }
+    else
+    {
+        transient = makeBuffer(m_device, capacity, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
+                               D3D12_RESOURCE_FLAG_NONE);
+        void *mapped = nullptr;
+        const D3D12_RANGE empty{0, 0}, written{0, uploadBytes};
+        check(transient->Map(0, &empty, &mapped), "Cannot map native mesh staging upload");
+        std::memcpy(mapped, inputs, uploadBytes);
+        transient->Unmap(0, &written);
+        staging = transient.get();
+    }
     // Finish all potentially throwing host allocations before queuing GPU use.
     m_sources.push_back(source);
     m_device.EndRenderPass();
     auto *command = m_device.GetCommandList().list4.get();
-    command->CopyBufferRegion(source->buffer.get(), 0, staging.get(), 0, written.End);
+    command->CopyBufferRegion(source->buffer.get(), 0, staging, stagingOffset, uploadBytes);
+    if (stagingPage)
+    {
+        stagingPage->fence = m_device.GetCurrentFenceValue();
+        ++m_stats.stagingUploads;
+    }
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = source->buffer.get();
@@ -322,9 +426,13 @@ DualGeometry::Mesh DualGeometry::uploadMesh(const void *inputs, uint32_t vertice
     source->vertices = vertices;
     source->capacity = capacity;
     source->fence = m_device.GetCurrentFenceValue();
-    m_device.DeferObjectDestruction(staging.get());
+    if (!stagingPage)
+    {
+        m_device.DeferObjectDestruction(transient.get());
+        ++m_stats.stagingFallbacks;
+    }
     m_stats.meshBytes += capacity;
-    m_stats.sourceUploadBytes += written.End;
+    m_stats.sourceUploadBytes += uploadBytes;
     ++m_stats.meshUploads;
     Mesh mesh;
     mesh.source = std::move(source);

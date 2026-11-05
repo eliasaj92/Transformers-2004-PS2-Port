@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "tf_gpu_dual_bounds.h"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -42,6 +43,7 @@ class DualGeometry
     struct Page;
     struct Pipeline;
     struct Source;
+    struct StagingPage;
 
   public:
     class Mesh
@@ -72,6 +74,7 @@ class DualGeometry
     {
         uint64_t allocations = 0, reuses = 0, dispatches = 0, draws = 0, bytes = 0, pageProbes = 0;
         uint64_t meshUploads = 0, meshBytes = 0, sourceUploadBytes = 0, constantUploadBytes = 0;
+        uint64_t stagingAllocations = 0, stagingUploads = 0, stagingReuses = 0, stagingFallbacks = 0;
         uint64_t groupedDispatches = 0, groupedMeshes = 0;
         uint64_t grassDispatches = 0, grassBatches = 0;
         uint64_t reflectionDispatches = 0, reflectionVertices = 0, reflectionGroups = 0, reflectionPackets = 0;
@@ -93,7 +96,9 @@ class DualGeometry
     // must be contiguous, numbered from zero, and contain at most 28 vertices.
     // Handles are explicit: asset identity/invalidation belongs to the caller.
     // The bounded source pool evicts only released, completed meshes. Temporary
-    // staging is deferred through the upload fence; there is no forced GPU wait.
+    // staging uses disjoint ranges in mapped pages, recycled after their upload
+    // fences. Oversized/full-pool uploads retain the transient staging fallback.
+    // Neither path forces a GPU wait. PS2X_TF_GPU_STAGING_POOL=0 disables reuse.
     Mesh uploadMesh(const void *inputs, uint32_t vertices, uint32_t batches);
     // Reusing Mesh uploads only transform records, never source vertices.
     // First-source offsets must match the immutable chunk layout exactly.
@@ -154,9 +159,15 @@ class DualGeometry
     uint32_t m_reflectionUpload = 0, m_reflectionOutput = 0;
     std::size_t m_pageCursor = 0;
     std::vector<std::shared_ptr<Source>> m_sources;
+    // Eight 1 MiB pages bound retained staging to 8 MiB. Pages stay mapped;
+    // a range is never overwritten while any preceding copy can still read it.
+    std::array<std::unique_ptr<StagingPage>, 8> m_meshStaging;
+    std::size_t m_meshStagingCursor = 0;
+    bool m_meshStagingEnabled = true;
     uint64_t m_budget, m_meshBudget;
     Stats m_stats;
     std::shared_ptr<Page> acquirePage(uint32_t uploadBytes, uint32_t outputBytes);
+    StagingPage *acquireMeshStaging(uint32_t bytes, uint32_t &offset);
     Batch dispatch(std::shared_ptr<Page> page, uint64_t sourceAddress, uint32_t vertices, uint32_t constantsOffset,
                    const uint64_t *groupSources = nullptr, uint32_t groups = 0, bool grass = false,
                    bool fieldMajor = false, bool reflection = false, uint32_t reflectionCullGroups = 0,
