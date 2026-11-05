@@ -1,5 +1,12 @@
 # Pacing versus processing diagnosis — 2026-11-05
 
+The current `game-66` measurement still uses a 60 Hz runtime ceiling. Its
+59.28 deliveries/s is not an uncapped-capacity measurement. See the
+[current-build audit](#current-build-audit-after-the-staging-pool-test) for the
+source trace, the movement/stationary split and a new analysis of saved samples.
+The relaxed-cap benchmarks below are historical `game-62` results, not new tests
+of the logging fix or staging pool.
+
 The approximately 58 FPS result has two causes. The CPU production pipeline has
 little throughput above 60 updates/s, and the independent 60 Hz host poll loses
 or delays some of the frames it produces. Relaxing caps does not reveal 120 FPS
@@ -370,3 +377,133 @@ correct unlocked gameplay, stable whole-level 60, or full-campaign reliability.
 | `level-host-pacing-relaxed-02` | 1.0090x | 60.480 | 60.473 | 60.473 | 62.502 | 24.641 | 21.440 |
 | `level-host-pacing-capped-03` | 1.0238x | 61.367 | 61.364 | 58.649 | 43.184 | 22.036 | 33.334 |
 | `level-host-pacing-relaxed-03` | 1.0086x | 60.454 | 60.453 | 60.452 | 63.554 | 23.051 | 21.315 |
+
+## Current-build audit after the staging-pool test
+
+This audit launched no game, benchmark, profiler or compilation. It reads the
+`game-66` level measurement, the previous detailed `game-64` profile, the
+historical relaxed-cap evidence above, and the implementation. The private
+analysis and input hashes are in `frame-critical-path-audit-01.json`; the
+read-only analyzer is `audit-frame-critical-path-01.py`.
+
+### The latest measurement deliberately retains a runtime ceiling
+
+`launch/enhanced_env.txt` sets `PS2X_REALTIME=1` and
+`PS2X_REALTIME_HZ=60`. The actual `game-66` log confirms
+`cap ON (PS2X_REALTIME) fieldUs=16666.7 (NTSC) catchUpMs=50`.
+`EeScheduler::processDueDeadlines` gates a field on both guest cycle progress
+and its host deadline. The next deadline advances by the configured field
+period, with at most 50 ms of catch-up debt. This is an average pacing ceiling,
+not a minimum 16.667 ms gap between every pair of outputs.
+
+`tfFrameSync` retains the guest next-field wait in native60 mode. Each
+`HardwareGS::RawVsync` publishes one output. Rendering is still tied to guest
+field production; turning off the host FPS cap does not detach rendering from
+that clock. `fps_cap=off` applies `SetTargetFPS(0)`, and `PS2X_PRESENT_RATE=60`
+selects output fields rather than overriding the runtime ceiling.
+
+The frame-ready acquisition waits only if no new output is available. It wakes
+on notification immediately; 16667 microseconds is its timeout, not a sleep
+charged to every frame. In the latest run, publication-to-host acquisition
+averaged **0.0195 ms**, with **0.267 ms p99**, **0.819 ms maximum**, and no skipped
+submissions. There is no evidence here that host acquisition is the limiting
+stage. These are host handoffs, not GPU-completion or physical scanout times.
+
+### The whole-route average hides lower throughput during movement
+
+The same `game-66` trace was divided by the script's fixed field ranges. No new
+run was needed. Rates use timestamp differences within each range; the interval
+crossing each range boundary is excluded.
+
+| Route portion | Fields | Deliveries | Deliveries/s | Delivery p99 ms |
+| --- | --- | ---: | ---: | ---: |
+| Forward movement | 2697–2876 | 180 | 55.260 | 21.442 |
+| Pause before camera turn | 2877–2996 | 120 | 56.321 | 22.574 |
+| Camera turn | 2997–3176 | 180 | 57.752 | 21.357 |
+| Stationary after turn | 3177–4976 | 1800 | 60.082 | 20.897 |
+
+The final portion's slight excess over 60 is consistent with bounded catch-up
+and interval boundaries; it is not evidence of sustained unlocked headroom.
+The 59.28 whole-route average is dominated by the 1800 stationary fields. The
+movement and camera segments establish that this short route is not delivering
+smooth 60 throughout, even though most of its duration approaches the cap.
+
+### CPU production, including the CPU side of GPU offloading
+
+The saved detailed `game-64` profile measured the hardware-renderer worker at
+95.875% of one CPU core, averaging **16.372 ms of CPU time per output**, with
+only **0.513 ms input-queue idle time**. CPU clock readings are quantized per
+frame; these aggregates are meaningful, individual per-frame CPU readings are
+not. The separate older OS-clock measurement also found the VU worker at 98.51%
+of a core and EE at 91.58%, with EE-to-VU capacity waits measured separately.
+These workers overlap; their times must not be added into a serial frame cost.
+
+New grouping of 15,396 saved renderer leaf samples across 1,744 complete
+production intervals gives the following distribution. The symbols come from
+the existing byte-matched renderer map. These are statistical elapsed-time
+estimates, not instrumented inclusive function durations or removable budgets.
+
+| Renderer work category | Sample share | Estimated elapsed ms/output |
+| --- | ---: | ---: |
+| CPU preparation, validation and bounds for native GPU geometry | 29.45% | 5.06 |
+| Draw setup and device/texture commands | 17.56% | 3.02 |
+| Texture cache, palettes and guest VRAM handling | 13.57% | 2.33 |
+| Graphics driver CPU work or internal waits | 12.01% | 2.06 |
+| GIF decoding and GS state | 9.28% | 1.59 |
+| Other renderer/runtime, copies, wait leaves and allocation leaves | 18.13% | 3.12 |
+
+These timings precede the logging fix and staging pool; they do not establish
+the exact current-build cost of any one function. They do show substantial
+CPU work remains around the offloaded geometry. GPU transforms do not replace
+packet qualification, conservative bounds, GS state/texture tracking, fallback
+reconstruction and draw submission.
+
+Current `game-66` periodic summaries spanning the measured route record roughly
+5.46 million grass bounds queries, 4.12 million native reflection-path draw
+submissions, and only 165 new immutable source uploads. These are deltas between
+periodic reports before the markers, not exact marker-time counters. Reflection
+compute is grouped, but `drawReflectionPacket` still processes four sections
+with state prefixes, indices, trace preparation and native draw calls per
+packet. Its `gpu_draws` counts successful native submissions, not a measured
+count of low-level API draw commands. The staging pool addresses a comparatively
+infrequent operation and does not remove this steady CPU workload.
+
+### Locate the wait before choosing another allocation optimization
+
+Pairing the existing direct-publication call's start/end records gives
+**0.443 ms mean**, **1.115 ms p99** and **2.831 ms maximum**. Its mean splits
+into 0.289 ms before the worker callback reaches its publication marker,
+0.041 ms to the GPU query record, and 0.114 ms from that record to caller return.
+This does not explain the earlier 25–27 ms renderer intervals. Most of their
+work occurred while processing frame commands before the final publication.
+
+There are distinct waits in the implementation:
+
+- Host frame-ready wait: downstream waiting for a producer, not an independent
+  60 Hz sleep once the host cap is off.
+- EE-to-VU queue/fence waits: upstream work depends on the busy VU worker.
+- Renderer queue throttling: bounds producer lead; increasing it can add latency
+  without increasing the consumer's processing capacity.
+- D3D12 resource reuse: `ExecuteCommandList(WaitType::None)` still calls
+  `MoveToNextCommandList`, which waits if its next allocator's fence is pending.
+  Texture upload stream exhaustion also calls `WaitForFence`. The absence of
+  an explicit submission-completion wait does not make every submission
+  nonblocking.
+- Cross-API presentation release uses `ID3D12CommandQueue::Wait`, which queues
+  a GPU-side dependency and returns to the CPU. It differs from the CPU event
+  waits above. [Microsoft's API documentation](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12commandqueue-wait)
+
+The older sampled driver allocation/CPU-sync stalls are real leads, but their
+resource caller was not captured. The staging result does not identify that
+caller. The 11–12 ms publication-to-GPU-completion interval overlaps pipeline
+work and includes queued work; it is not 11–12 ms of removable CPU idle time.
+
+The recommendation remains to obtain CPU production headroom, not remove more
+presentation waits or alter the simulation timestep. A smallest useful next
+attribution experiment is one buffered call-site profile of native geometry
+preparation/draw submission and D3D12 allocation, stream-space and command-list
+reuse waits, tagged to renderer intervals. Preserve the already-correct fallback
+and fence ordering. Report the critical caller and its cost before implementing
+another optimization; leaf frequency alone is insufficient. A future relaxed
+runtime-cap measurement would be isolated throughput testing, potentially
+speeding up game time, and would not establish correct higher-FPS gameplay.
