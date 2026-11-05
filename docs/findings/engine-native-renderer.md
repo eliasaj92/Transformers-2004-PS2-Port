@@ -1,11 +1,13 @@
 # Engine-level native renderer
 
-Direction updated 2026-11-05 following the user's request for a general native
-rendering architecture and headroom above 60 fps. This supersedes further
-grass/packet micro-optimizations as the next priority. This document records
-source inspection and the proposed first prototype; it is not an implemented
-native scene renderer or a new performance claim. No game was launched for this
-investigation.
+Updated 2026-11-05 following the user's request for a general native rendering
+architecture and headroom above 60 fps. This supersedes further grass/packet
+micro-optimizations. The first offscreen whole-mesh prototype is now implemented:
+an original Amazon rock and its named texture render through a shared native
+mesh/material/snapshot interface, with no GS frontend. Four 1080p diagnostic
+views passed in one Release D3D12 probe invocation. No game was launched.
+See [implementation and evidence](../../deps/native_renderer/README.md).
+Live engine integration and any performance gain remain unproven.
 
 ## The boundary must move upstream
 
@@ -116,18 +118,20 @@ The private audit is `C:/Users/dounh/tf-work/engine-native-seam-audit-01.json`.
 
 ## First prototype and acceptance
 
-The next substantial implementation is a complete non-grass rigid-mesh draw
-through the shared mesh/material/snapshot interface. First recover a coherent
-mesh submission and its effective context, source textures and reference output,
-using existing evidence where sufficient. If a new capture is necessary, make
-one bounded enhanced, windowed, cutscene-skipping level capture; it is a
-correctness capture, not a benchmark or a test of the original build.
+The implemented first stage imports the entire authored `ROCK_J3.VBIN` mesh and
+its explicit `Jungle_Cliff` texture binding from the private USA disc. It owns all
+87 vertices/168 triangles and reuses persistent GPU buffers across camera/model
+updates. Its 1080p native shader output passes independent projection, texture,
+clipping and depth checks. This establishes the replacement interface without
+another game capture. It does not recover a live effective shader context or
+claim a match to a captured game frame.
 
-Render that owned submission to an offscreen native D3D12 color/depth target,
-using persistent source buffers and a native vertex/pixel shader. Compare its
-projection, clipping, depth, material and textured pixels with the matching
-captured reference. Only then integrate the pass and suppress the corresponding
-guest submission with its required state/ordering preserved.
+Before live integration, recover one coherent non-grass submission and its
+effective camera/material state. Compare against its matching captured reference
+and establish shared target/depth ownership. Only then suppress the corresponding
+guest submission with its required state/ordering preserved. If new evidence is
+needed, use one bounded enhanced, windowed, cutscene-skipping level capture;
+this is correctness work, not a benchmark or a test of the original build.
 
 Acceptance requires a textured non-grass mesh, reuse across camera/transform
 updates, matching topology/material/depth behavior, and no VIF/VU/GIF/GS frontend
